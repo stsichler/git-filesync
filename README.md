@@ -26,10 +26,26 @@ $ git filesync pull src/foo.c
 
 Helper modules, build scripts or configuration files often live in several
 repositories at once. Copying them by hand works – until nobody knows which
-copy is current and the history of the changes is lost. Submodules and
-subtrees only handle whole repositories or directories. git-filesync links
+copy is current and the history of the changes is lost. git-filesync links
 **single files**, tells you when a copy is behind, and syncs it with a
 meaningful commit.
+
+### Compared to Git submodules
+
+| | Git submodules | git-filesync |
+|---|---|---|
+| Unit | a whole repository, in its own directory | single files, each at any path in your repository |
+| What your repository contains | a pointer to a commit in the other repository | a real copy of the file, committed like any other file |
+| Local changes | made and committed in the other repository | allowed in your repository as committed adaptations, kept on every sync by a 3-way merge – or forbidden per file (`strict`) |
+| Cloning and building | needs `--recurse-submodules` and access to every submodule repository | a plain clone is complete and works on its own, even if a master repository is no longer reachable |
+| Updating | moves the pointer; your log shows only the new commit id | `pull` per file; the commit contains the actual change and lists the master commits it brings |
+| For everyone else | `git submodule update` after clones, pulls and branch switches | nothing – only whoever syncs needs git-filesync |
+
+Submodules remain the better choice when you want a whole repository
+unchanged and work on it directly; git-filesync fits when a few files are
+shared, may differ slightly per repository, and your repository should stay
+self-contained. (`git subtree` also copies content, but always a whole
+directory, and it has no per-file view of what is behind or adapted.)
 
 ## Features
 
