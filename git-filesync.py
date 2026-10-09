@@ -20,31 +20,87 @@ repository:
         commit = <master commit of the last sync>
         blob = <blob id of the master's file at that commit>
 
-Commands (run inside the slave repository):
-    status [-s] [-v] [PATH...] state like `git status`: upstream changes to sync,
-                               committed adaptations, uncommitted changes
-    pull   [FILE...|--all]     sync files from master, propose commit message
-                               (refuses uncommitted changes; --autostash)
-    diff   [--upstream|--committed] [FILE...] [-- OPTS]
-                               local changes vs. the synced master version
-                               (--committed: adaptations only; --upstream:
-                               what 'pull' would bring)
-    difftool [--upstream] [FILE...]   same in the configured difftool
-    add    FILE URL|SOURCE     link a file to a file in a master repository
-                               (--strict: file must stay an exact copy)
-    unlink FILE...             remove links (the files are kept)
-    mv     OLD NEW             move a linked file, keeping its link
-    map    [URL [DIR]]         use a local checkout instead of fetching URL
-                               (this repo's config; --global for all repos)
-    install-hooks              install pre-push/post-merge reminder hooks
-    uninstall-hooks            remove them again
+A link records the master version the file is based on (commit/blob);
+local adaptations on top of it are allowed and kept by a 3-way merge on
+pull, unless the file is marked strict.
+
+Commands (run inside the slave repository; without a command: status).
+PATH may be a file or a directory (= all linked files below it); options
+follow the command.
+
+    status [PATH...]            state of the linked files like `git status`:
+                                upstream changes to sync, committed
+                                adaptations, uncommitted changes
+        -s, --short             short format: upstream/committed/worktree
+                                columns
+        -v, --verbose           also list all linked files with their sources
+        --exit-code             exit 1 if something is to sync or a strict
+                                file is modified
+        --hook                  terse output on stderr (for git hooks)
+
+    pull PATH... | --all        sync to the master's version of the file and
+                                commit with a message listing the master
+                                commits since the last sync; adaptations are
+                                merged, uncommitted changes refused
+        --all                   all files with something to sync
+        --commit REV            sync to this master revision (one file;
+                                also backwards)
+        --overwrite             discard local adaptations instead of merging
+        --autostash             set uncommitted changes aside, re-apply after
+        --no-edit               commit without opening the editor
+        --no-commit             only stage; print the commit command
+
+    diff [PATH...] [-- OPTS]    local changes vs. the synced master version
+                                (one `git diff`, OPTS passed to it)
+        --committed             only committed adaptations (synced -> HEAD)
+        --upstream              what pull would bring (synced -> master)
+        --master-paths          master paths, for `git apply -3` in the master
+
+    difftool [PATH...] [-- OPTS]  the same in the configured difftool
+        --committed, --upstream as for diff
+        -y, --no-prompt         don't ask before each file (default: ask if
+                                no files are given)
+        --prompt                ask even for explicitly given files
+
+    add FILE URL|SOURCE         link FILE to a file in a master repository
+                                (URL or name of a [source]); an existing FILE's
+                                master version is detected, a missing FILE
+                                is fetched; changes are staged
+        -b, --branch BRANCH     master branch (default: master's default
+                                branch or that of SOURCE)
+        -p, --path PATH         path in the master (default: same as FILE)
+        --commit REV            master revision FILE corresponds to
+        --strict                FILE must stay an exact copy
+        --force                 relink an already linked file
+
+    unlink PATH...              remove links (the files are kept)
+    mv OLD NEW                  move a linked file (git mv), keeping its link
+
+    map [URL [DIR]]             use the local checkout DIR instead of fetching
+                                URL; its branch is used, unpushed commits
+                                included; without DIR: list mappings
+        --global                global git config (default: this repository)
+        --unset                 remove the mapping for URL
+
+    install-hooks               install pre-push/post-merge reminder hooks
+    uninstall-hooks             remove them again
+
+    Common options:
+        --no-fetch              use the cached state, don't fetch (status,
+                                pull, diff, difftool, add)
+        --remote                ignore local checkout mappings (same commands)
+        --color[=WHEN], --no-color  always, never or auto (default)
+
+Exit codes: 0 ok, 1 unfinished (conflicts, not committed, --exit-code),
+2 error.
 
 Files stored in Git LFS (in the master, the slave, both or neither) are
-handled transparently. Output is colored like git's (color.filesync /
-color.ui, --color, NO_COLOR).
+handled transparently, as are differing line-ending conventions. Output is
+colored like git's (color.filesync / color.ui, --color, NO_COLOR).
 
 Requires Python >= 3.7 and Git >= 2.26 (git-lfs for LFS files).
 Works on Linux, macOS and Windows.
+Manual: https://github.com/stsichler/git-filesync/blob/main/MANUAL.md
 """
 
 import argparse
@@ -1618,7 +1674,8 @@ def main(argv=None):
     colorp = argparse.ArgumentParser(add_help=False)
     colorp.add_argument("--color", nargs="?", const="always", default="auto",
                         choices=["always", "never", "auto"], help="colored output (default: auto)")
-    colorp.add_argument("--no-color", dest="color", action="store_const", const="never")
+    colorp.add_argument("--no-color", dest="color", action="store_const", const="never",
+                        help="same as --color=never")
     common = argparse.ArgumentParser(add_help=False, parents=[colorp])
     common.add_argument("--no-fetch", action="store_true",
                         help="do not fetch master repositories, use cached state")
@@ -1626,7 +1683,9 @@ def main(argv=None):
                         help="ignore local checkout mappings, use the remote URL")
 
     ap = argparse.ArgumentParser(prog="git filesync",
-                                 description="Keep single files in sync between Git repositories.")
+                                 description="Keep single files in sync between Git repositories.",
+                                 epilog="Without a command: status. "
+                                        "'git filesync <command> -h' lists the options of a command.")
     ap.add_argument("--version", action="version", version=f"git-filesync {__version__}")
     sub = ap.add_subparsers(dest="cmd")
 
@@ -1641,9 +1700,9 @@ def main(argv=None):
     p.add_argument("--hook", action="store_true", help="terse output for git hooks")
 
     p = sub.add_parser("pull", parents=[common], help="sync file(s) from master")
-    p.add_argument("files", nargs="*")
-    p.add_argument("--all", action="store_true", help="sync all files with pending changes")
-    p.add_argument("--commit", metavar="REV", help="sync to this master revision instead of the branch head")
+    p.add_argument("files", nargs="*", help="files or directories")
+    p.add_argument("--all", action="store_true", help="sync all files with something to sync")
+    p.add_argument("--commit", metavar="REV", help="sync to this master revision (exactly one file)")
     p.add_argument("--no-edit", action="store_true", help="commit without opening the editor")
     p.add_argument("--no-commit", action="store_true", help="only stage; print commit command")
     p.add_argument("--overwrite", action="store_true",
@@ -1671,10 +1730,10 @@ def main(argv=None):
                            help="ask before each file even if files are given")
 
     p = sub.add_parser("add", parents=[common], help="link a file to a file in a master repository")
-    p.add_argument("file")
+    p.add_argument("file", help="file in this repository (fetched from master if missing)")
     p.add_argument("source", metavar="URL|SOURCE", help="master URL or name of a [source] in "
                    + REGISTRY)
-    p.add_argument("-b", "--branch", help="master branch (default: remote HEAD)")
+    p.add_argument("-b", "--branch", help="master branch (default: remote HEAD, or the branch of SOURCE)")
     p.add_argument("-p", "--path", help="path in master repo (default: same as here)")
     p.add_argument("--commit", metavar="REV", help="master revision the local file corresponds to")
     p.add_argument("--force", action="store_true", help="relink an already linked file")
@@ -1682,17 +1741,17 @@ def main(argv=None):
                    help="file must stay an exact copy (no local modifications)")
 
     p = sub.add_parser("unlink", parents=[colorp], help="remove links (the files are kept)")
-    p.add_argument("files", nargs="+")
+    p.add_argument("files", nargs="+", help="files or directories")
 
     p = sub.add_parser("mv", parents=[colorp], help="move a linked file, keeping its link")
-    p.add_argument("src")
-    p.add_argument("dst")
+    p.add_argument("src", metavar="OLD", help="linked file")
+    p.add_argument("dst", metavar="NEW", help="new path or existing directory")
 
     p = sub.add_parser("map", parents=[colorp], help="use a local checkout for a master URL "
                                                      "(this repo's config; --global for all repos)")
-    p.add_argument("url", nargs="?")
-    p.add_argument("dir", nargs="?")
-    p.add_argument("--unset", action="store_true")
+    p.add_argument("url", nargs="?", help="master URL (without DIR: list its mappings)")
+    p.add_argument("dir", nargs="?", help="local checkout of the master")
+    p.add_argument("--unset", action="store_true", help="remove the mapping for URL")
     p.add_argument("--global", dest="glob", action="store_true",
                    help="use the global git config instead of this repository's")
 
