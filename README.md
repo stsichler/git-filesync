@@ -160,6 +160,10 @@ file. Git-config format:
   edited by hand, e.g. when a file was renamed in the master:
   `git config -f .git-filesync file.src/foo.c.path lib/new_name.c`.
 - When the last link is removed, the file is deleted.
+- File paths must lie inside the working tree. Entries pointing outside it
+  (`..`, absolute paths) or into a `.git` directory are reported as errors
+  and never written – a cloned repository's `.git-filesync` can't make
+  `pull` touch other files.
 
 Because all links share one file, a sync commit must not pick up uncommitted
 entries of *other* files (that commit would record their new state without
@@ -285,6 +289,8 @@ Some files should stay exact copies. Mark them with `add --strict` or
 git config -f .git-filesync file.src/foo.c.strict true
 ```
 
+(As everywhere in git config, a bare `strict` without a value means true.)
+
 For a strict file, adaptations as well as uncommitted changes are reported
 as a violation: `status` marks them `NOT ALLOWED: strict` (`-s`: `(strict!)`,
 `--exit-code`: 1), the hooks report it, and `pull` refuses to merge (other
@@ -407,10 +413,12 @@ jobs:
 - `--commit` accepts branch names (`develop` means the master's current
   `develop`), tags and commit ids.
 - Offline: with a mapped local checkout, all commands work without network
-  access (`add` takes the default branch from the checkout). Without a
-  mapping, the cache is used after a failed fetch; file versions never read
-  before may be missing there (blobless clone). `--no-fetch` skips the
-  network explicitly.
+  access (`add` takes the default branch from the checkout's `origin/HEAD`,
+  or – with a warning if the checkout has a remote – from the branch checked
+  out there). Without a mapping, the cache is used after a failed fetch; file
+  versions never read before may be missing there (blobless clone): `status`
+  then warns and counts the file as modified, `pull --overwrite` brings it
+  back to a known state. `--no-fetch` skips the network explicitly.
 - Exit codes: `0` ok, `1` unfinished (`pull` with conflicts or without
   commit; `status --exit-code` with something to sync or a strict violation;
   `diff -- --exit-code` with differences), `2` error.
@@ -427,7 +435,8 @@ test/regress.sh            # Linux/macOS (bash); needs git, python3, git-lfs for
 The script builds throwaway master/slave repositories in a temp directory
 and checks linking, status, pull, merge, conflicts, diff / difftool, strict
 files, `.git-filesync` handling (sources, unlink, mv, commit consistency),
-local checkout mappings, offline operation, eol handling (autocrlf /
+unsafe registry entries, wildcard characters in file names, local checkout
+mappings, offline operation, eol handling (autocrlf /
 text=auto / plain), Git LFS in all combinations, colors and hooks. It runs on
 every push via GitHub Actions.
 

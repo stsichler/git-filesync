@@ -55,7 +55,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 __version__ = "0.1.0"
@@ -148,6 +148,19 @@ def git(args, cwd=None, data=None, check=True, env=None):
 
 def out(p):
     return p.stdout.decode("utf-8", "replace").strip()
+
+
+def lit(path):
+    """Pathspec matching exactly this path: no wildcards, no magic. Not via
+    GIT_LITERAL_PATHSPECS, which would leak into hooks run by `git commit`."""
+    return f":(literal){path}"
+
+
+def cmd_arg(path):
+    """A path as pathspec argument in a git command shown to the user."""
+    if re.search(r"[*?\[\\]|^:", path):
+        path = lit(path)
+    return path if re.fullmatch(r"[\w./@+-]+", path) else f'"{path}"'
 
 
 def norm_url(url):
@@ -253,7 +266,7 @@ class Source:
                                   "refs/remotes/"])))
 
     def has_uncommitted(self, path):
-        return self.git(["diff", "--quiet", "HEAD", "--", path],
+        return self.git(["diff", "--quiet", "HEAD", "--", lit(path)],
                         check=False).returncode == 1
 
     def resolve(self, rev=None):
@@ -271,9 +284,14 @@ class Source:
         return None
 
     def blob_at(self, commit, path):
-        p = self.git(["rev-parse", "--verify", "--quiet", f"{commit}:{path}"],
-                     check=False)
-        return out(p) if p.returncode == 0 else None
+        """Blob id of the file at path, None if there is none (or a directory).
+        ls-tree needs no blobs, so nothing is fetched in the blobless cache."""
+        p = self.git(["ls-tree", "-z", "--full-tree", commit, "--", lit(path)], check=False)
+        for entry in p.stdout.decode("utf-8", "replace").split("\0"):
+            info, _, name = entry.partition("\t")
+            if name == path and info.split(" ")[1:2] == ["blob"]:
+                return info.split(" ")[2]
+        return None
 
     def read_blob(self, oid):
         """Raw blob - an LFS pointer for files stored in LFS."""
@@ -294,15 +312,15 @@ class Source:
                         check=False).returncode == 0
 
     def count(self, old, new, path):
-        return int(out(self.git(["rev-list", "--count", f"{old}..{new}", "--", path])))
+        return int(out(self.git(["rev-list", "--count", f"{old}..{new}", "--", lit(path)])))
 
     def log(self, rng, path):
-        return out(self.git(["log", "--reverse", "--format=- %s (%h)", rng, "--", path]))
+        return out(self.git(["log", "--reverse", "--format=- %s (%h)", rng, "--", lit(path)]))
 
     def path_history(self, path, max_count):
         """[(commit, blob id)] of commits on the branch touching path, newest first."""
         revs = out(self.git(["rev-list", f"--max-count={max_count}",
-                             self.ref, "--", path])).split()
+                             self.ref, "--", lit(path)])).split()
         if not revs:
             return []
         data = "".join(f"{r}:{path}\n" for r in revs).encode()
@@ -353,13 +371,20 @@ class Context:
         when possible (works offline), otherwise asked from the server."""
         local = self.local_path(url)
         if local:
-            for ref in ("refs/remotes/origin/HEAD", "HEAD"):
+            def symref(ref):
                 p = git(["-C", local, "symbolic-ref", "--short", ref], env=clean_env(), check=False)
-                if p.returncode == 0:
-                    b = out(p)
-                    return b[len("origin/"):] if b.startswith("origin/") else b
+                return out(p) if p.returncode == 0 else None
+            b = symref("refs/remotes/origin/HEAD")
+            if b:
+                return b[len("origin/"):] if b.startswith("origin/") else b
+            b = symref("HEAD")    # only a guess if the checkout has a remote
+            if b:
+                if out(git(["-C", local, "remote"], env=clean_env(), check=False)):
+                    warn(f"default branch of {url} unknown in {local} (origin/HEAD not set); "
+                         f"using its checked-out branch '{b}' - use --branch to choose")
+                return b
         if self.fetch:
-            p = git(["ls-remote", "--symref", url, "HEAD"], env=clean_env(), check=False)
+            p = git(["ls-remote", "--symref", "--", url, "HEAD"], env=clean_env(), check=False)
             m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD", out(p), re.M)
             if m:
                 return m.group(1)
@@ -399,7 +424,7 @@ class Context:
             tmp = d.with_name(f"{d.name}.tmp{os.getpid()}")
             print(paint(f"Cloning {url} (blobless) ...", "dim", "err"), file=sys.stderr)
             try:
-                git(["clone", "--bare", "--quiet", "--filter=blob:none", url, tmp], env=env)
+                git(["clone", "--bare", "--quiet", "--filter=blob:none", "--", url, tmp], env=env)
                 git(["-C", tmp, "config", "remote.origin.fetch",
                      "+refs/heads/*:refs/remotes/origin/*"], env=env)
                 git(["-C", tmp, "fetch", "--quiet", "origin"], env=env)
@@ -512,7 +537,9 @@ def parse_registry(raw):
     for item in raw.decode("utf-8", "replace").split("\0"):
         if not item:
             continue
-        key, _, val = item.partition("\n")
+        key, has_val, val = item.partition("\n")
+        if not has_val:
+            val = "true"     # a key without '= value' is a boolean true in git config
         sect, _, rest = key.partition(".")
         sub, _, name = rest.rpartition(".")
         if sect == "source" and sub:
@@ -520,6 +547,22 @@ def parse_registry(raw):
         elif sect == "file" and sub:
             files.setdefault(sub, {})[name] = val
     return sources, files
+
+
+def path_problem(rel):
+    """Why rel can't be a linked file, None if it can. Entries come from a
+    committed file, possibly written by others: a pull must never write
+    outside the working tree or into a .git directory."""
+    parts = re.split(r"[/\\]", rel)
+    if not rel or "\n" in rel or PureWindowsPath(rel).anchor or ".." in parts:
+        return "not a path inside the working tree"
+    if any(p in ("", ".") for p in parts):
+        return "not a normalized path"
+    if any(p.lower().rstrip(". ") == ".git" for p in parts):
+        return "inside a .git directory"
+    if rel == REGISTRY:
+        return f"{REGISTRY} itself"
+    return None
 
 
 class Registry:
@@ -610,6 +653,9 @@ class Link:
 
     @property
     def target(self):
+        problem = path_problem(self.rel)
+        if problem:
+            raise FsError(f"'{self.rel}' in {REGISTRY}: {problem}")
         return self.reg.slave.top / self.rel
 
     @property
@@ -667,20 +713,30 @@ def local_equiv(slave, src, blob, rel, path):
         return None
 
 
+class BaseUnavailable(FsError):
+    pass
+
+
 def matches_base(slave, src, link, oid, read):
     """Does a slave blob (id oid; read() returns its raw bytes) equal the
-    synced master version, i.e. the base recorded in .git-filesync?"""
+    synced master version, i.e. the base recorded in .git-filesync?
+    Raises BaseUnavailable if that version can't be read."""
     if oid == link.blob:
         return True
+    if not link.blob:
+        return False
     try:
         ptr = lfs_pointer(src.read_blob(link.blob))
-    except FsError:
-        ptr = None
-    if ptr:   # master stores it in LFS: compare against the pointer's hash first
-        data = read()
-        if (hashlib.sha256(data).hexdigest(), len(data)) == ptr or lfs_pointer(data) == ptr:
-            return True
-    return oid == local_equiv(slave, src, link.blob, link.rel, link.path)
+        if ptr:   # master stores it in LFS: compare against the pointer's hash first
+            data = read()
+            if (hashlib.sha256(data).hexdigest(), len(data)) == ptr or lfs_pointer(data) == ptr:
+                return True
+        return oid == slave.as_local(src.read_content(link.blob, link.path), link.rel)
+    except BaseUnavailable:
+        raise
+    except FsError as e:
+        raise BaseUnavailable(f"synced version {link.blob[:12]} not available in "
+                              f"{src.label}, file counts as modified ({e})")
 
 
 def evaluate(ctx, slave, link):
@@ -698,6 +754,11 @@ def evaluate(ctx, slave, link):
                          committed=None, worktree="clean", head_blob=None,
                          changed=False, pending=False, strict=link.strict, violation=False)
     url, branch, path = link.url, link.branch, link.path
+    problem = path_problem(link.rel)
+    if problem:
+        st.error = (f"{problem} - entry ignored; remove it with "
+                    f"'git config -f {REGISTRY} --remove-section \"file.{link.rel}\"'")
+        return st
     if not (url and branch and path):
         st.error = f"incomplete entry in {REGISTRY} (needs source with url and branch, and path)"
         return st
@@ -706,24 +767,33 @@ def evaluate(ctx, slave, link):
     except FsError as e:
         st.error = str(e)
         return st
+
+    def base_matches(oid, read):
+        try:
+            return matches_base(slave, src, link, oid, read)
+        except BaseUnavailable as e:
+            if str(e) not in st.warnings:
+                st.warnings.append(str(e))
+            return False
     try:
         cur = slave.worktree_blob(link.target)
         p = slave.git(["rev-parse", "--verify", "-q", f"HEAD:{link.rel}"], check=False)
         head = st.head_blob = out(p) if p.returncode == 0 else None
         if head:
-            st.committed = "unmodified" if matches_base(
-                slave, src, link, head, lambda: slave.read_blob(head)) else "adapted"
+            st.committed = "unmodified" if base_matches(
+                head, lambda: slave.read_blob(head)) else "adapted"
         if cur is None:
             st.worktree = "deleted" if head else "missing"
         elif not head:
             st.worktree = "added"
-        elif slave.git(["diff", "--quiet", "HEAD", "--", link.rel], check=False).returncode == 1:
+        elif slave.git(["diff", "--quiet", "HEAD", "--", lit(link.rel)],
+                       check=False).returncode == 1:
             st.worktree = "modified"
         if cur is None:
             st.local = "missing"
         elif st.worktree == "clean":
             st.local = "clean" if st.committed == "unmodified" else "modified"
-        elif matches_base(slave, src, link, cur, link.target.read_bytes):
+        elif base_matches(cur, link.target.read_bytes):
             st.local = "clean"
         else:
             st.local = "modified"
@@ -1012,7 +1082,7 @@ def pull_one(slave, reg, st, args):
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {st.rel}'; discard adaptations with "
                       f"'git filesync pull --overwrite {st.rel}', uncommitted changes with "
-                      f"'git restore {st.rel}'; or allow them with "
+                      f"'git restore {cmd_arg(st.rel)}'; or allow them with "
                       f"'git config -f {REGISTRY} file.{st.rel}.strict false'")
     if new_blob == st.old_blob and st.worktree != "missing" and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
@@ -1021,7 +1091,7 @@ def pull_one(slave, reg, st, args):
     if dirty and stash is None:
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
                       "commit or stash them first, or use --autostash "
-                      f"('git restore {st.rel}' discards them)")
+                      f"('git restore {cmd_arg(st.rel)}' discards them)")
     if not args.no_commit:
         # one commit = this file + its entry; other uncommitted entries would
         # end up in it without their files
@@ -1063,7 +1133,7 @@ def pull_one(slave, reg, st, args):
     msgfile = slave.gitdir / ("FILESYNC_MSG_" + re.sub(r"[^A-Za-z0-9._-]", "_", st.rel))
     msgfile.write_bytes(build_message(st, src, new, new_blob, merged, conflicts, discard)
                         .encode("utf-8"))
-    commit_cmd = f'git commit -e -F "{msgfile}" -- {st.rel} {REGISTRY}'
+    commit_cmd = f'git commit -e -F "{msgfile}" -- {cmd_arg(st.rel)} {REGISTRY}'
 
     if conflicts:
         if stash is not None:
@@ -1071,15 +1141,15 @@ def pull_one(slave, reg, st, args):
             stashfile.write_bytes(slave.to_worktree(stash, st.rel))
             print(f"{st.rel}: autostash kept in {stashfile} (not re-applied because of the conflicts)")
         print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}. "
-              f"Resolve them, then run:\n    git add {st.rel}\n    {commit_cmd}")
+              f"Resolve them, then run:\n    git add {cmd_arg(st.rel)}\n    {commit_cmd}")
         return EXIT_PENDING
-    slave.git(["add", "--", st.rel])
+    slave.git(["add", "--", lit(st.rel)])
     rc = EXIT_OK
     if args.no_commit:
         print(f"{st.rel}: {paint('synced and staged', 'green')}. Commit with:\n    {commit_cmd}")
     else:
         cmd = ["git", "commit", "-F", str(msgfile)] + ([] if args.no_edit else ["-e"]) + \
-            ["--", st.rel, REGISTRY]
+            ["--", lit(st.rel), REGISTRY]
         if subprocess.run(cmd, cwd=slave.top).returncode:
             print(f"{st.rel}: {paint('commit not done', 'yellow')}; changes stay staged. "
                   f"Commit later with:\n    {commit_cmd}")
@@ -1303,8 +1373,11 @@ def cmd_add(ctx, slave, args):
     reg = Registry(slave)
     target = slave.user_path(args.file)
     rel = slave.rel(target)
-    if rel.startswith("../") or rel == REGISTRY or "\n" in rel:
-        raise FsError(f"cannot link '{rel}'")
+    if target.is_dir():
+        raise FsError(f"cannot link '{rel}': is a directory")
+    problem = path_problem(rel)
+    if problem:
+        raise FsError(f"cannot link '{rel}': {problem}")
     relink = rel in reg.files
     if relink and not args.force:
         raise FsError(f"'{rel}' is already linked (use --force to relink)")
@@ -1337,7 +1410,7 @@ def cmd_add(ctx, slave, args):
         commit = head
     blob = src.blob_at(commit, path)
     if not blob:
-        raise FsError(f"'{path}' not found in {src.label} at {src.short(commit)}")
+        raise FsError(f"no file '{path}' in {src.label} at {src.short(commit)}")
     content = src.read_content(blob, path) if cur is None else None
 
     if relink:
@@ -1352,7 +1425,7 @@ def cmd_add(ctx, slave, args):
         target.parent.mkdir(parents=True, exist_ok=True)
         stored = slave.read_content(slave.as_local(content, rel), rel)
         target.write_bytes(slave.to_worktree(stored, rel))
-        slave.git(["add", "--", rel])
+        slave.git(["add", "--", lit(rel)])
     reg.finish()
     staged = f"{REGISTRY}, {rel}" if content is not None else REGISTRY
     print(f"{paint('linked', 'green')} {rel} -> {repo_label(url)}:{path} ({branch}, "
@@ -1379,9 +1452,12 @@ def cmd_mv(ctx, slave, args):
     if dst.is_dir():
         dst = dst / Path(old).name
     new = slave.rel(dst)
+    problem = path_problem(new)
+    if problem:
+        raise FsError(f"cannot move to '{new}': {problem}")
     if new in reg.files or dst.exists():
         raise FsError(f"'{new}' already exists")
-    if slave.git(["ls-files", "--error-unmatch", "--", old], check=False).returncode == 0:
+    if slave.git(["ls-files", "--error-unmatch", "--", lit(old)], check=False).returncode == 0:
         dst.parent.mkdir(parents=True, exist_ok=True)
         slave.git(["mv", "--", old, new])
     elif (slave.top / old).exists():
@@ -1416,6 +1492,8 @@ def cmd_map(args, slave):
     if not args.dir and not args.unset:      # listing: all scopes visible here
         print_mappings(local_mappings(cwd=top), args.url)
         return EXIT_OK
+    if not args.url:
+        raise FsError("--unset needs the URL of the mapping to remove")
     if args.glob:
         scope = "--global"
     elif slave:

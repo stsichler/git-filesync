@@ -316,6 +316,55 @@ check "diff -- --exit-code: difference" "$(git filesync diff c.c -- --exit-code 
 unset GIT_PAGER
 cd "$T"
 
+# --- robustness: unsafe registry paths, special file names, odd entries ------
+git init -q m6 && (cd m6 && mkdir sub && echo a > a.txt && echo s > sub/s.txt && echo f > 'f[1].txt' \
+  && git add . && git commit -qm i)
+M6=$(git -C m6 rev-parse HEAD); B6=$(git -C m6 rev-parse HEAD:a.txt)
+git init -q s6 && cd s6 && git commit -q --allow-empty -m i && git filesync map file:///nowhere/m6.git "$T/m6" >/dev/null
+printf '[source "m6"]\n\turl = file:///nowhere/m6.git\n\tbranch = main\n' > .git-filesync
+for f in ../outside.txt "$T/abs.txt" .git/hooks/post-commit; do
+  printf '[file "%s"]\n\tsource = m6\n\tpath = a.txt\n\tcommit = %s\n\tblob = %s\n' "$f" "$M6" "$B6" >> .git-filesync
+done
+git add .git-filesync && git commit -qm "unsafe entries"
+git filesync pull --all --no-edit >/dev/null 2>&1; check "unsafe paths: pull fails" "$?" "2"
+check "unsafe paths: nothing written" "$(ls ../outside.txt "$T/abs.txt" .git/hooks/post-commit 2>/dev/null | wc -l)" "0"
+check "unsafe paths: status errors" "$(git filesync status -s 2>/dev/null | grep -c '^E')" "3"
+check "unsafe paths: removal hint" "$(git filesync status 2>&1 | grep -c 'remove-section')" "3"
+git rm -q .git-filesync && git commit -qm "drop unsafe entries"
+git filesync add .git/x file:///nowhere/m6.git -p a.txt >/dev/null 2>&1; check "add into .git refused" "$?" "2"
+git filesync add ../x file:///nowhere/m6.git -p a.txt >/dev/null 2>&1; check "add outside refused" "$?" "2"
+mkdir d; check "add directory refused" "$(git filesync add d file:///nowhere/m6.git -p a.txt 2>&1 | grep -c 'is a directory')" "1"
+check "master path is a directory" "$(git filesync add x.txt file:///nowhere/m6.git -p sub 2>&1 | grep -c "no file 'sub'")" "1"
+git filesync add a.txt file:///nowhere/m6.git >/dev/null 2>&1
+git filesync mv a.txt ../moved.txt >/dev/null 2>&1; check "mv outside refused" "$?" "2"
+check "mv outside: file stays" "$(ls a.txt ../moved.txt 2>/dev/null)" "a.txt"
+git filesync map --unset >/dev/null 2>&1; check "map --unset without URL" "$?" "2"
+# wildcard characters in a file name are taken literally
+echo other > f1.txt; git add f1.txt; git filesync add 'f[1].txt' file:///nowhere/m6.git >/dev/null 2>&1; git commit -qm link
+echo changed > f1.txt
+check "glob chars: other file's change not attributed" "$(st 'f[1].txt')" ""
+(cd ../m6 && echo f2 > 'f[1].txt' && git commit -qam f2)
+git filesync pull --no-edit 'f[1].txt' >/dev/null 2>&1
+check "glob chars: pull commits only the file" "$(git show --name-only --format= HEAD | LC_ALL=C sort | tr '\n' ' ')" ".git-filesync f[1].txt "
+check "glob chars: other file stays uncommitted" "$(git status --porcelain f1.txt)" " M f1.txt"
+git checkout -q -- f1.txt
+# 'strict' without a value is true, as everywhere in git config
+echo local >> a.txt; git commit -qam adapt
+sed -i '/^\[file "a.txt"\]/a\	strict' .git-filesync
+check "bare 'strict' means true" "$(git filesync status -s a.txt)" " A  a.txt  (strict!)"
+git checkout -q -- .git-filesync
+# synced version not readable -> warning, not a silent 'adapted'; --overwrite recovers
+git config -f .git-filesync 'file.f[1].txt.blob' 0123456789abcdef0123456789abcdef01234567
+check "base unavailable: warned" "$(git filesync status 2>&1 | grep -c 'synced version 0123456789ab not available')" "1"
+git filesync pull --no-edit --overwrite 'f[1].txt' >/dev/null 2>&1
+check "base unavailable: --overwrite recovers" "$(st 'f[1].txt')" ""
+cd "$T"
+# mapped checkout with a remote but no origin/HEAD: default branch is a guess
+git clone -q m6 co6 && (cd co6 && git remote set-head origin -d && git checkout -q -b feature)
+git init -q s7 && cd s7 && git commit -q --allow-empty -m i && git filesync map file:///nowhere/m6.git "$T/co6" >/dev/null
+check "default branch guessed: warned" "$(git filesync add a.txt file:///nowhere/m6.git 2>&1 | grep -c "using its checked-out branch 'feature'")" "1"
+cd "$T"
+
 # --- Git LFS: master / slave / both / neither, via mapping and via cache ------
 if git lfs version >/dev/null 2>&1; then
   git lfs install --skip-repo >/dev/null
