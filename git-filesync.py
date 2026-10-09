@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2026 Stefan (stsichler) - https://github.com/stsichler/git-filesync
+# SPDX-License-Identifier: MIT-0
+# Copyright (c) 2026 Stefan Sichler - https://github.com/stsichler/git-filesync
 # Developed together with Claude (Anthropic).
 """
 git-filesync - keep individual files in sync between Git repositories.

@@ -1,0 +1,22 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  regress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare git
+        run: |
+          git lfs install --skip-repo
+          git --version; git lfs version; python3 --version
+      - name: Lint
+        run: python3 -m py_compile git-filesync.py
+      - name: Regression tests
+        run: |
+          test/regress.sh </dev/null | tee regress.log
+          ! grep -q '^FAIL' regress.log
