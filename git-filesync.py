@@ -311,6 +311,13 @@ class Source:
         return self.git(["merge-base", "--is-ancestor", a, b],
                         check=False).returncode == 0
 
+    def last_change(self, rev, path):
+        """Newest commit up to rev that changed path: the commit the file's
+        version at rev comes from (same blob, by git's history simplification).
+        Recorded as a link's commit, so one file version always gives the same
+        entry, whatever else happened on the branch."""
+        return out(self.git(["rev-list", "-1", rev, "--", lit(path)])) or rev
+
     def count(self, old, new, path):
         return int(out(self.git(["rev-list", "--count", f"{old}..{new}", "--", lit(path)])))
 
@@ -802,15 +809,16 @@ def evaluate(ctx, slave, link):
         return st
     st.violation = st.strict and (st.committed == "adapted" or st.local == "modified")
     where = f"branch '{branch}'"
-    st.new = src.resolve()
-    if not st.new:
+    tip = src.resolve()
+    if not tip:
         st.error = f"{where} not found in {src.label}"
         return st
-    st.new_blob = src.blob_at(st.new, path)
+    st.new_blob = src.blob_at(tip, path)
     if not st.new_blob:
         st.error = (f"'{path}' does not exist in {where} of {src.label} "
                     f"(renamed upstream? fix the path in {REGISTRY})")
         return st
+    st.new = src.last_change(tip, path)    # not the tip: what a pull records
     st.has_old = bool(st.old) and src.resolve(st.old) == st.old
     if st.has_old:
         if st.new != st.old and src.is_ancestor(st.new, st.old):
@@ -827,8 +835,9 @@ def evaluate(ctx, slave, link):
     if src.local:
         if src.note:
             st.warnings.append(src.note)
-        if not src.is_published(st.new):
-            st.warnings.append(f"'{branch}' in {src.label} has commits not pushed")
+        if not src.is_published(st.new):   # other unpushed commits don't matter
+            st.warnings.append(f"'{path}' in {src.label} comes from commit "
+                               f"{src.short(st.new)}, which is not pushed")
         if src.head_ref() != src.ref:
             if src.blob_at("HEAD", path) != st.new_blob:
                 st.warnings.append(f"{src.label} has {src.head_desc()} checked out; "
@@ -1068,6 +1077,7 @@ def pull_one(slave, reg, st, args):
         new_blob = src.blob_at(new, path)
         if not new_blob:
             raise FsError(f"'{path}' does not exist at {args.commit}")
+        new = src.last_change(new, path)
     # like `git pull`: uncommitted changes are never merged into a sync
     # commit; --autostash sets them aside and re-applies them afterwards
     dirty = st.worktree in ("modified", "deleted", "added")
@@ -1411,6 +1421,7 @@ def cmd_add(ctx, slave, args):
     blob = src.blob_at(commit, path)
     if not blob:
         raise FsError(f"no file '{path}' in {src.label} at {src.short(commit)}")
+    commit = src.last_change(commit, path)
     content = src.read_content(blob, path) if cur is None else None
 
     if relink:

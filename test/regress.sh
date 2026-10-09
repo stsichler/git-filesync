@@ -233,7 +233,7 @@ git commit -qm "adapt bar" src/bar.h
 check "strict violation (committed)" "$(git filesync status -s src/bar.h)" " A  src/bar.h  (strict!)"
 git filesync pull --no-edit --overwrite src/bar.h >/dev/null 2>&1
 check "pull --overwrite restores" "$(cat src/bar.h)" "x"
-check "overwrite commit message" "$(git log -1 --format=%s)" "Restore src/bar.h from nowhere/m4@$(git -C ../m4 rev-parse --short HEAD)"
+check "overwrite commit message" "$(git log -1 --format=%s)" "Restore src/bar.h from nowhere/m4@$(git -C ../m4 log -1 --format=%h -- lib/bar.h)"
 check "after overwrite clean" "$(st src/bar.h)" ""
 sed -i 's/^a$/A-local/' src/foo.c; git commit -qm 'adapt a' src/foo.c
 git filesync pull --no-edit --overwrite src/foo.c >/dev/null 2>&1
@@ -363,6 +363,34 @@ cd "$T"
 git clone -q m6 co6 && (cd co6 && git remote set-head origin -d && git checkout -q -b feature)
 git init -q s7 && cd s7 && git commit -q --allow-empty -m i && git filesync map file:///nowhere/m6.git "$T/co6" >/dev/null
 check "default branch guessed: warned" "$(git filesync add a.txt file:///nowhere/m6.git 2>&1 | grep -c "using its checked-out branch 'feature'")" "1"
+cd "$T"
+
+# --- recorded commit: the one that produced the synced version, not the tip --
+git init -q --bare m7.git && git -C m7.git config uploadpack.allowFilter true && git clone -q m7.git co7 2>/dev/null
+(cd co7 && echo v1 > f.txt && echo o1 > o.txt && git add . && git commit -qm "f v1" \
+  && echo o2 > o.txt && git commit -qam "other 1" && git push -q origin main)
+URL7=file://$T/m7.git; rec() { git config -f .git-filesync file.f.txt.commit; }
+git init -q s8 && cd s8 && git commit -q --allow-empty -m i
+git filesync add f.txt "$URL7" >/dev/null 2>&1; git commit -qm link
+check "add (new file): commit that changed the file" "$(rec)" "$(git -C ../co7 rev-parse HEAD~1)"
+git filesync add --force f.txt "$URL7" >/dev/null 2>&1
+check "relink unchanged file: registry unchanged" "$(git status --porcelain)" ""
+git filesync add --force --commit "$(git -C ../co7 rev-parse HEAD)" f.txt "$URL7" >/dev/null 2>&1
+check "add --commit tip: commit that changed the file" "$(rec)" "$(git -C ../co7 rev-parse HEAD~1)"
+(cd ../co7 && echo v2 > f.txt && git commit -qam "f v2" && echo o3 > o.txt && git commit -qam "other 2" \
+  && git push -q origin main)
+check "status counts only commits changing the file" "$(git filesync status | grep -c '(1 commit)')" "1"
+git filesync pull --no-edit f.txt >/dev/null 2>&1
+check "pull: commit that changed the file" "$(rec)" "$(git -C ../co7 rev-parse HEAD~1)"
+check "pull message: names that commit" "$(git log -1 --format=%s | grep -c "@$(git -C ../co7 rev-parse --short HEAD~1)$")" "1"
+check "pull message: only commits changing the file" "$(git log -1 --format=%B | grep '^- ' | tr '\n' '|')" "- f v2 ($(git -C ../co7 rev-parse --short HEAD~1))|"
+git filesync map "$URL7" "$T/co7" >/dev/null
+(cd ../co7 && echo o4 > o.txt && git commit -qam "other unpushed")
+check "unpushed commit not touching the file: no warning" "$(git filesync status 2>&1 | grep -c 'not pushed')" "0"
+check "unpushed other commit: still up to date" "$(st)" ""
+(cd ../co7 && echo v3 > f.txt && git commit -qam "f unpushed")
+check "unpushed change of the file: warned" "$(git filesync status 2>&1 | grep -c 'not pushed')" "1"
+git filesync map "$URL7" --unset >/dev/null
 cd "$T"
 
 # --- Git LFS: master / slave / both / neither, via mapping and via cache ------

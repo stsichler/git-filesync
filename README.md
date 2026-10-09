@@ -143,7 +143,7 @@ file. Git-config format:
 [file "src/foo.c"]
 	source = lib
 	path = lib/foo.c       # path in the master
-	commit = 3f2a9c1e…     # master commit of the last sync
+	commit = 3f2a9c1e…     # master commit the synced version comes from
 	blob = 8d01b7aa…       # master's file at that commit
 [file "include/bar.h"]
 	source = lib
@@ -156,8 +156,11 @@ file. Git-config format:
 - A `[source]` names a master repository and branch once; `add` reuses an
   existing source for the same URL and branch and creates one otherwise.
 - `[file]` sections are keyed by the path in the slave repository.
-- `commit` and `blob` are maintained by the tool. Everything else may be
-  edited by hand, e.g. when a file was renamed in the master:
+- `commit` and `blob` are maintained by the tool: `blob` is the synced
+  version of the master's file, `commit` the master commit that last changed
+  it (not the branch tip at sync time). One file version thus always gives
+  the same entry, and commits that don't touch the file – unpushed, rebased
+  or not – don't matter. Everything else may be edited by hand, e.g. when a file was renamed in the master:
   `git config -f .git-filesync file.src/foo.c.path lib/new_name.c`.
 - When the last link is removed, the file is deleted.
 - File paths must lie inside the working tree. Entries pointing outside it
@@ -333,8 +336,9 @@ works offline.
   of the file → warning (that version is *not* synced)
 - uncommitted changes to the file in the checkout → warning (only committed
   states are synced)
-- unpushed commits → warning, because other machines can't resolve such a
-  sync point
+- the file's version comes from an unpushed commit → warning, because
+  other machines can't resolve that commit (unpushed commits that don't
+  touch the file don't matter)
 - no local branch of that name in the checkout → `origin/<branch>` as last
   fetched there is used, with a note
 
@@ -411,7 +415,8 @@ jobs:
   store it, and written as a checkout of the slave would produce it – no
   false "local modifications", no eol-only conflicts.
 - `--commit` accepts branch names (`develop` means the master's current
-  `develop`), tags and commit ids.
+  `develop`), tags and commit ids. Recorded is the commit that last changed
+  the file up to that revision.
 - Offline: with a mapped local checkout, all commands work without network
   access (`add` takes the default branch from the checkout's `origin/HEAD`,
   or – with a warning if the checkout has a remote – from the branch checked
