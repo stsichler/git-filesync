@@ -8,7 +8,8 @@
 **Keep individual files in sync between Git repositories.** One repository is
 the **master** where a file is developed; other repositories (**slaves**)
 carry a copy of it and pull updates manually, one file at a time – with a
-commit message listing every master commit since the last sync.
+commit message listing every master commit that changed the file since the
+last sync.
 
 ```console
 $ git filesync status
@@ -18,6 +19,7 @@ Upstream changes to sync:
 
 $ git filesync pull src/foo.c
 [main 4f1c2a9] Sync src/foo.c from owner/lib@a1b2c3d
+ 2 files changed, 3 insertions(+), 3 deletions(-)
 ```
 
 ## Contents
@@ -193,8 +195,9 @@ Upstream changes to sync:
 
 Locally adapted files:
   (use "git filesync diff --committed <file>..." to see the adaptations)
-	adapted:    src/foo.c
+  (use "git filesync pull --overwrite <file>..." to discard them)
 	adapted:    include/x.h  (NOT ALLOWED: strict)
+	adapted:    src/foo.c
 
 Uncommitted changes:
   (use "git filesync diff <file>..." to see all local changes)
