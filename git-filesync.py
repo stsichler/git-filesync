@@ -10,11 +10,11 @@ The "slave" repository lists its synced files in .git-filesync at its root
 (git-config format, like .gitmodules), each linked to a file in a "master"
 repository:
 
-    [source "lib"]
+    [source "owner/lib"]
         url = https://github.com/owner/lib.git
         branch = main
     [file "src/foo.c"]
-        source = lib
+        source = owner/lib
         path = lib/foo.c       ; path in the master
         strict = true          ; optional: no local modifications allowed
         commit = <master commit of the last sync>
@@ -63,7 +63,9 @@ follow the command.
         --prompt                ask even for explicitly given files
 
     add FILE URL|SOURCE         link FILE to a file in a master repository
-                                (URL or name of a [source]); an existing FILE's
+                                (URL or name of a [source]; a new source is
+                                named 'owner/repo' after the URL, with a
+                                number appended if taken); an existing FILE's
                                 master version is detected, a missing FILE
                                 is fetched; changes are staged
         -b, --branch BRANCH     master branch (default: master's default
@@ -114,7 +116,7 @@ import tempfile
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 HOOK_MARKER = "git-filesync"
@@ -403,10 +405,11 @@ class Context:
         self._ready = set()
         self._mappings = None
 
-    def source(self, url, branch):
+    def source(self, url, branch, name=None):
+        """Source for url+branch; name is its key in .git-filesync (used as label)."""
         key = (norm_url(url), branch)
         if key not in self._sources:
-            self._sources[key] = self._make(url, branch)
+            self._sources[key] = self._make(url, branch, name)
         return self._sources[key]
 
     def local_path(self, url):
@@ -458,7 +461,7 @@ class Context:
                 return out(p)
         raise FsError(f"cannot determine default branch of {url}; use --branch")
 
-    def _make(self, url, branch):
+    def _make(self, url, branch, name=None):
         local = self.local_path(url)
         if local:
             # the link's branch as it is in the checkout (incl. unpushed
@@ -471,7 +474,7 @@ class Context:
                           note=f"no local branch '{branch}' there, using origin/{branch} "
                                "as last fetched")
         return Source(self._cache(url), f"refs/remotes/origin/{branch}",
-                      repo_label(url))
+                      name or repo_label(url))
 
     @staticmethod
     def cache_dir(url):
@@ -660,16 +663,26 @@ class Registry:
                 return name
         return None
 
+    def new_source_name(self, url):
+        """Unused key for a new [source]: 'owner/repo' derived from the URL,
+        with a number appended if that key already belongs to another source."""
+        base = repo_label(url) or "master"
+        name, n = base, 2
+        while name in self.sources:
+            name, n = f"{base}-{n}", n + 1
+        return name
+
+    def source_name(self, url, branch):
+        """Key of the [source] for url+branch (found by URL, not by key),
+        or the key a new one would get."""
+        return self.find_source(url, branch) or self.new_source_name(url)
+
     def add_source(self, url, branch):
-        """Name of the [source] for url+branch, created if necessary."""
+        """Key of the [source] for url+branch, created if necessary."""
         name = self.find_source(url, branch)
         if name:
             return name
-        base = repo_label(url).split("/")[-1] or "master"
-        name = base if base not in self.sources else f"{base}-{branch}"
-        n = 2
-        while name in self.sources:
-            name, n = f"{base}-{branch}-{n}", n + 1
+        name = self.new_source_name(url)
         self._cfg(f"source.{name}.url", url)
         self._cfg(f"source.{name}.branch", branch)
         self.sources[name] = {"url": url, "branch": branch}
@@ -723,8 +736,9 @@ class Link:
 
     @property
     def source(self):
-        return self.reg.sources.get(self.v.get("source", ""), {})
+        return self.reg.sources.get(self.name, {})
 
+    name = property(lambda self: self.v.get("source", ""))   # key of the [source]
     url = property(lambda self: self.source.get("url", ""))
     branch = property(lambda self: self.source.get("branch", ""))
     path = property(lambda self: self.v.get("path", ""))
@@ -826,7 +840,7 @@ def evaluate(ctx, slave, link):
         st.error = f"incomplete entry in {REGISTRY} (needs source with url and branch, and path)"
         return st
     try:
-        src = st.src = ctx.source(url, branch)
+        src = st.src = ctx.source(url, branch, link.name)
     except FsError as e:
         st.error = str(e)
         return st
@@ -993,7 +1007,7 @@ def print_long(slave, sts, verbose):
             via = f" via {st.src.label}" if st.src and st.src.local else ""
             strict = ", strict" if st.strict else ""
             rows.append((st.committed or "uncommitted", st.rel,
-                         f"from {repo_label(st.link.url)}:{st.link.path} "
+                         f"from {st.link.name}:{st.link.path} "
                          f"({st.link.branch}{strict}){via}", "dim"))
         section("Linked files:", [], rows, None)
 
@@ -1095,7 +1109,7 @@ def build_message(st, src, new, new_blob, merged, conflicts, discarded=False):
     url, branch, path = link.url, link.branch, link.path
     # content goes back to the synced master version -> restore, not a sync
     verb = "Restore" if new_blob == st.old_blob and discarded else "Sync"
-    lines = [f"{verb} {st.rel} from {repo_label(url)}@{src.short(new)}", "",
+    lines = [f"{verb} {st.rel} from {link.name}@{src.short(new)}", "",
              f"Upstream: {url} ({branch}:{path})"]
     if new == st.old:
         pass
@@ -1454,7 +1468,7 @@ def cmd_add(ctx, slave, args):
         url = args.source
         branch = args.branch or ctx.default_branch(url)
     path = (args.path or rel).strip("/")
-    src = ctx.source(url, branch)
+    src = ctx.source(url, branch, reg.source_name(url, branch))
     head = src.resolve()
     if not head:
         raise FsError(f"branch '{branch}' not found in {src.label}")
@@ -1495,8 +1509,7 @@ def cmd_add(ctx, slave, args):
         slave.git(["add", "--", lit(rel)])
     reg.finish()
     staged = f"{REGISTRY}, {rel}" if content is not None else REGISTRY
-    print(f"{paint('linked', 'green')} {rel} -> {repo_label(url)}:{path} ({branch}, "
-          f"source '{name}'); staged {staged} - commit when ready")
+    print(f"{paint('linked', 'green')} {rel} -> {name}:{path} ({branch}); staged {staged} - commit when ready")
     return EXIT_OK
 
 

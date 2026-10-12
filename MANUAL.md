@@ -38,16 +38,16 @@ Lives at the root of the slave repository and is committed like any other
 file. Git-config format:
 
 ```ini
-[source "lib"]
+[source "owner/lib"]
 	url = https://github.com/owner/lib.git
 	branch = main
 [file "src/foo.c"]
-	source = lib
+	source = owner/lib
 	path = lib/foo.c       # path in the master
 	commit = 3f2a9c1e…     # master commit the synced version comes from
 	blob = 8d01b7aa…       # master's file at that commit
 [file "include/bar.h"]
-	source = lib
+	source = owner/lib
 	path = include/bar.h
 	strict = true          # optional, see below
 	commit = …
@@ -56,6 +56,11 @@ file. Git-config format:
 
 - A `[source]` names a master repository and branch once; `add` reuses an
   existing source for the same URL and branch and creates one otherwise.
+  A new source is named `owner/repo` after its URL; if that name is already
+  taken by another URL or branch, a number is appended (`owner/repo-2`, …).
+  The name may be changed by hand (in the `[source]` section and in every
+  `source =` line); `status`, `add` and the commit messages of `pull` show
+  it.
 - `[file]` sections are keyed by the path in the slave repository.
 - `commit` and `blob` are maintained by the tool: `blob` is the synced
   version of the master's file, `commit` the master commit that last changed
@@ -330,7 +335,7 @@ its URL or by the name of a `[source]` already in `.git-filesync`.
 
 ```sh
 git filesync add src/foo.c https://github.com/owner/lib.git -p lib/foo.c
-git filesync add include/bar.h lib --strict     # reuse [source "lib"]
+git filesync add include/bar.h owner/lib --strict     # reuse [source "owner/lib"]
 ```
 
 ### `unlink`

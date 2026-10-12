@@ -509,6 +509,37 @@ check "unlink all: registry removed" "$([ -e .git-filesync ] && echo exists || e
 check "unlink all: removal staged" "$(git status --porcelain .git-filesync)" "D  .git-filesync"
 git reset -q --hard
 
+# a new [source] is keyed 'owner/repo' after its URL; another URL with the
+# same key gets a number appended instead of reusing the existing source
+check "source key from URL" "$SRC" "nowhere/m4"
+git filesync map file:///other/nowhere/m4.git "$T/m4" >/dev/null
+check "add: output shows the new key" \
+  "$(git filesync add include/other.h file:///other/nowhere/m4.git -p lib/bar.h 2>&1 | grep -c '^linked include/other.h -> nowhere/m4-2:lib/bar.h (main)')" "1"
+check "same key, other URL: own source" \
+  "$(git config -f .git-filesync source.nowhere/m4-2.url)" "file:///other/nowhere/m4.git"
+check "same key, other URL: existing source unchanged" \
+  "$(git config -f .git-filesync source.nowhere/m4.url)" "file:///nowhere/m4.git"
+check "same key, other URL: file uses the new source" \
+  "$(git config -f .git-filesync file.include/other.h.source)" "nowhere/m4-2"
+git reset -q --hard
+
+# the source is found by URL, whatever its key; status and pull show the key
+BASE=$(git rev-parse HEAD)
+git config -f .git-filesync --rename-section source.nowhere/m4 source.mylib
+git config -f .git-filesync file.src/foo.c.source mylib
+git config -f .git-filesync file.src/bar.h.source mylib
+git commit -qam "rename source"
+check "status -v: source key as label" \
+  "$(git filesync status -v | grep -c 'src/foo.c *(from mylib:lib/foo.c (main)')" "1"
+quiet git filesync pull --no-edit src/foo.c
+check "pull: source key in commit message" \
+  "$(git log -1 --format=%s)" "Sync src/foo.c from mylib@$(git -C ../m4 log -1 --format=%h -- lib/foo.c)"
+quiet git filesync add include/x.h file:///nowhere/m4.git -p lib/bar.h
+check "add finds the source by URL, not by key" \
+  "$(git config -f .git-filesync file.include/x.h.source)" "mylib"
+check "add by URL: no new source" "$(git config -f .git-filesync --get-regexp '^source\..*\.url' | wc -l)" "1"
+git reset -q --hard "$BASE"
+
 
 # =============================================================================
 section "8. Colors"
