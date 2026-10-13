@@ -48,7 +48,8 @@ follow the command.
         --overwrite             discard local adaptations instead of merging
         --autostash             set uncommitted changes aside, re-apply after
         --no-edit               commit without opening the editor
-        --no-commit             only stage; print the commit command
+        --no-commit             only stage; print the proposed commit message
+                                and the commit command
 
     diff [PATH...] [-- OPTS]    local changes vs. the synced master version
                                 (one `git diff`, OPTS passed to it)
@@ -67,13 +68,15 @@ follow the command.
                                 named 'owner/repo' after the URL, with a
                                 number appended if taken); an existing FILE's
                                 master version is detected, a missing FILE
-                                is fetched; changes are staged
+                                is fetched; FILE and .git-filesync are
+                                committed with a proposed message
         -b, --branch BRANCH     master branch (default: master's default
                                 branch or that of SOURCE)
         -p, --path PATH         path in the master (default: same as FILE)
         --commit REV            master revision FILE corresponds to
         --strict                FILE must stay an exact copy
         --force                 relink an already linked file
+        --no-edit, --no-commit  as for pull
 
     unlink PATH...              remove links (the files are kept)
     mv OLD NEW                  move a linked file (git mv), keeping its link
@@ -116,7 +119,7 @@ import tempfile
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 HOOK_MARKER = "git-filesync"
@@ -1136,6 +1139,45 @@ def build_message(st, src, new, new_blob, merged, conflicts, discarded=False):
     return "\n".join(lines) + "\n"
 
 
+def check_other_entries(reg, rel, args):
+    """One commit = this file + its entry; other uncommitted entries would
+    end up in it without their files."""
+    if args.no_commit:
+        return
+    others = reg.uncommitted() - {rel}
+    if others:
+        raise FsError(f"{REGISTRY} has uncommitted changes for {', '.join(sorted(others))}"
+                      " - commit them first, or use --no-commit to stage everything "
+                      "and commit together")
+
+
+def message_file(slave, rel, msg):
+    """Keep the proposed commit message in .git/FILESYNC_MSG_*; returns the
+    file and the command that commits the file and its entry with it."""
+    msgfile = slave.gitdir / ("FILESYNC_MSG_" + re.sub(r"[^A-Za-z0-9._-]", "_", rel))
+    msgfile.write_bytes(msg.encode("utf-8"))
+    return msgfile, f'git commit -e -F "{msgfile}" -- {cmd_arg(rel)} {REGISTRY}'
+
+
+def commit_staged(slave, rel, msg, args, done):
+    """Commit the staged file and its entry with the proposed message (in the
+    editor unless --no-edit). With --no-commit, print the message, so it can
+    be copied, and the command to commit later. done: e.g. 'synced and staged'."""
+    msgfile, commit_cmd = message_file(slave, rel, msg)
+    if args.no_commit:
+        print(f"{rel}: {paint(done, 'green')}. Proposed commit message:\n\n{msg}\n"
+              f"Commit with:\n    {commit_cmd}")
+        return EXIT_OK
+    cmd = ["git", "commit", "-F", str(msgfile)] + ([] if args.no_edit else ["-e"]) + \
+        ["--", lit(rel), REGISTRY]
+    if subprocess.run(cmd, cwd=slave.top).returncode:
+        print(f"{rel}: {paint('commit not done', 'yellow')}; changes stay staged. "
+              f"Commit later with:\n    {commit_cmd}")
+        return EXIT_PENDING
+    msgfile.unlink()
+    return EXIT_OK
+
+
 def pull_one(slave, reg, st, args):
     link, src = st.link, st.src
     path = link.path
@@ -1172,14 +1214,7 @@ def pull_one(slave, reg, st, args):
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
                       "commit or stash them first, or use --autostash "
                       f"('git restore {cmd_arg(st.rel)}' discards them)")
-    if not args.no_commit:
-        # one commit = this file + its entry; other uncommitted entries would
-        # end up in it without their files
-        others = reg.uncommitted() - {st.rel}
-        if others:
-            raise FsError(f"{REGISTRY} has uncommitted changes for {', '.join(sorted(others))}"
-                          " - commit them first, or use --no-commit to stage everything "
-                          "and commit together")
+    check_other_entries(reg, st.rel, args)
     for w in st.warnings:
         warn(f"{st.rel}: {w}")
 
@@ -1210,12 +1245,9 @@ def pull_one(slave, reg, st, args):
     link.set("blob", new_blob)
     reg.finish()
 
-    msgfile = slave.gitdir / ("FILESYNC_MSG_" + re.sub(r"[^A-Za-z0-9._-]", "_", st.rel))
-    msgfile.write_bytes(build_message(st, src, new, new_blob, merged, conflicts, discard)
-                        .encode("utf-8"))
-    commit_cmd = f'git commit -e -F "{msgfile}" -- {cmd_arg(st.rel)} {REGISTRY}'
-
+    msg = build_message(st, src, new, new_blob, merged, conflicts, discard)
     if conflicts:
+        _, commit_cmd = message_file(slave, st.rel, msg)
         if stash is not None:
             stashfile = slave.gitdir / ("FILESYNC_STASH_" + re.sub(r"[^A-Za-z0-9._-]", "_", st.rel))
             stashfile.write_bytes(slave.to_worktree(stash, st.rel))
@@ -1224,18 +1256,7 @@ def pull_one(slave, reg, st, args):
               f"Resolve them, then run:\n    git add {cmd_arg(st.rel)}\n    {commit_cmd}")
         return EXIT_PENDING
     slave.git(["add", "--", lit(st.rel)])
-    rc = EXIT_OK
-    if args.no_commit:
-        print(f"{st.rel}: {paint('synced and staged', 'green')}. Commit with:\n    {commit_cmd}")
-    else:
-        cmd = ["git", "commit", "-F", str(msgfile)] + ([] if args.no_edit else ["-e"]) + \
-            ["--", lit(st.rel), REGISTRY]
-        if subprocess.run(cmd, cwd=slave.top).returncode:
-            print(f"{st.rel}: {paint('commit not done', 'yellow')}; changes stay staged. "
-                  f"Commit later with:\n    {commit_cmd}")
-            rc = EXIT_PENDING
-        else:
-            msgfile.unlink()
+    rc = commit_staged(slave, st.rel, msg, args, "synced and staged")
     if stash is not None:
         # re-apply the stashed uncommitted changes on top of the synced version
         head = slave.read_content(st.head_blob, st.rel)
@@ -1449,6 +1470,20 @@ def find_matching_commit(slave, src, cur, rel, path, target, max_equiv=100):
     return None
 
 
+def build_add_message(link, src, fetched, relink, modified):
+    if fetched:
+        subject = f"Add {link.rel} from"
+    else:
+        subject = f"{'Relink' if relink else 'Link'} {link.rel} to"
+    lines = [f"{subject} {link.name}@{src.short(link.commit)}", "",
+             f"Upstream: {link.url} ({link.branch}:{link.path})"]
+    if modified:
+        lines += ["", "Contains local modifications of this repository."]
+    if link.strict:
+        lines += ["", "Strict: must stay an exact copy of the upstream version."]
+    return "\n".join(lines) + "\n"
+
+
 def cmd_add(ctx, slave, args):
     reg = Registry(slave)
     target = slave.user_path(args.file)
@@ -1461,6 +1496,7 @@ def cmd_add(ctx, slave, args):
     relink = rel in reg.files
     if relink and not args.force:
         raise FsError(f"'{rel}' is already linked (use --force to relink)")
+    check_other_entries(reg, rel, args)
     if args.source in reg.sources:            # name of an existing [source]
         url = reg.sources[args.source].get("url", "")
         branch = args.branch or reg.sources[args.source].get("branch", "")
@@ -1473,12 +1509,14 @@ def cmd_add(ctx, slave, args):
     if not head:
         raise FsError(f"branch '{branch}' not found in {src.label}")
     cur = slave.worktree_blob(target)
+    modified = None          # unknown: compared below once the link is set
     if args.commit:
         commit = src.resolve(args.commit)
         if not commit:
             raise FsError(f"unknown revision '{args.commit}' in {src.label}")
     elif cur:
         commit = find_matching_commit(slave, src, cur, rel, path, target)
+        modified = not commit
         if commit:
             print(f"{rel} matches upstream {src.short(commit)}")
         else:
@@ -1506,11 +1544,21 @@ def cmd_add(ctx, slave, args):
         target.parent.mkdir(parents=True, exist_ok=True)
         stored = slave.read_content(slave.as_local(content, rel), rel)
         target.write_bytes(slave.to_worktree(stored, rel))
-        slave.git(["add", "--", lit(rel)])
+    elif modified is None:
+        try:
+            modified = not matches_base(slave, src, link, cur, target.read_bytes)
+        except BaseUnavailable:
+            modified = False
+    # the link commit contains the file as it is in the working tree
+    slave.git(["add", "--", lit(rel)])
     reg.finish()
-    staged = f"{REGISTRY}, {rel}" if content is not None else REGISTRY
-    print(f"{paint('linked', 'green')} {rel} -> {name}:{path} ({branch}); staged {staged} - commit when ready")
-    return EXIT_OK
+    print(f"{paint('linked', 'green')} {rel} -> {name}:{path} ({branch})")
+    if slave.git(["diff", "--cached", "--quiet", "HEAD", "--", lit(rel), REGISTRY],
+                 check=False).returncode == 0:
+        print(f"{rel}: link and file unchanged, nothing to commit")
+        return EXIT_OK
+    return commit_staged(slave, rel, build_add_message(link, src, content is not None,
+                                                       relink, modified), args, "staged")
 
 
 def cmd_unlink(ctx, slave, args):
@@ -1717,7 +1765,8 @@ def main(argv=None):
     p.add_argument("--all", action="store_true", help="sync all files with something to sync")
     p.add_argument("--commit", metavar="REV", help="sync to this master revision (exactly one file)")
     p.add_argument("--no-edit", action="store_true", help="commit without opening the editor")
-    p.add_argument("--no-commit", action="store_true", help="only stage; print commit command")
+    p.add_argument("--no-commit", action="store_true",
+                   help="only stage; print commit message and command")
     p.add_argument("--overwrite", action="store_true",
                    help="discard local adaptations instead of merging them")
     p.add_argument("--autostash", action="store_true",
@@ -1752,6 +1801,9 @@ def main(argv=None):
     p.add_argument("--force", action="store_true", help="relink an already linked file")
     p.add_argument("--strict", action="store_true",
                    help="file must stay an exact copy (no local modifications)")
+    p.add_argument("--no-edit", action="store_true", help="commit without opening the editor")
+    p.add_argument("--no-commit", action="store_true",
+                   help="only stage; print commit message and command")
 
     p = sub.add_parser("unlink", parents=[colorp], help="remove links (the files are kept)")
     p.add_argument("files", nargs="+", help="files or directories")

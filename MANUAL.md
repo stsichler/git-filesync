@@ -231,7 +231,7 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `--overwrite` | discard local adaptations and take the master version as is (also when the file is up to date) |
 | `--autostash` | set uncommitted changes aside, sync, re-apply them |
 | `--no-edit` | commit with the proposed message without opening the editor |
-| `--no-commit` | only update and stage the file and its entry; prints the `git commit` command |
+| `--no-commit` | only update and stage the file and its entry; prints the proposed commit message (for copying) and the `git commit` command |
 
 **Adaptations** are merged with the new master version (3-way merge, base =
 the last synced version). On conflicts the file gets the usual conflict
@@ -256,8 +256,9 @@ the same way; the commit message then lists what is reverted.
 sync commit must not pick up uncommitted entries of *other* files (that
 commit would record their new state without their content). `pull`
 therefore refuses to commit while `.git-filesync` has uncommitted changes
-for other files – commit those first (e.g. after `add`), or use
-`--no-commit` to stage everything and commit it together.
+for other files – commit those first (e.g. after `add --no-commit`), or use
+`--no-commit` to stage everything and commit it together. The same applies
+to [`add`](#add).
 
 With `--all`, a file that can't be synced (conflict, strict violation, …) is
 reported and the other files are still synced.
@@ -326,12 +327,27 @@ its URL or by the name of a `[source]` already in `.git-filesync`.
 | `--commit REV` | master revision FILE corresponds to, instead of looking it up |
 | `--strict` | the file must stay an exact copy (see [Strict files](#strict-files)) |
 | `--force` | relink a file that is already linked |
+| `--no-edit` | commit with the proposed message without opening the editor |
+| `--no-commit` | only stage FILE and `.git-filesync`; prints the proposed commit message (for copying) and the `git commit` command |
 
 - If FILE exists, the master version it matches is looked up and recorded
   as its base. If none matches, the branch head is taken (with a warning) and
   the differences count as adaptations; `--commit` chooses a better base.
 - If FILE doesn't exist, it is fetched from the master.
-- `.git-filesync` and a fetched file are staged – commit when ready.
+- Like [`pull`](#pull), `add` commits FILE (as it is in the working tree)
+  together with its entry in `.git-filesync`; the editor opens with the
+  proposed commit message:
+
+  ```
+  Add src/foo.c from owner/lib@a1b2c3d
+
+  Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
+  ```
+
+  For an existing FILE the subject is `Link FILE to …` (`Relink …` with
+  `--force`); the message notes local modifications and `--strict`. If the
+  commit is aborted, everything stays staged and the `git commit -e -F …`
+  command to finish it is printed.
 
 ```sh
 git filesync add src/foo.c https://github.com/owner/lib.git -p lib/foo.c
