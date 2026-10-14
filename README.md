@@ -68,21 +68,30 @@ directory, and it has no per-file view of what is behind or adapted.)
 Requirements: Python ≥ 3.7, Git ≥ 2.26, and `git-lfs` if you sync files
 stored in Git LFS. Linux, macOS and Windows (Git for Windows).
 
-Clone the repository and register a global Git alias:
+Download `git-filesync.py` from the
+[latest release](https://github.com/stsichler/git-filesync/releases/latest)
+and register a global Git alias:
 
 ```sh
-git clone https://github.com/stsichler/git-filesync.git ~/tools/git-filesync
-
 # Linux / macOS
-git config --global alias.filesync '!python3 ~/tools/git-filesync/git-filesync.py'
+mkdir -p ~/tools
+curl -fsSLo ~/tools/git-filesync.py https://github.com/stsichler/git-filesync/releases/latest/download/git-filesync.py
+git config --global alias.filesync '!python3 ~/tools/git-filesync.py'
 
-# Windows (use forward slashes; `py` or `python`, whatever is on PATH)
-git config --global alias.filesync "!py C:/tools/git-filesync/git-filesync.py"
+# Windows (download in the browser or with curl.exe; use forward slashes;
+# `py` or `python`, whatever is on PATH)
+git config --global alias.filesync "!py C:/tools/git-filesync.py"
 ```
 
 Alternatively (Linux/macOS) put an executable copy named `git-filesync` on
 your `PATH`. Either way the tool is invoked as `git filesync …`; check with
-`git filesync --version`.
+`git filesync --version`. To update, download the script again; the
+[releases](https://github.com/stsichler/git-filesync/releases) list the
+changes of each version.
+
+You can also clone the repository and point the alias at the script in
+it: `main` is the current development state, a tag like `v0.1.2` a
+release.
 
 ## Quick start
 

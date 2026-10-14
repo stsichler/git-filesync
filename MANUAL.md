@@ -496,11 +496,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: curl -fsSLo /tmp/git-filesync.py https://raw.githubusercontent.com/stsichler/git-filesync/main/git-filesync.py
+      - run: curl -fsSLo /tmp/git-filesync.py https://github.com/stsichler/git-filesync/releases/latest/download/git-filesync.py
       - run: python3 /tmp/git-filesync.py status --exit-code
 ```
 
-(For private master repositories the job needs a token with read access.)
+This uses the latest release. To pin a version, download
+`https://github.com/stsichler/git-filesync/releases/download/v0.1.2/git-filesync.py`
+instead. (For private master repositories the job needs a token with read
+access.)
 
 ### Exit codes
 
