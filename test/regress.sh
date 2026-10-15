@@ -32,6 +32,12 @@
 #   10. Robustness: unsafe registry paths, special file names, odd entries
 #   11. Recorded commit: the one that produced the synced version
 #   12. Git LFS: master / slave / both / neither, via mapping and via cache
+#   13. Tags: sources pinned to a tag
+#   14. source: list, rename and change sources
+#   15. Files renamed or deleted in the master
+#   16. Dry runs: pull --dry-run, add / unlink / mv -n
+#   17. add DIR: all files of a master directory, --include / --exclude
+#   18. pull -b / --tag: switching branch or tag; newest tag hints
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -75,7 +81,7 @@ check() {
 section() { printf '\n=== %s\n' "$1"; }
 
 # st [ARGS...] - 'status -s' code of the first file listed ("" = nothing to
-# report). Three columns: upstream (P pending, O older ...), committed
+# report). Three columns: upstream (P pending, O older, R renamed ...), committed
 # (A adapted), worktree (M modified, D deleted ...); trailing blanks removed.
 st() { git filesync status -s "$@" 2>/dev/null | head -1 | cut -c1-3 | sed 's/ *$//'; }
 
@@ -673,9 +679,14 @@ git commit -qm "drop unsafe entries"
 # the same paths given on the command line
 check "add into .git refused" "$(rc git filesync add .git/x file:///nowhere/m6.git -p a.txt)" "2"
 check "add outside refused" "$(rc git filesync add ../x file:///nowhere/m6.git -p a.txt)" "2"
+# a master file added to an existing directory goes into it, like cp
 mkdir d
-check "add directory refused" "$(git filesync add d file:///nowhere/m6.git -p a.txt 2>&1 | grep -c 'is a directory')" "1"
-check "master path is a directory" "$(git filesync add x.txt file:///nowhere/m6.git -p sub 2>&1 | grep -c "no file 'sub'")" "1"
+quiet git filesync add --no-commit d file:///nowhere/m6.git -p a.txt
+check "add FILE into existing directory" "$(git config -f .git-filesync file.d/a.txt.path)" "a.txt"
+git reset -q --hard
+# a master directory links the files below it
+check "master path is a directory" "$(git filesync add -n x.txt file:///nowhere/m6.git -p sub | cut -d' ' -f1-5)" \
+  "would link x.txt/s.txt -> nowhere/m6:sub/s.txt"
 quiet git filesync add a.txt file:///nowhere/m6.git
 check "mv outside refused" "$(rc git filesync mv a.txt ../moved.txt)" "2"
 check "mv outside: file stays" "$(ls a.txt ../moved.txt 2>/dev/null)" "a.txt"
@@ -841,6 +852,337 @@ if git lfs version >/dev/null 2>&1; then
 else
   echo "skip Git LFS tests (git-lfs not installed)"
 fi
+
+
+# =============================================================================
+section "13. Tags: sources pinned to a tag"
+# =============================================================================
+cd "$T"
+
+# m9.git (bare, the server) and checkout co9: t.c with lines 1..3, tag v1
+git init -q --bare m9.git
+git -C m9.git config uploadpack.allowFilter true
+git clone -q m9.git co9 2>/dev/null
+(cd co9 && printf '1\n2\n3\n' > t.c && git add . && git commit -qm v1 && git tag v1 \
+  && git push -q origin main v1)
+URL9=file://$T/m9.git
+
+new_slave s9
+check "add -b and --tag exclude each other" "$(rc git filesync add -b main --tag v1 t.c "$URL9")" "2"
+quiet git filesync add --tag v1 t.c "$URL9"
+SRC9=$(git config -f .git-filesync --get-regexp '^source\..*\.url' | sed 's/^source\.\(.*\)\.url .*/\1/')
+check "add --tag: source with tag, no branch" \
+  "$(git config -f .git-filesync --get-regexp '^source\.' | cut -d' ' -f1 | sed 's/.*\.//' | sort | oneline)" "tag url "
+check "add --tag: message names the tag" "$(git log -1 --format=%B | grep -c "^Upstream: $URL9 (v1:t.c)$")" "1"
+check "status -v shows the tag" "$(git filesync status -v | grep -c '(tag v1)')" "1"
+
+# a newer commit on the branch doesn't concern the pinned file
+(cd ../co9 && sed -i 's/^3$/3b/' t.c && git commit -qam "on main" && git push -q origin main)
+check "tag: branch commits ignored" "$(st)" ""
+
+# the tag is in the cache: nothing is fetched, works without the server
+mv ../m9.git ../m9-away.git
+check "tag: no fetch needed (server gone)" "$(git filesync status 2>&1)" "nothing to sync, 1 linked file unmodified"
+mv ../m9-away.git ../m9.git
+
+# new tag v2: set-tag stages the change, the missing tag is fetched
+(cd ../co9 && git tag v2 && git push -q origin v2)
+git filesync source set-tag "$SRC9" v2 >/dev/null
+check "set-tag: tag replaced" "$(git config -f .git-filesync source.$SRC9.tag)" "v2"
+check "set-tag: registry staged" "$(git status --porcelain .git-filesync)" "M  .git-filesync"
+git commit -qm "pin v2"
+check "new tag: pending" "$(st)" "P"
+quiet git filesync pull --no-edit t.c
+check "pull to the new tag" "$(oneline < t.c)" "1 2 3b "
+
+# with a mapped checkout the tag is taken from there, its branch ignored
+git filesync map "$URL9" "$T/co9" >/dev/null
+(cd ../co9 && sed -i 's/^1$/1c/' t.c && git commit -qam "after v2")
+check "mapped: branch ignored" "$(st)" ""
+check "mapped: no checked-out warning for a tag" "$(git filesync status 2>&1 | grep -c 'checked out')" "0"
+(cd ../co9 && git tag v3)
+git filesync source set-tag "$SRC9" v3 >/dev/null
+check "mapped: tag from the checkout" "$(st)" "P"
+git filesync map "$URL9" --unset >/dev/null
+check "tag unknown on the server: error" "$(st)" "E"
+
+# back to following the branch
+git filesync source set-branch "$SRC9" main >/dev/null
+check "set-branch: branch set, tag removed" \
+  "$(git config -f .git-filesync source.$SRC9.branch) $(git config -f .git-filesync source.$SRC9.tag)" "main "
+check "set-branch: up to date with main" "$(st)" ""
+git commit -qm "follow main"
+
+
+# =============================================================================
+section "14. source: list, rename and change sources"
+# =============================================================================
+# (continues in s9)
+
+check "source: lists the keys" "$(git filesync source)" "$SRC9"
+check "source -v" "$(git filesync source -v)" "$(printf '%s\t%s (main, 1 file)' "$SRC9" "$URL9")"
+check "source: unknown name" "$(rc git filesync source set-url nope file:///x)" "2"
+
+git filesync source rename "$SRC9" lib9 >/dev/null
+check "rename: section renamed" "$(git config -f .git-filesync source.lib9.url)" "$URL9"
+check "rename: files follow" "$(git config -f .git-filesync file.t.c.source)" "lib9"
+check "rename: old section gone" "$(git config -f .git-filesync --get-regexp "^source\.$SRC9\." | wc -l)" "0"
+check "rename: status works" "$(st)" ""
+git commit -qm "rename source"
+
+git filesync source set-url lib9 "$URL9/" >/dev/null
+check "set-url" "$(git config -f .git-filesync source.lib9.url)" "$URL9/"
+check "set-url: status works" "$(st)" ""
+
+# a second source for the same URL, pinned to v1; making it follow main too
+# would duplicate lib9
+quiet git filesync add --tag v1 u.c "$URL9" -p t.c
+SRC9B=$(git config -f .git-filesync file.u.c.source)
+check "same URL, other ref: own source" "$([ "$SRC9B" != lib9 ] && echo own)" "own"
+check "set-branch: duplicate refused" "$(rc git filesync source set-branch "$SRC9B" main)" "2"
+check "rename: existing name refused" "$(rc git filesync source rename "$SRC9B" lib9)" "2"
+
+# add by name: exactly that source, whatever its branch or tag; -b/--tag may
+# only repeat it. Relinking its only file keeps the source.
+quiet git filesync add --force u.c "$SRC9B" -p t.c
+check "relink only file by name: source kept" "$(git config -f .git-filesync source.$SRC9B.tag)" "v1"
+quiet git filesync add --no-commit w.c "$SRC9B" -p t.c
+check "add by name: pinned source joined" "$(git config -f .git-filesync file.w.c.source)" "$SRC9B"
+check "add by name: content at the tag" "$(oneline < w.c)" "1 2 3 "
+check "add by name, other ref: refused" "$(rc git filesync add --no-commit -b main x.c "$SRC9B" -p t.c)" "2"
+check "add by name, same ref repeated" "$(rc git filesync add --no-commit --tag v1 y.c "$SRC9B" -p t.c)" "0"
+printf '[source "dup"]\n\turl = %s\n\ttag = v1\n' "$URL9" >> .git-filesync
+quiet git filesync add --no-commit v.c dup -p t.c
+check "add by name: that source, not an equal one" "$(git config -f .git-filesync file.v.c.source)" "dup"
+
+# add by URL: a source is reused only if URL and branch/tag both match
+quiet git filesync add --no-commit a.c "$URL9" -p t.c
+check "add by URL, default branch: branch source reused" "$(git config -f .git-filesync file.a.c.source)" "lib9"
+quiet git filesync add --no-commit b.c "$URL9" -p t.c --tag v1
+check "add by URL + tag: first source with that tag" "$(git config -f .git-filesync file.b.c.source)" "$SRC9B"
+quiet git filesync add --no-commit c.c "$URL9" -p t.c --tag v2
+check "add by URL, other tag: new source" \
+  "$(git config -f .git-filesync file.c.c.source | grep -cvE "^(lib9|$SRC9B|dup)$")" "1"
+git reset -q --hard
+
+
+# =============================================================================
+section "15. Files renamed or deleted in the master"
+# =============================================================================
+cd "$T"
+
+# m10.git (bare, via the blobless cache) and checkout co10:
+# lib/r.c (lines a..i) and lib/gone.c
+git init -q --bare m10.git
+git -C m10.git config uploadpack.allowFilter true
+git clone -q m10.git co10 2>/dev/null
+(cd co10 && mkdir lib && printf 'a\nb\nc\nd\ne\nf\ng\nh\ni\n' > lib/r.c && echo x > lib/gone.c \
+  && git add . && git commit -qm init && git push -q origin main)
+URL10=file://$T/m10.git
+
+new_slave s10
+quiet git filesync add r.c "$URL10" -p lib/r.c
+quiet git filesync add gone.c "$URL10" -p lib/gone.c
+SRC10=$(git config -f .git-filesync file.r.c.source)
+
+# r.c: renamed with a change, then changed again; gone.c: deleted
+(cd ../co10 && git mv lib/r.c lib/renamed.c && sed -i 's/^b$/B/' lib/renamed.c \
+  && git commit -qm "rename r" && sed -i 's/^i$/I/' lib/renamed.c && git commit -qam "change I" \
+  && git rm -q lib/gone.c && git commit -qm "drop gone" && git push -q origin main)
+check "renamed upstream: short code" "$(st r.c)" "R"
+check "renamed upstream: long format" \
+  "$(git filesync status r.c | grep -cP '^\trenamed:\s+r\.c  \(lib/r\.c -> lib/renamed\.c, 2 commits\)')" "1"
+check "deleted upstream: short code" "$(st gone.c)" "X"
+check "deleted upstream: unlink hint" "$(git filesync status | grep -c 'git filesync unlink <file>')" "1"
+check "deleted upstream: status rc 0" "$(rc git filesync status)" "0"
+check "deleted upstream: --exit-code" "$(rc git filesync status --exit-code gone.c)" "1"
+check "deleted upstream: hook" "$(git filesync status --hook 2>&1 | grep -c 'gone.c: upstream deleted')" "1"
+
+# pull follows the rename; a committed adaptation is merged across it
+sed -i 's/^e$/e-local/' r.c
+git commit -qam adapt
+quiet git filesync pull --no-edit r.c
+check "pull follows rename: path updated" "$(git config -f .git-filesync file.r.c.path)" "lib/renamed.c"
+check "pull follows rename: merged" "$(oneline < r.c)" "a B c d e-local f g h I "
+check "pull follows rename: message" \
+  "$(git log -1 --format=%B | grep -cE '^(Upstream: .*\(main:lib/renamed.c\)|Renamed upstream: lib/r.c -> lib/renamed.c|- rename r .*|- change I .*)$')" "4"
+check "after rename: only adapted" "$(st r.c)" " A"
+
+# pull refuses a deleted file and says how to proceed
+check "pull refuses deleted file" "$(rc git filesync pull --no-edit gone.c)" "2"
+check "deleted: hint" "$(git filesync pull gone.c 2>&1 | grep -c "keep the file with 'git filesync unlink gone.c'")" "1"
+check "deleted: file untouched" "$(cat gone.c)" "x"
+check "deleted: --commit with an older revision" \
+  "$(rc git filesync pull --no-edit --commit "$(git -C ../co10 rev-parse HEAD~1)" gone.c)" "0"
+
+# renamed twice; a pure rename commits only the registry
+(cd ../co10 && git mv lib/renamed.c lib/again.c && git commit -qm "rename again" \
+  && git mv lib/again.c lib/final.c && git commit -qm "and again" && git push -q origin main)
+check "chained rename" "$(git filesync status r.c | grep -c 'lib/renamed.c -> lib/final.c, 2 commits')" "1"
+quiet git filesync pull --no-edit r.c
+check "pure rename: path updated" "$(git config -f .git-filesync file.r.c.path)" "lib/final.c"
+check "pure rename: commit has only the registry" "$(git show --name-only --format= HEAD)" ".git-filesync"
+check "pure rename: then clean" "$(st r.c)" " A"
+
+
+# =============================================================================
+section "16. Dry runs: pull --dry-run, add / unlink / mv -n"
+# =============================================================================
+# (continues in s10)
+
+(cd ../co10 && sed -i 's/^g$/G-up/' lib/final.c && git commit -qam "change G" && git push -q origin main)
+BEFORE=$(git rev-parse HEAD)
+check "pull --dry-run: reports" "$(git filesync pull --dry-run r.c)" \
+  "r.c: would sync to $SRC10@$(git -C ../co10 rev-parse --short HEAD) (adaptations merged cleanly)"
+check "pull --dry-run: nothing changed" "$(git rev-parse HEAD) $(git status --porcelain)" "$BEFORE "
+sed -i 's/^g$/g-local/' r.c
+git commit -qam "local g"
+check "pull --dry-run: conflict reported" "$(git filesync pull --dry-run r.c | grep -c '1 merge conflict(s)')" "1"
+check "pull --dry-run: rc" "$(rc git filesync pull --dry-run r.c)" "0"
+check "pull --dry-run: file untouched" "$(grep -c '^<<<<<<<' r.c)" "0"
+git reset -q --hard HEAD~1
+
+check "add -n" "$(git filesync add -n new.c "$URL10" -p lib/final.c)" \
+  "would link new.c -> $SRC10:lib/final.c (main), fetched, based on $(git -C ../co10 rev-parse --short HEAD)"
+check "add -n: nothing written" "$(ls new.c 2>/dev/null; git status --porcelain)" ""
+check "unlink -n" "$(git filesync unlink -n r.c)" "would unlink r.c"
+check "mv -n" "$(git filesync mv -n r.c moved.c)" "would move r.c -> moved.c"
+check "-n: nothing changed" "$(ls r.c) $(git status --porcelain)" "r.c "
+
+
+# =============================================================================
+section "17. add DIR: all files of a master directory, --include / --exclude"
+# =============================================================================
+cd "$T"
+
+# m11 (only via mapping): api/ with .proto files, tests and a README; docs/
+git init -q m11
+(cd m11 && mkdir -p api/v1 api/test docs \
+  && for f in api/a.proto api/v1/b.proto api/v1/b_test.proto api/test/t.proto api/README.md docs/x.md; do
+       echo "$f" > $f; done && git add . && git commit -qm init)
+new_slave s11
+git filesync map file:///nowhere/m11.git "$T/m11" >/dev/null
+
+# PROTO - the options linking the .proto files of api/ as proto/
+PROTO=(-p api --include '*.proto' --exclude '*_test.proto' --exclude test/)
+quiet git filesync add proto file:///nowhere/m11.git "${PROTO[@]}"
+check "add DIR: files linked" \
+  "$(git config -f .git-filesync --get-regexp '^file\..*\.path' | LC_ALL=C sort | oneline)" \
+  "file.proto/a.proto.path api/a.proto file.proto/v1/b.proto.path api/v1/b.proto "
+check "add DIR: content" "$(cat proto/v1/b.proto)" "api/v1/b.proto"
+check "add DIR: one commit" "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" \
+  ".git-filesync proto/a.proto proto/v1/b.proto "
+check "add DIR: message" "$(git log -1 --format=%B | sed '/^$/d; s/@[0-9a-f]*$/@X/' | oneline)" \
+  "Add 2 files from nowhere/m11@X Upstream: file:///nowhere/m11.git (main:api/) - proto/a.proto - proto/v1/b.proto "
+check "add DIR: status clean" "$(st)" ""
+
+# a new master file: the same add links only that one
+(cd ../m11 && echo c > api/c.proto && git add . && git commit -qm c)
+OUT=$(git filesync add proto nowhere/m11 "${PROTO[@]}" 2>&1)
+check "add DIR again: linked ones skipped" "$(echo "$OUT" | grep -c '^2 files already linked, skipped')" "1"
+check "add DIR again: new file committed" "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" \
+  ".git-filesync proto/c.proto "
+check "add DIR again: subject" "$(git log -1 --format=%s | sed 's/@.*//')" "Add proto/c.proto from nowhere/m11"
+check "add DIR: nothing new" "$(git filesync add proto nowhere/m11 "${PROTO[@]}" 2>&1)" \
+  "3 files already linked, skipped (use --force to relink)"
+
+# an existing file is linked as it is; '/x.md' is anchored at the directory
+mkdir docs && echo mine > docs/x.md
+quiet git filesync add docs nowhere/m11 --include /x.md
+check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
+check "add DIR: existing file adapted" "$(st docs)" " A"
+check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "Link docs/x.md to nowhere/m11"
+
+# pattern forms
+check "pattern '**/v1/*'" "$(git filesync add -n all nowhere/m11 -p api --include '**/v1/*' | wc -l)" "2"
+check "pattern 'test/' (directory)" "$(git filesync add -n all nowhere/m11 -p api --include 'test/' | cut -d' ' -f3)" "all/test/t.proto"
+check "pattern 'v?/b*.proto'" "$(git filesync add -n all nowhere/m11 -p api --include 'v?/b[_.]*' | wc -l)" "2"
+check "patterns need a master directory" "$(rc git filesync add x nowhere/m11 -p api/a.proto --include '*')" "2"
+check "whole master repository (docs/x.md already linked)" \
+  "$(git filesync add -n . nowhere/m11 -p / --exclude '*.proto' | grep '^would' | cut -d' ' -f3 | oneline)" "api/README.md "
+
+# the script itself, synced into the repository and run via a repo alias
+mkdir tools && cp "$S" tools/git-filesync.py
+git config alias.fs '!python3 tools/git-filesync.py'
+check "repo alias to a copy of the script, from a subdirectory" "$(cd proto && git fs status -s v1/b.proto; echo $?)" "0"
+
+
+# =============================================================================
+section "18. pull -b / --tag: switching branch or tag; newest tag hints"
+# =============================================================================
+cd "$T"
+
+# m12.git (bare, via the cache) and checkout co12: a.c b.c c.c (lines 1..5).
+# v1.0; v1.1 changes line 5 of a.c and b.c; v2.0-rc1 (pre-release) changes a.c
+git init -q --bare m12.git
+git -C m12.git config uploadpack.allowFilter true
+git clone -q m12.git co12 2>/dev/null
+(cd co12 && printf '1\n2\n3\n4\n5\n' > a.c && cp a.c b.c && cp a.c c.c && git add . \
+  && git commit -qm v1 && git tag v1.0 \
+  && sed -i 's/^5$/5-v11/' a.c b.c && git commit -qam "v1.1 change" && git tag v1.1 \
+  && sed -i 's/^5-v11$/5-rc/' a.c && git commit -qam "rc change" && git tag v2.0-rc1 \
+  && git push -q origin main --tags)
+URL12=file://$T/m12.git
+
+new_slave s12
+for f in a b c; do quiet git filesync add --tag v1.0 $f.c "$URL12"; done
+SRC12=$(git config -f .git-filesync file.a.c.source)
+
+# hints at the newest tag (pre-releases don't count): status -v, source -v, pull
+check "status -v: newest tag" "$(git filesync status -v | grep -c '(tag v1.0, newest v1.1)')" "3"
+check "plain status: no hint" "$(git filesync status | grep -c newest)" "0"
+check "source -v: newest tag" "$(git filesync source -v)" \
+  "$(printf '%s\t%s (tag v1.0, newest v1.1, 3 files)' "$SRC12" "$URL12")"
+check "pull: hint" \
+  "$(git filesync pull --all 2>&1 | grep -c "^hint: $SRC12 is pinned to tag v1.0; the newest tag is v1.1 ")" "1"
+(cd ../co12 && git tag v1.2 HEAD~1 && git push -q origin v1.2)
+check "newer tag on the server is seen" "$(git filesync source -v | grep -c 'newest v1.2,')" "1"
+
+# switching only some files of a source splits it; the adaptation is merged
+sed -i 's/^1$/1-local/' a.c
+git commit -qam adapt
+quiet git filesync pull --no-edit --tag v1.1 a.c
+check "partial switch: file moved to a new source" "$(git config -f .git-filesync file.a.c.source)" "$SRC12-2"
+check "partial switch: new source pinned" "$(git config -f .git-filesync source.$SRC12-2.tag)" "v1.1"
+check "partial switch: old source unchanged" \
+  "$(git config -f .git-filesync source.$SRC12.tag) $(git config -f .git-filesync file.b.c.source)" "v1.0 $SRC12"
+check "partial switch: merged" "$(oneline < a.c)" "1-local 2 3 4 5-v11 "
+check "partial switch: message" \
+  "$(git log -1 --format=%B | grep -cE '^(Sync a.c from |Switched from tag v1.0 to tag v1.1.$)')" "2"
+check "partial switch: all committed" "$(git status --porcelain)" ""
+
+# the remaining files join the source that already has v1.1; the emptied
+# source is removed; c.c is unchanged, so its switch goes into b.c's commit
+quiet git filesync pull --no-edit --tag v1.1 b.c c.c
+check "switch rest: files joined the existing source" \
+  "$(git config -f .git-filesync file.b.c.source) $(git config -f .git-filesync file.c.c.source)" "$SRC12-2 $SRC12-2"
+check "switch rest: emptied source removed" "$(git config -f .git-filesync --get-regexp "^source\.$SRC12\." | wc -l)" "0"
+check "switch rest: all committed" "$(git status --porcelain)" ""
+
+# all files of a source: the source itself is changed; nothing to sync -> own commit
+quiet git filesync pull --no-edit --all --tag v1.2
+check "whole source switched in place" "$(git config -f .git-filesync source.$SRC12-2.tag)" "v1.2"
+check "switch without sync: own commit" "$(git log -1 --format=%s)" "Switch $SRC12-2 from tag v1.1 to tag v1.2"
+check "switch without sync: committed" "$(git status --porcelain)" ""
+
+# back to the branch
+quiet git filesync pull --no-edit --all -b main
+check "-b: branch set, tag removed" \
+  "$(git config -f .git-filesync source.$SRC12-2.branch) $(git config -f .git-filesync source.$SRC12-2.tag)" "main "
+check "-b: synced to the branch" "$(oneline < a.c)" "1-local 2 3 4 5-rc "
+
+# refusals and dry runs change nothing
+check "switch to a missing tag" "$(rc git filesync pull --no-edit --tag v9 a.c)" "2"
+check "missing tag: registry unchanged" "$(git status --porcelain) $(git config -f .git-filesync source.$SRC12-2.branch)" " main"
+check "--commit and --tag exclude each other" "$(rc git filesync pull --commit v1.0 --tag v1.0 a.c)" "2"
+check "pull --dry-run --tag" "$(git filesync pull --dry-run --tag v1.0 a.c | grep -cE '^(would: Move a.c from|a.c: would sync to .*from branch main)')" "2"
+check "pull --dry-run --tag: nothing changed" "$(git status --porcelain)" ""
+
+# an uncommitted source rename doesn't block pull; it goes into the sync commit
+git filesync source rename "$SRC12-2" lib12 >/dev/null
+(cd ../co12 && sed -i 's/^3$/3-up/' a.c && git commit -qam "change 3" && git push -q origin main)
+check "pull after uncommitted source rename" "$(rc git filesync pull --no-edit a.c)" "0"
+check "rename went into the sync commit" "$(git status --porcelain) $(git show HEAD:.git-filesync | grep -c 'source = lib12')" " 3"
 
 
 # =============================================================================

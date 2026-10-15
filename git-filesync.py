@@ -3,6 +3,10 @@
 # SPDX-License-Identifier: MIT-0
 # Copyright (c) 2026 Stefan Sichler - https://github.com/stsichler/git-filesync
 # Developed together with Claude (Anthropic).
+#
+# Found this file in your repository? It was probably copied there - maybe
+# kept up to date by git-filesync itself. Run it with --help, or see the
+# manual linked at the end of the following text.
 """
 git-filesync - keep individual files in sync between Git repositories.
 
@@ -12,7 +16,7 @@ repository:
 
     [source "owner/lib"]
         url = https://github.com/owner/lib.git
-        branch = main
+        branch = main          ; or: tag = v1.2 (pinned, see `source`)
     [file "src/foo.c"]
         source = owner/lib
         path = lib/foo.c       ; path in the master
@@ -32,8 +36,11 @@ follow the command.
                                 upstream changes to sync, committed
                                 adaptations, uncommitted changes
         -s, --short             short format: upstream/committed/worktree
-                                columns
+                                columns (upstream: P pending, O older,
+                                D diverged, R renamed, X deleted in the
+                                master, N new; E error)
         -v, --verbose           also list all linked files with their sources
+                                (pinned ones with the newest tag)
         --exit-code             exit 1 if something is to sync or a strict
                                 file is modified
         --hook                  terse output on stderr (for git hooks)
@@ -41,15 +48,24 @@ follow the command.
     pull PATH... | --all        sync to the master's version of the file and
                                 commit with a message listing the master
                                 commits since the last sync; adaptations are
-                                merged, uncommitted changes refused
+                                merged, uncommitted changes refused; a file
+                                renamed in the master is followed, one
+                                deleted there is reported
         --all                   all files with something to sync
         --commit REV            sync to this master revision (one file;
                                 also backwards)
+        -b, --branch BRANCH     switch the files to following BRANCH, and sync
+        --tag TAG               switch the files to (pin them to) TAG, and
+                                sync; a source whose files are all given is
+                                changed itself, otherwise the given files
+                                move to a source with that URL and ref
         --overwrite             discard local adaptations instead of merging
         --autostash             set uncommitted changes aside, re-apply after
         --no-edit               commit without opening the editor
         --no-commit             only stage; print the proposed commit message
                                 and the commit command
+        --dry-run               only report what would happen (incl.
+                                merge conflicts); change nothing
 
     diff [PATH...] [-- OPTS]    local changes vs. the synced master version
                                 (one `git diff`, OPTS passed to it)
@@ -64,22 +80,40 @@ follow the command.
         --prompt                ask even for explicitly given files
 
     add FILE URL|SOURCE         link FILE to a file in a master repository
-                                (URL or name of a [source]; a new source is
-                                named 'owner/repo' after the URL, with a
-                                number appended if taken); an existing FILE's
+                                (SOURCE: exactly that [source]; URL: the
+                                source with that URL and branch/tag, else a
+                                new one named 'owner/repo' after the URL, with
+                                a number appended if taken); an existing FILE's
                                 master version is detected, a missing FILE
                                 is fetched; FILE and .git-filesync are
                                 committed with a proposed message
+    add DIR URL|SOURCE          link every file below a master directory
+                                (-p, default: same as DIR) as DIR/...; files
+                                already linked are skipped; one commit
         -b, --branch BRANCH     master branch (default: master's default
                                 branch or that of SOURCE)
+        --tag TAG               pin to a master tag instead of a branch
         -p, --path PATH         path in the master (default: same as FILE)
+        --include PATTERN       DIR: only files matching (gitignore-like,
+                                relative to the master directory; repeatable)
+        --exclude PATTERN       DIR: skip files matching (repeatable)
         --commit REV            master revision FILE corresponds to
         --strict                FILE must stay an exact copy
         --force                 relink an already linked file
         --no-edit, --no-commit  as for pull
+        -n, --dry-run           only show what would be linked
 
     unlink PATH...              remove links (the files are kept)
     mv OLD NEW                  move a linked file (git mv), keeping its link
+        -n, --dry-run           (both) only show what would be done
+
+    source                      list the [source]s (-v: with URL, ref, newest
+                                tag if pinned, files)
+    source rename OLD NEW       rename a [source] and all references to it
+    source set-url NAME URL     change the URL of a [source]
+    source set-branch NAME BRANCH  follow BRANCH (replaces a tag)
+    source set-tag NAME TAG     pin to TAG (replaces a branch); a tag is
+                                taken as immutable: fetched only if missing
 
     map [URL [DIR]]             use the local checkout DIR instead of fetching
                                 URL; its branch is used, unpushed commits
@@ -119,7 +153,7 @@ import tempfile
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.1.2"
+__version__ = "0.2.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 HOOK_MARKER = "git-filesync"
@@ -372,6 +406,22 @@ class Source:
         return self.git(["merge-base", "--is-ancestor", a, b],
                         check=False).returncode == 0
 
+    def newest_tag(self, current):
+        """The highest version tag with the same prefix as current (e.g. 'v')
+        if it is not current, else None. Pre-releases ('-rc1' ...) count only
+        if current is one."""
+        if not hasattr(self, "_tags"):
+            p = self.git(["-c", "versionsort.suffix=-", "for-each-ref", "--sort=-v:refname",
+                          "--format=%(refname:strip=2)", "refs/tags/"], check=False)
+            self._tags = out(p).splitlines()
+        prefix = re.match(r"\D*", current).group(0)
+        pre = "-" in current[len(prefix):]
+        for t in self._tags:
+            rest = t[len(prefix):]
+            if t.startswith(prefix) and rest[:1].isdigit() and (pre or "-" not in rest):
+                return None if t == current else t
+        return None
+
     def last_change(self, rev, path):
         """Newest commit up to rev that changed path: the commit the file's
         version at rev comes from (same blob, by git's history simplification).
@@ -379,11 +429,60 @@ class Source:
         entry, whatever else happened on the branch."""
         return out(self.git(["rev-list", "-1", rev, "--", lit(path)])) or rev
 
-    def count(self, old, new, path):
-        return int(out(self.git(["rev-list", "--count", f"{old}..{new}", "--", lit(path)])))
+    def count(self, old, new, *paths):
+        return int(out(self.git(["rev-list", "--count", f"{old}..{new}", "--"]
+                                + [lit(p) for p in paths])))
 
-    def log(self, rng, path):
-        return out(self.git(["log", "--reverse", "--format=- %s (%h)", rng, "--", lit(path)]))
+    def log(self, rng, *paths):
+        return out(self.git(["log", "--reverse", "--format=- %s (%h)", rng, "--"]
+                            + [lit(p) for p in paths]))
+
+    def follow(self, old, tip, path):
+        """What became of path, which exists at old but not at tip:
+        ('renamed', new path, commit) or ('deleted', path, commit), None if
+        unknown. Looks only at the commit that removed it (and at later ones
+        for chained renames), so few blobs are needed in the blobless cache."""
+        start = old
+        for _ in range(20):
+            gone = out(self.git(["rev-list", "-1", f"{start}..{tip}", "--", lit(path)],
+                                check=False))
+            if not gone:
+                return None
+            p = self.git(["diff-tree", "-r", "-z", "-M", "--name-status", "--diff-filter=RD",
+                          "--no-commit-id", f"{gone}^", gone], check=False)
+            if p.returncode:
+                return None
+            items = p.stdout.decode("utf-8", "replace").split("\0")
+            new, i = None, 0
+            while i < len(items) - 1:
+                status = items[i]
+                if status.startswith("R"):
+                    if items[i + 1] == path:
+                        new = items[i + 2]
+                    i += 3
+                else:
+                    i += 2
+            if not new:
+                return "deleted", path, gone
+            if self.blob_at(tip, new):
+                return "renamed", new, gone
+            path, start = new, gone      # renamed again (or deleted) later
+        return None
+
+    def files_below(self, commit, path):
+        """Paths of all regular files at or below directory path ('' = root)."""
+        p = self.git(["ls-tree", "-r", "-z", "--full-tree", commit]
+                     + (["--", lit(path)] if path else []))
+        result = []
+        for entry in p.stdout.decode("utf-8", "replace").split("\0"):
+            info, _, name = entry.partition("\t")
+            if name and info.split(" ")[0] in ("100644", "100755"):
+                result.append(name)
+        return result
+
+    def is_dir(self, commit, path):
+        p = self.git(["cat-file", "-t", f"{commit}:{path}"], check=False)
+        return p.returncode == 0 and out(p) == "tree"
 
     def path_history(self, path, max_count):
         """[(commit, blob id)] of commits on the branch touching path, newest first."""
@@ -404,15 +503,18 @@ class Context:
         self.slave_top = slave.top if slave else None
         self.fetch = not getattr(args, "no_fetch", False)
         self.force_remote = getattr(args, "remote", False)
+        # fetch even for a tag already cached, to learn about newer tags
+        self.want_tags = getattr(args, "verbose", False) or args.cmd in ("pull", "source")
         self._sources = {}
         self._ready = set()
         self._mappings = None
 
-    def source(self, url, branch, name=None):
-        """Source for url+branch; name is its key in .git-filesync (used as label)."""
-        key = (norm_url(url), branch)
+    def source(self, url, ref, name=None):
+        """Source for url and ref (('branch' | 'tag', name)); name is its key
+        in .git-filesync (used as label)."""
+        key = (norm_url(url), ref)
         if key not in self._sources:
-            self._sources[key] = self._make(url, branch, name)
+            self._sources[key] = self._make(url, ref, name)
         return self._sources[key]
 
     def local_path(self, url):
@@ -464,8 +566,14 @@ class Context:
                 return out(p)
         raise FsError(f"cannot determine default branch of {url}; use --branch")
 
-    def _make(self, url, branch, name=None):
+    def _make(self, url, ref, name=None):
+        kind, branch = ref
         local = self.local_path(url)
+        if kind == "tag":
+            if local:
+                return Source(local, f"refs/tags/{branch}", f"local checkout {local}", local=True)
+            return Source(self._cache(url, tag=branch), f"refs/tags/{branch}",
+                          name or repo_label(url))
         if local:
             # the link's branch as it is in the checkout (incl. unpushed
             # commits) - not whatever happens to be checked out there
@@ -483,11 +591,16 @@ class Context:
     def cache_dir(url):
         return cache_root() / (hashlib.sha1(norm_url(url).encode()).hexdigest()[:16] + ".git")
 
-    def _cache(self, url):
+    def _cache(self, url, tag=None):
+        """The cache clone of url, fetched once per run - not for a tag
+        already there (tags are taken as immutable), unless newer tags are
+        of interest (want_tags)."""
         d = self.cache_dir(url)
         if d in self._ready:
             return d
         env = clean_env()
+        fetch = ["fetch", "--quiet", "--prune", "origin",
+                 "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"]
         if not d.exists():
             d.parent.mkdir(parents=True, exist_ok=True)
             tmp = d.with_name(f"{d.name}.tmp{os.getpid()}")
@@ -496,14 +609,17 @@ class Context:
                 git(["clone", "--bare", "--quiet", "--filter=blob:none", "--", url, tmp], env=env)
                 git(["-C", tmp, "config", "remote.origin.fetch",
                      "+refs/heads/*:refs/remotes/origin/*"], env=env)
-                git(["-C", tmp, "fetch", "--quiet", "origin"], env=env)
+                git(["-C", tmp] + fetch, env=env)
                 self._drop_heads(tmp)
                 tmp.rename(d)
             finally:
                 if tmp.exists():
                     shutil.rmtree(tmp, ignore_errors=True)
+        elif tag and not self.want_tags and git(["-C", d, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
+                         env=env, check=False).returncode == 0:
+            return d       # not marked ready: a branch of the same URL still fetches
         elif self.fetch:
-            p = git(["-C", d, "fetch", "--quiet", "--prune", "origin"], env=env, check=False)
+            p = git(["-C", d] + fetch, env=env, check=False)
             if p.returncode:
                 warn(f"fetching {url} failed, using cached state")
             self._drop_heads(d)
@@ -618,6 +734,24 @@ def parse_registry(raw):
     return sources, files
 
 
+def source_ref(source):
+    """('branch' | 'tag', name) of a [source]; None unless exactly one is set."""
+    branch, tag = source.get("branch"), source.get("tag")
+    if bool(branch) == bool(tag):
+        return None
+    return ("tag", tag) if tag else ("branch", branch)
+
+
+def ref_text(ref):
+    """'main' / 'tag v1.2' - how a link's ref is shown."""
+    return f"tag {ref[1]}" if ref[0] == "tag" else ref[1]
+
+
+def newest_text(st):
+    """', newest v1.4' for a link pinned to an older tag."""
+    return f", newest {st.newest}" if st.newest else ""
+
+
 def path_problem(rel):
     """Why rel can't be a linked file, None if it can. Entries come from a
     committed file, possibly written by others: a pull must never write
@@ -641,6 +775,7 @@ class Registry:
         self.slave = slave
         self.path = slave.top / REGISTRY
         self.sources, self.files = {}, {}
+        self.dry_run = False      # only change the in-memory state
         if self.path.exists():
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
             if p.returncode:
@@ -652,6 +787,8 @@ class Registry:
         return [Link(self, rel) for rel in sorted(self.files)]
 
     def _cfg(self, *args):
+        if self.dry_run:
+            return
         if not self.path.exists():
             self.path.write_bytes(REGISTRY_HEADER.encode())
         git(["config", "-f", self.path] + list(args))
@@ -660,9 +797,10 @@ class Registry:
         self._cfg(f"file.{rel}.{name}", value)
         self.files.setdefault(rel, {})[name] = value
 
-    def find_source(self, url, branch):
+    def find_source(self, url, ref, exclude=None):
         for name, s in self.sources.items():
-            if norm_url(s.get("url", "")) == norm_url(url) and s.get("branch") == branch:
+            if name != exclude and norm_url(s.get("url", "")) == norm_url(url) \
+                    and source_ref(s) == ref:
                 return name
         return None
 
@@ -675,26 +813,49 @@ class Registry:
             name, n = f"{base}-{n}", n + 1
         return name
 
-    def source_name(self, url, branch):
-        """Key of the [source] for url+branch (found by URL, not by key),
+    def source_name(self, url, ref):
+        """Key of the [source] for url+ref (found by URL, not by key),
         or the key a new one would get."""
-        return self.find_source(url, branch) or self.new_source_name(url)
+        return self.find_source(url, ref) or self.new_source_name(url)
 
-    def add_source(self, url, branch):
-        """Key of the [source] for url+branch, created if necessary."""
-        name = self.find_source(url, branch)
+    def add_source(self, url, ref):
+        """Key of the [source] for url+ref, created if necessary."""
+        name = self.find_source(url, ref)
         if name:
             return name
         name = self.new_source_name(url)
         self._cfg(f"source.{name}.url", url)
-        self._cfg(f"source.{name}.branch", branch)
-        self.sources[name] = {"url": url, "branch": branch}
+        self._cfg(f"source.{name}.{ref[0]}", ref[1])
+        self.sources[name] = {"url": url, ref[0]: ref[1]}
         return name
 
-    def remove_file(self, rel):
+    def set_source(self, name, key, value):
+        """Set (value None: remove) a key of a [source]."""
+        if value is None:
+            if key in self.sources[name]:
+                self._cfg("--unset-all", f"source.{name}.{key}")
+                del self.sources[name][key]
+        else:
+            self._cfg(f"source.{name}.{key}", value)
+            self.sources[name][key] = value
+
+    def remove_source(self, name):
+        self._cfg("--remove-section", f"source.{name}")
+        del self.sources[name]
+
+    def rename_source(self, old, new):
+        self._cfg("--rename-section", f"source.{old}", f"source.{new}")
+        self.sources[new] = self.sources.pop(old)
+        for rel, f in self.files.items():
+            if f.get("source") == old:
+                self.set_file(rel, "source", new)
+
+    def remove_file(self, rel, keep_source=None):
+        """Remove a [file]; its [source] too when no other file uses it
+        (unless it is keep_source)."""
         src = self.files.pop(rel, {}).get("source")
         self._cfg("--remove-section", f"file.{rel}")
-        if src and src in self.sources and \
+        if src and src != keep_source and src in self.sources and \
                 not any(f.get("source") == src for f in self.files.values()):
             self._cfg("--remove-section", f"source.{src}")
             del self.sources[src]
@@ -713,11 +874,16 @@ class Registry:
         self.slave.git(["add", "-A", "--", REGISTRY])
 
     def uncommitted(self):
-        """[file] entries that differ from the committed .git-filesync."""
+        """[file] entries that differ from the committed .git-filesync in what
+        they record about the file. Which [source] they belong to doesn't
+        count: a changed source may go into any commit."""
         p = self.slave.git(["config", "--blob", f"HEAD:{REGISTRY}", "--list", "-z"], check=False)
         head = parse_registry(p.stdout)[1] if p.returncode == 0 else {}
+
+        def base(entry):
+            return None if entry is None else {k: v for k, v in entry.items() if k != "source"}
         return {rel for rel in set(head) | set(self.files)
-                if head.get(rel) != self.files.get(rel)}
+                if base(head.get(rel)) != base(self.files.get(rel))}
 
 
 class Link:
@@ -743,7 +909,7 @@ class Link:
 
     name = property(lambda self: self.v.get("source", ""))   # key of the [source]
     url = property(lambda self: self.source.get("url", ""))
-    branch = property(lambda self: self.source.get("branch", ""))
+    ref = property(lambda self: source_ref(self.source))     # ('branch' | 'tag', name)
     path = property(lambda self: self.v.get("path", ""))
     commit = property(lambda self: self.v.get("commit", ""))
     blob = property(lambda self: self.v.get("blob", ""))
@@ -821,7 +987,8 @@ def matches_base(slave, src, link, oid, read):
 
 def evaluate(ctx, slave, link):
     """State of a linked file in three independent respects:
-    upstream  - synced master version vs. current master (changed/behind/...)
+    upstream  - synced master version vs. current master (changed/behind/
+                moved: renamed or deleted in the master)
     committed - committed slave version vs. synced master version
                 ('unmodified' | 'adapted' | None if not committed)
     worktree  - working file vs. committed version
@@ -832,18 +999,20 @@ def evaluate(ctx, slave, link):
                          src=None, old=link.commit, old_blob=link.blob, new=None, new_blob=None,
                          count=0, behind=0, has_old=False, diverged=False, local="clean",
                          committed=None, worktree="clean", head_blob=None,
-                         changed=False, pending=False, strict=link.strict, violation=False)
-    url, branch, path = link.url, link.branch, link.path
+                         changed=False, pending=False, strict=link.strict, violation=False,
+                         moved=None, new_path=link.path, newest=None, repinned=None)
+    url, ref, path = link.url, link.ref, link.path
     problem = path_problem(link.rel)
     if problem:
         st.error = (f"{problem} - entry ignored; remove it with "
                     f"'git config -f {REGISTRY} --remove-section \"file.{link.rel}\"'")
         return st
-    if not (url and branch and path):
-        st.error = f"incomplete entry in {REGISTRY} (needs source with url and branch, and path)"
+    if not (url and ref and path):
+        st.error = (f"incomplete entry in {REGISTRY} (needs a source with url and "
+                    "either branch or tag, and path)")
         return st
     try:
-        src = st.src = ctx.source(url, branch, link.name)
+        src = st.src = ctx.source(url, ref, link.name)
     except FsError as e:
         st.error = str(e)
         return st
@@ -881,40 +1050,52 @@ def evaluate(ctx, slave, link):
         st.error = str(e)
         return st
     st.violation = st.strict and (st.committed == "adapted" or st.local == "modified")
-    where = f"branch '{branch}'"
+    where = f"{ref[0]} '{ref[1]}'"
     tip = src.resolve()
     if not tip:
         st.error = f"{where} not found in {src.label}"
         return st
+    if ref[0] == "tag":
+        st.newest = src.newest_tag(ref[1])
+    st.has_old = bool(st.old) and src.resolve(st.old) == st.old
     st.new_blob = src.blob_at(tip, path)
     if not st.new_blob:
-        st.error = (f"'{path}' does not exist in {where} of {src.label} "
-                    f"(renamed upstream? fix the path in {REGISTRY})")
-        return st
+        st.moved = src.follow(st.old, tip, path) if st.has_old else None
+        if not st.moved:
+            st.error = (f"'{path}' does not exist in {where} of {src.label} "
+                        f"(renamed upstream? fix the path in {REGISTRY})")
+            return st
+        if st.moved[0] == "deleted":
+            st.new = st.moved[2]
+            st.pending = True
+            return st
+        path = st.new_path = st.moved[1]
+        st.new_blob = src.blob_at(tip, path)
     st.new = src.last_change(tip, path)    # not the tip: what a pull records
-    st.has_old = bool(st.old) and src.resolve(st.old) == st.old
     if st.has_old:
         if st.new != st.old and src.is_ancestor(st.new, st.old):
             st.behind = src.count(st.new, st.old, path)   # branch older than last sync
         else:
-            st.count = src.count(st.old, st.new, path)
+            st.count = src.count(st.old, st.new, *dict.fromkeys((link.path, path)))
             st.diverged = not src.is_ancestor(st.old, st.new)
     else:
         st.warnings.append(f"last synced commit {st.old[:12] or '-'} not found in "
                            f"{src.label} (unpushed?)")
     st.changed = st.new_blob != st.old_blob
     # a file deleted in the working tree is an uncommitted change, not a sync
-    st.pending = st.changed or st.worktree == "missing"
+    st.pending = st.changed or bool(st.moved) or st.worktree == "missing"
     if src.local:
         if src.note:
             st.warnings.append(src.note)
         if not src.is_published(st.new):   # other unpushed commits don't matter
             st.warnings.append(f"'{path}' in {src.label} comes from commit "
                                f"{src.short(st.new)}, which is not pushed")
-        if src.head_ref() != src.ref:
+        if ref[0] == "tag":
+            pass        # a pinned tag: whatever is checked out doesn't matter
+        elif src.head_ref() != src.ref:
             if src.blob_at("HEAD", path) != st.new_blob:
                 st.warnings.append(f"{src.label} has {src.head_desc()} checked out; "
-                                   f"'{path}' there differs from branch '{branch}', "
+                                   f"'{path}' there differs from {where}, "
                                    "which is what gets synced")
         elif src.has_uncommitted(path):
             st.warnings.append(f"uncommitted changes to '{path}' in {src.label} "
@@ -926,9 +1107,15 @@ def upstream_state(st):
     """(label, note) of a pending upstream change, None if there is none."""
     def commits(n):
         return f"{n} commit{'' if n == 1 else 's'}"
+    if st.moved:
+        kind, path, commit = st.moved
+        if kind == "deleted":
+            return "deleted", f"in the master, by {st.src.short(commit)}"
+        return "renamed", f"{st.link.path} -> {path}" + (f", {commits(st.count)}" if st.count else "")
     if st.changed:
         if st.behind:
-            return "older", f"master branch is {commits(st.behind)} older than last sync"
+            what = "master branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
+            return "older", f"{what} is {commits(st.behind)} older than last sync"
         if st.has_old and not st.diverged:
             return "pending", commits(st.count)
         return "changed", "history diverged" if st.has_old else "previous sync point unknown"
@@ -966,7 +1153,8 @@ def short_code(st):
     if st.error:
         return "E  "
     up = upstream_state(st)
-    x = {"pending": "P", "older": "O", "changed": "D", "new": "N"}[up[0]] if up else " "
+    x = {"pending": "P", "older": "O", "changed": "D", "new": "N", "renamed": "R",
+         "deleted": "X"}[up[0]] if up else " "
     y = "A" if st.committed == "adapted" else " "
     z = {"modified": "M", "deleted": "D", "added": "?"}.get(st.worktree, " ")
     return x + y + z
@@ -1011,7 +1199,7 @@ def print_long(slave, sts, verbose):
             strict = ", strict" if st.strict else ""
             rows.append((st.committed or "uncommitted", st.rel,
                          f"from {st.link.name}:{st.link.path} "
-                         f"({st.link.branch}{strict}){via}", "dim"))
+                         f"({ref_text(st.link.ref)}{newest_text(st)}{strict}){via}", "dim"))
         section("Linked files:", [], rows, None)
 
     up_rows = []
@@ -1019,7 +1207,9 @@ def print_long(slave, sts, verbose):
         up = upstream_state(st)
         if up:
             up_rows.append((up[0], st.rel, up[1], "dim"))
-    section("Upstream changes to sync:", ['use "git filesync pull <file>..." to sync'],
+    section("Upstream changes to sync:", ['use "git filesync pull <file>..." to sync']
+            + (['use "git filesync unlink <file>..." to keep files deleted in the master']
+               if any(r[0] == "deleted" for r in up_rows) else []),
             up_rows, "yellow")
 
     strict_note = ("NOT ALLOWED: strict", "boldred")
@@ -1107,26 +1297,30 @@ def merge3(ours, base, theirs, labels):
         return p.returncode, Path(files[0]).read_bytes()
 
 
-def build_message(st, src, new, new_blob, merged, conflicts, discarded=False):
+def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discarded=False):
     link = st.link
-    url, branch, path = link.url, link.branch, link.path
+    paths = dict.fromkeys((old_path, path))       # old and (if renamed) new path
     # content goes back to the synced master version -> restore, not a sync
     verb = "Restore" if new_blob == st.old_blob and discarded else "Sync"
     lines = [f"{verb} {st.rel} from {link.name}@{src.short(new)}", "",
-             f"Upstream: {url} ({branch}:{path})"]
+             f"Upstream: {link.url} ({link.ref[1]}:{path})"]
+    if path != old_path:
+        lines += ["", f"Renamed upstream: {old_path} -> {path}"]
+    if st.repinned:
+        lines += ["", f"Switched from {' '.join(st.repinned)} to {' '.join(link.ref)}."]
     if new == st.old:
         pass
     elif st.has_old:
         old = st.old
         if src.is_ancestor(new, old) and new != old:
-            log = src.log(f"{new}..{old}", path)
+            log = src.log(f"{new}..{old}", *paths)
             if log:
                 lines += ["", f"Reverts upstream changes after {src.short(new)}:", log]
         else:
             if not src.is_ancestor(old, new):
                 lines += ["", f"Note: {src.short(new)} is not a descendant of the "
                           f"previous sync point {src.short(old)}."]
-            log = src.log(f"{old}..{new}", path)
+            log = src.log(f"{old}..{new}", *paths)
             if log:
                 lines += ["", f"Upstream changes since {src.short(old)}:", log]
     else:
@@ -1139,39 +1333,43 @@ def build_message(st, src, new, new_blob, merged, conflicts, discarded=False):
     return "\n".join(lines) + "\n"
 
 
-def check_other_entries(reg, rel, args):
-    """One commit = this file + its entry; other uncommitted entries would
-    end up in it without their files."""
+def check_other_entries(reg, rels, args):
+    """One commit = these files + their entries; other uncommitted entries
+    would end up in it without their files."""
     if args.no_commit:
         return
-    others = reg.uncommitted() - {rel}
+    others = reg.uncommitted() - set(rels)
     if others:
         raise FsError(f"{REGISTRY} has uncommitted changes for {', '.join(sorted(others))}"
                       " - commit them first, or use --no-commit to stage everything "
                       "and commit together")
 
 
-def message_file(slave, rel, msg):
-    """Keep the proposed commit message in .git/FILESYNC_MSG_*; returns the
-    file and the command that commits the file and its entry with it."""
-    msgfile = slave.gitdir / ("FILESYNC_MSG_" + re.sub(r"[^A-Za-z0-9._-]", "_", rel))
+def message_file(slave, name, msg, rels=None):
+    """Keep the proposed commit message in .git/FILESYNC_MSG_<name>; returns
+    the file and the command that commits the files (default: name) and
+    their entries with it."""
+    msgfile = slave.gitdir / ("FILESYNC_MSG_" + re.sub(r"[^A-Za-z0-9._-]", "_", name))
     msgfile.write_bytes(msg.encode("utf-8"))
-    return msgfile, f'git commit -e -F "{msgfile}" -- {cmd_arg(rel)} {REGISTRY}'
+    paths = " ".join([cmd_arg(r) for r in ([name] if rels is None else rels)] + [REGISTRY])
+    return msgfile, f'git commit -e -F "{msgfile}" -- {paths}'
 
 
-def commit_staged(slave, rel, msg, args, done):
-    """Commit the staged file and its entry with the proposed message (in the
-    editor unless --no-edit). With --no-commit, print the message, so it can
-    be copied, and the command to commit later. done: e.g. 'synced and staged'."""
-    msgfile, commit_cmd = message_file(slave, rel, msg)
+def commit_staged(slave, name, msg, args, done, rels=None):
+    """Commit the staged files (default: name) and their entries with the
+    proposed message (in the editor unless --no-edit). With --no-commit,
+    print the message, so it can be copied, and the command to commit later.
+    done: e.g. 'synced and staged'."""
+    rels = [name] if rels is None else rels
+    msgfile, commit_cmd = message_file(slave, name, msg, rels)
     if args.no_commit:
-        print(f"{rel}: {paint(done, 'green')}. Proposed commit message:\n\n{msg}\n"
+        print(f"{name}: {paint(done, 'green')}. Proposed commit message:\n\n{msg}\n"
               f"Commit with:\n    {commit_cmd}")
         return EXIT_OK
     cmd = ["git", "commit", "-F", str(msgfile)] + ([] if args.no_edit else ["-e"]) + \
-        ["--", lit(rel), REGISTRY]
+        ["--"] + [lit(r) for r in rels] + [REGISTRY]
     if subprocess.run(cmd, cwd=slave.top).returncode:
-        print(f"{rel}: {paint('commit not done', 'yellow')}; changes stay staged. "
+        print(f"{name}: {paint('commit not done', 'yellow')}; changes stay staged. "
               f"Commit later with:\n    {commit_cmd}")
         return EXIT_PENDING
     msgfile.unlink()
@@ -1180,16 +1378,25 @@ def commit_staged(slave, rel, msg, args, done):
 
 def pull_one(slave, reg, st, args):
     link, src = st.link, st.src
-    path = link.path
+    path = st.new_path                   # differs from link.path if renamed upstream
     new, new_blob = st.new, st.new_blob
     if args.commit:
         new = src.resolve(args.commit)
         if not new:
             raise FsError(f"unknown revision '{args.commit}' in {src.label}")
-        new_blob = src.blob_at(new, path)
-        if not new_blob:
-            raise FsError(f"'{path}' does not exist at {args.commit}")
+        for path in dict.fromkeys((link.path, st.new_path)):
+            new_blob = src.blob_at(new, path)
+            if new_blob:
+                break
+        else:
+            raise FsError(f"'{link.path}' does not exist at {args.commit}")
         new = src.last_change(new, path)
+    elif st.moved and st.moved[0] == "deleted":
+        rel = cmd_arg(st.rel)
+        raise FsError(f"{st.rel}: '{st.moved[1]}' was deleted in {src.label} "
+                      f"({src.short(st.moved[2])}) - keep the file with "
+                      f"'git filesync unlink {rel}', or delete it too with "
+                      f"'git filesync unlink {rel} && git rm {rel}'")
     # like `git pull`: uncommitted changes are never merged into a sync
     # commit; --autostash sets them aside and re-applies them afterwards
     dirty = st.worktree in ("modified", "deleted", "added")
@@ -1206,7 +1413,8 @@ def pull_one(slave, reg, st, args):
                       f"'git filesync pull --overwrite {st.rel}', uncommitted changes with "
                       f"'git restore {cmd_arg(st.rel)}'; or allow them with "
                       f"'git config -f {REGISTRY} file.{st.rel}.strict false'")
-    if new_blob == st.old_blob and st.worktree != "missing" and not discard:
+    if new_blob == st.old_blob and path == link.path and st.worktree != "missing" \
+            and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
               + (" (adaptations kept)" if st.committed == "adapted" else ""))
         return EXIT_OK
@@ -1214,7 +1422,7 @@ def pull_one(slave, reg, st, args):
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
                       "commit or stash them first, or use --autostash "
                       f"('git restore {cmd_arg(st.rel)}' discards them)")
-    check_other_entries(reg, st.rel, args)
+    check_other_entries(reg, [st.rel], args)
     for w in st.warnings:
         warn(f"{st.rel}: {w}")
 
@@ -1223,7 +1431,7 @@ def pull_one(slave, reg, st, args):
     if local_mod and not discard:
         # merge all three versions in this repo's normalized form, so that
         # differing eol conventions (and LFS) of master and slave don't matter
-        base = local_equiv(slave, src, st.old_blob, st.rel, path)
+        base = local_equiv(slave, src, st.old_blob, st.rel, link.path)
         if not base:
             raise FsError(f"{st.rel}: base version {st.old_blob[:12]} unavailable; "
                           "cannot merge local modifications")
@@ -1239,13 +1447,28 @@ def pull_one(slave, reg, st, args):
     else:
         content = slave.read_content(slave.as_local(theirs, st.rel), st.rel)
 
+    if args.dry_run:
+        notes = ([f"from {' '.join(st.repinned)}"] if st.repinned else []) + \
+            ([f"renamed upstream: {link.path} -> {path}"] if path != link.path else []) + \
+            (["discarding adaptations"] if discard else []) + \
+            ([paint(f"{conflicts} merge conflict(s)", "boldred") if conflicts else
+              "adaptations merged cleanly"] if merged else []) + \
+            (["uncommitted changes set aside and re-applied"] if stash is not None else [])
+        verb = "restore" if new_blob == st.old_blob and discard else "sync"
+        print(f"{st.rel}: would {verb} to {link.name}@{src.short(new)}"
+              + (f" ({'; '.join(notes)})" if notes else ""))
+        return EXIT_OK
+
+    old_path = link.path
     link.target.parent.mkdir(parents=True, exist_ok=True)
     link.target.write_bytes(slave.to_worktree(content, st.rel))
+    if path != old_path:
+        link.set("path", path)
     link.set("commit", new)
     link.set("blob", new_blob)
     reg.finish()
 
-    msg = build_message(st, src, new, new_blob, merged, conflicts, discard)
+    msg = build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discard)
     if conflicts:
         _, commit_cmd = message_file(slave, st.rel, msg)
         if stash is not None:
@@ -1272,8 +1495,55 @@ def pull_one(slave, reg, st, args):
     return rc
 
 
+def retarget(ctx, reg, links, ref, dry_run):
+    """Point links at ref (pull -b/--tag) before they are evaluated. A source
+    whose files are all selected is changed itself; otherwise the selected
+    files move to the source with the same URL and ref (found or created) -
+    the source is split. Returns ({rel: previous ref}, descriptions of the
+    changes); files whose source lacks ref are reported and left out."""
+    groups = {}
+    for lk in links:
+        groups.setdefault(lk.name, []).append(lk)
+    repinned, descs, failed = {}, [], set()
+    for name, lks in groups.items():
+        source = reg.sources.get(name)
+        old = source_ref(source) if source else None
+        if not old or old == ref:
+            continue                      # broken entry (evaluate reports it) or nothing to do
+        url = source.get("url", "")
+        src = ctx.source(url, ref, name)
+        if not src.resolve():
+            error(f"{ref[0]} '{ref[1]}' not found in {src.label}; "
+                  f"not switching {', '.join(lk.rel for lk in lks)}")
+            failed |= {lk.rel for lk in lks}
+            continue
+        target = reg.find_source(url, ref, exclude=name)
+        if not target and set(source_files(reg, name)) == {lk.rel for lk in lks}:
+            reg.set_source(name, "tag" if ref[0] == "branch" else "branch", None)
+            reg.set_source(name, ref[0], ref[1])
+            desc = f"Switch {name} from {' '.join(old)} to {' '.join(ref)}"
+        else:
+            target = target or reg.add_source(url, ref)
+            for lk in lks:
+                reg.set_file(lk.rel, "source", target)
+            rest = len(source_files(reg, name))
+            if not rest:
+                reg.remove_source(name)
+            desc = (f"Move {', '.join(lk.rel for lk in lks)} from {name} ({' '.join(old)}) "
+                    f"to {target} ({' '.join(ref)})")
+            if rest:
+                desc += f"; {name} keeps {rest} other file{'' if rest == 1 else 's'}"
+        repinned.update({lk.rel: old for lk in lks})
+        descs.append(desc)
+        print(("would: " if dry_run else "") + desc)
+    if repinned and not dry_run:
+        reg.finish()
+    return repinned, descs, failed
+
+
 def cmd_pull(ctx, slave, args):
     reg = Registry(slave)
+    reg.dry_run = args.dry_run
     if args.all:
         links = reg.links()
     elif args.files:
@@ -1283,12 +1553,21 @@ def cmd_pull(ctx, slave, args):
     if args.commit and len(links) != 1:
         raise FsError("--commit requires exactly one file")
     rc, done = EXIT_OK, 0
+    ref = ("tag", args.tag) if args.tag else ("branch", args.branch) if args.branch else None
+    repinned, descs, failed = retarget(ctx, reg, links, ref, args.dry_run) if ref else ({}, [], set())
+    if failed:
+        rc = EXIT_ERROR
+        links = [lk for lk in links if lk.rel not in failed]
+    newest = {}
     for link in links:
         st = evaluate(ctx, slave, link)
         if st.error:
             print(f"{paint(st.rel, 'red', 'err')}: {render(describe(st), 'err')}", file=sys.stderr)
             rc = EXIT_ERROR
             continue
+        st.repinned = repinned.get(st.rel)
+        if st.newest:
+            newest.setdefault(link.name, (link.ref[1], st.newest))
         if args.all and not st.pending:
             continue
         done += 1
@@ -1297,8 +1576,17 @@ def cmd_pull(ctx, slave, args):
         except FsError as e:   # report and carry on with the other files
             error(str(e))
             rc = EXIT_ERROR
+    # a switch that no sync commit took along (files unchanged): own commit
+    if descs and not (args.dry_run or args.no_commit) and not reg.uncommitted() and \
+            slave.git(["diff", "--quiet", "HEAD", "--", REGISTRY], check=False).returncode == 1:
+        msg = (descs[0] if len(descs) == 1 else f"Switch sources to {' '.join(ref)}\n\n"
+               + "\n".join(f"- {d}" for d in descs)) + "\n"
+        rc = max(rc, commit_staged(slave, "sources", msg, args, "staged", rels=[]))
     if args.all and not done and rc == EXIT_OK:
         print(paint("everything up to date", "green"))
+    for name, (tag, new) in sorted(newest.items()):
+        print(f"hint: {name} is pinned to tag {tag}; the newest tag is {new} "
+              f"(use 'git filesync pull --tag {new} <file>...' to switch)")
     return rc
 
 
@@ -1470,46 +1758,61 @@ def find_matching_commit(slave, src, cur, rel, path, target, max_equiv=100):
     return None
 
 
-def build_add_message(link, src, fetched, relink, modified):
-    if fetched:
-        subject = f"Add {link.rel} from"
-    else:
-        subject = f"{'Relink' if relink else 'Link'} {link.rel} to"
-    lines = [f"{subject} {link.name}@{src.short(link.commit)}", "",
-             f"Upstream: {link.url} ({link.branch}:{link.path})"]
-    if modified:
-        lines += ["", "Contains local modifications of this repository."]
-    if link.strict:
-        lines += ["", "Strict: must stay an exact copy of the upstream version."]
-    return "\n".join(lines) + "\n"
+def glob_regex(pattern):
+    """Regex for a gitignore-like pattern, matched against a path relative to
+    the master directory: without a '/' it matches a name at any depth, a
+    leading or inner '/' anchors it, a trailing '/' matches directories only;
+    '*' and '?' don't match '/', '**/' matches any number of directories. A
+    matching directory stands for everything below it."""
+    dir_only = pattern.endswith("/")
+    pat = pattern.strip("/")
+    anchored = "/" in pattern.rstrip("/")
+    rx, i = "", 0
+    while i < len(pat):
+        if pat.startswith("**/", i):
+            rx, i = rx + "(?:[^/]*/)*", i + 3
+        elif pat.startswith("**", i):
+            rx, i = rx + ".*", i + 2
+        elif pat[i] == "*":
+            rx, i = rx + "[^/]*", i + 1
+        elif pat[i] == "?":
+            rx, i = rx + "[^/]", i + 1
+        elif pat[i] == "[" and "]" in pat[i + 2:]:
+            j = pat.index("]", i + 2)
+            cls = pat[i + 1:j]
+            rx += "[" + ("^" + cls[1:] if cls.startswith("!") else cls).replace("\\", "\\\\") + "]"
+            i = j + 1
+        else:
+            rx, i = rx + re.escape(pat[i]), i + 1
+    return re.compile(("" if anchored else "(?:.*/)?") + rx
+                      + ("/.*" if dir_only else "(?:/.*)?") + r"\Z", re.S)
 
 
-def cmd_add(ctx, slave, args):
-    reg = Registry(slave)
-    target = slave.user_path(args.file)
-    rel = slave.rel(target)
-    if target.is_dir():
-        raise FsError(f"cannot link '{rel}': is a directory")
-    problem = path_problem(rel)
-    if problem:
-        raise FsError(f"cannot link '{rel}': {problem}")
-    relink = rel in reg.files
-    if relink and not args.force:
-        raise FsError(f"'{rel}' is already linked (use --force to relink)")
-    check_other_entries(reg, rel, args)
+def add_ref(ctx, reg, args):
+    """(url, ref, name) for add. The name of a [source]: exactly that source,
+    whatever its branch or tag (-b/--tag may only repeat it). A URL: an
+    existing source only if URL and branch/tag both match (name None; found
+    or created later)."""
+    given = ("tag", args.tag) if args.tag else ("branch", args.branch) if args.branch else None
     if args.source in reg.sources:            # name of an existing [source]
-        url = reg.sources[args.source].get("url", "")
-        branch = args.branch or reg.sources[args.source].get("branch", "")
-    else:
-        url = args.source
-        branch = args.branch or ctx.default_branch(url)
-    path = (args.path or rel).strip("/")
-    src = ctx.source(url, branch, reg.source_name(url, branch))
-    head = src.resolve()
-    if not head:
-        raise FsError(f"branch '{branch}' not found in {src.label}")
+        s = reg.sources[args.source]
+        ref = source_ref(s)
+        if not ref:
+            raise FsError(f'[source "{args.source}"] in {REGISTRY} needs either branch or tag')
+        if given and given != ref:
+            raise FsError(f"source '{args.source}' follows {ref[0]} {ref[1]}, not {given[0]} "
+                          f"{given[1]} - give the URL to link to another {given[0]}, or change "
+                          f"the source with 'git filesync source set-{given[0]}'")
+        return s.get("url", ""), ref, args.source
+    return args.source, given or ("branch", ctx.default_branch(args.source)), None
+
+
+def find_base(slave, src, args, head, rel, path, target):
+    """Base of a file to link: (commit, blob, content to write or None,
+    modified). An existing file's master version is looked up (or given by
+    --commit); a missing file gets the version at head."""
     cur = slave.worktree_blob(target)
-    modified = None          # unknown: compared below once the link is set
+    modified = None          # unknown: compared below
     if args.commit:
         commit = src.resolve(args.commit)
         if not commit:
@@ -1530,44 +1833,163 @@ def cmd_add(ctx, slave, args):
     if not blob:
         raise FsError(f"no file '{path}' in {src.label} at {src.short(commit)}")
     commit = src.last_change(commit, path)
-    content = src.read_content(blob, path) if cur is None else None
-
-    if relink:
-        reg.remove_file(rel)
-    name = reg.add_source(url, branch)
-    link = Link(reg, rel)
-    for k, v in (("source", name), ("path", path), ("commit", commit), ("blob", blob)):
-        link.set(k, v)
-    if args.strict:
-        link.set("strict", "true")
-    if content is not None:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        stored = slave.read_content(slave.as_local(content, rel), rel)
-        target.write_bytes(slave.to_worktree(stored, rel))
-    elif modified is None:
+    if cur is None:
+        return commit, blob, src.read_content(blob, path), False
+    if modified is None:
         try:
-            modified = not matches_base(slave, src, link, cur, target.read_bytes)
+            modified = not matches_base(slave, src, SimpleNamespace(blob=blob, path=path, rel=rel),
+                                        cur, target.read_bytes)
         except BaseUnavailable:
             modified = False
-    # the link commit contains the file as it is in the working tree
-    slave.git(["add", "--", lit(rel)])
-    reg.finish()
-    print(f"{paint('linked', 'green')} {rel} -> {name}:{path} ({branch})")
-    if slave.git(["diff", "--cached", "--quiet", "HEAD", "--", lit(rel), REGISTRY],
-                 check=False).returncode == 0:
-        print(f"{rel}: link and file unchanged, nothing to commit")
+    return commit, blob, None, modified
+
+
+def build_add_message(plan, src, name, url, ref, mpath, relink, strict, at):
+    """Commit message for add; plan: [(rel, path, commit, blob, content, modified)];
+    at: the master revision a directory was linked at."""
+    fetched = all(p[4] is not None for p in plan)
+    subject_ref = f"{name}@{src.short(plan[0][2])}"
+    if len(plan) == 1:
+        rel, path = plan[0][:2]
+        what = f"Add {rel} from" if fetched else f"{'Relink' if relink else 'Link'} {rel} to"
+    else:
+        path = mpath.rstrip("/") + "/" if mpath else "/"
+        what = f"Add {len(plan)} files from" if fetched else f"Link {len(plan)} files to"
+        subject_ref = f"{name}@{src.short(at)}"
+    lines = [f"{what} {subject_ref}", "", f"Upstream: {url} ({ref[1]}:{path})"]
+    if len(plan) > 1:
+        lines.append("")
+        for rel, path, _, _, content, modified in plan:
+            notes = ([] if content is not None else ["existing"]) + \
+                (["local modifications"] if modified else [])
+            lines.append(f"- {rel}" + (f" ({', '.join(notes)})" if notes else ""))
+    if any(p[5] for p in plan) and len(plan) == 1:
+        lines += ["", "Contains local modifications of this repository."]
+    if strict:
+        lines += ["", "Strict: must stay an exact copy of the upstream version."]
+    return "\n".join(lines) + "\n"
+
+
+def cmd_add(ctx, slave, args):
+    reg = Registry(slave)
+    target = slave.user_path(args.file)
+    rel = slave.rel(target)
+    problem = path_problem(rel) if rel != "." else None
+    if problem:
+        raise FsError(f"cannot link '{rel}': {problem}")
+    url, ref, named = add_ref(ctx, reg, args)
+    src = ctx.source(url, ref, named or reg.source_name(url, ref))
+    head = src.resolve()
+    if not head:
+        raise FsError(f"{ref[0]} '{ref[1]}' not found in {src.label}")
+    path = (args.path or ("" if rel == "." else rel)).strip("/")
+    path = "" if path == "." else path
+    patterns = args.include or args.exclude
+    master_file = bool(path) and not patterns and bool(src.blob_at(head, path))
+    if target.is_dir() and master_file:       # like cp: into the directory
+        target = target / Path(path).name
+        rel = slave.rel(target)
+    if target.is_dir() or patterns or not master_file and src.is_dir(head, path):
+        plan, relink = plan_dir(slave, reg, src, args, head, rel, path, target)
+        if not plan:
+            return EXIT_OK
+    else:
+        relink = rel in reg.files
+        if relink and not args.force:
+            raise FsError(f"'{rel}' is already linked (use --force to relink)")
+        if target.is_dir():
+            raise FsError(f"cannot link '{rel}': is a directory")
+        plan = [(rel, path) + find_base(slave, src, args, head, rel, path, target)]
+    rels = [p[0] for p in plan]
+    name = named or reg.source_name(url, ref)
+    if args.dry_run:
+        for r, p, commit, _, content, modified in plan:
+            note = "fetched" if content is not None else \
+                "with local modifications" if modified else "existing file"
+            print(f"would link {r} -> {name}:{p} ({ref_text(ref)}), "
+                  f"{note}, based on {src.short(commit)}")
         return EXIT_OK
-    return commit_staged(slave, rel, build_add_message(link, src, content is not None,
-                                                       relink, modified), args, "staged")
+    check_other_entries(reg, rels, args)
+
+    for r, p, commit, blob, content, _ in plan:
+        if r in reg.files:
+            reg.remove_file(r, keep_source=named)
+        name = named or reg.add_source(url, ref)
+        link = Link(reg, r)
+        for k, v in (("source", name), ("path", p), ("commit", commit), ("blob", blob)):
+            link.set(k, v)
+        if args.strict:
+            link.set("strict", "true")
+        if content is not None:
+            link.target.parent.mkdir(parents=True, exist_ok=True)
+            stored = slave.read_content(slave.as_local(content, r), r)
+            link.target.write_bytes(slave.to_worktree(stored, r))
+        # the link commit contains the file as it is in the working tree
+        slave.git(["add", "--", lit(r)])
+        print(f"{paint('linked', 'green')} {r} -> {name}:{p} ({ref_text(ref)})")
+    reg.finish()
+    if slave.git(["diff", "--cached", "--quiet", "HEAD", "--"] + [lit(r) for r in rels]
+                 + [REGISTRY], check=False).returncode == 0:
+        print(f"{rel}: link{'s' if len(rels) > 1 else ''} and "
+              f"file{'s' if len(rels) > 1 else ''} unchanged, nothing to commit")
+        return EXIT_OK
+    at = src.resolve(args.commit) if args.commit else head
+    msg = build_add_message(plan, src, name, url, ref, path, relink, args.strict, at)
+    msg_name = rels[0] if len(rels) == 1 else (rel if rel != "." else "root")
+    return commit_staged(slave, msg_name, msg, args, "staged", rels)
+
+
+def plan_dir(slave, reg, src, args, head, rel, path, target):
+    """Files to link for add DIR: every file below the master directory path
+    that matches --include/--exclude, as rel/<path below>; already linked
+    files are skipped unless --force. Returns (plan, relink)."""
+    if target.exists() and not target.is_dir():
+        raise FsError(f"'{rel}' is a file, but '{path or '/'}' in {src.label} is a directory")
+    at = head
+    if args.commit:
+        at = src.resolve(args.commit)
+        if not at:
+            raise FsError(f"unknown revision '{args.commit}' in {src.label}")
+    if path and not src.is_dir(at, path):
+        raise FsError(f"no directory '{path}' in {src.label} at {src.short(at)}")
+    include = [glob_regex(p) for p in args.include or []]
+    exclude = [glob_regex(p) for p in args.exclude or []]
+    todo, skipped = [], []
+    for mpath in src.files_below(at, path):
+        below = mpath[len(path) + 1:] if path else mpath
+        if include and not any(r.match(below) for r in include) or \
+                any(r.match(below) for r in exclude):
+            continue
+        r = below if rel == "." else f"{rel}/{below}"
+        problem = path_problem(r)
+        if problem or (slave.top / r).is_dir():
+            warn(f"skipping {r}: {problem or 'is a directory'}")
+        elif r in reg.files and not args.force:
+            skipped.append(r)
+        else:
+            todo.append((r, mpath))
+    if skipped:
+        print(f"{len(skipped)} file{'s' if len(skipped) != 1 else ''} already linked, "
+              "skipped (use --force to relink)")
+    if not todo:
+        if not skipped:
+            print(f"no files to link below '{path or '/'}' in {src.label}")
+        return [], False
+    plan = [(r, p) + find_base(slave, src, args, head, r, p, slave.top / r) for r, p in todo]
+    return plan, any(r in reg.files for r, _ in todo)
 
 
 def cmd_unlink(ctx, slave, args):
     reg = Registry(slave)
     links = select_links(slave, reg, args.files)
     for link in links:
+        if args.dry_run:
+            print(f"would unlink {link.rel}")
+            continue
         reg.remove_file(link.rel)
         print(f"{paint('unlinked', 'green')} {link.rel} (file kept)")
-    reg.finish()
+    if not args.dry_run:
+        reg.finish()
     return EXIT_OK
 
 
@@ -1585,6 +2007,9 @@ def cmd_mv(ctx, slave, args):
         raise FsError(f"cannot move to '{new}': {problem}")
     if new in reg.files or dst.exists():
         raise FsError(f"'{new}' already exists")
+    if args.dry_run:
+        print(f"would move {old} -> {new}")
+        return EXIT_OK
     if slave.git(["ls-files", "--error-unmatch", "--", lit(old)], check=False).returncode == 0:
         dst.parent.mkdir(parents=True, exist_ok=True)
         slave.git(["mv", "--", old, new])
@@ -1594,6 +2019,73 @@ def cmd_mv(ctx, slave, args):
     reg.rename_file(old, new)
     reg.finish()
     print(f"{paint('moved', 'green')} {old} -> {new} (link kept)")
+    return EXIT_OK
+
+
+def source_files(reg, name):
+    return sorted(rel for rel, f in reg.files.items() if f.get("source") == name)
+
+
+def cmd_source(ctx, slave, args):
+    """Like `git remote`: list, rename and change the [source]s. Only
+    .git-filesync is changed (and staged); `pull` then syncs the files."""
+    reg = Registry(slave)
+    action = args.action
+    if not action:
+        for name, s in sorted(reg.sources.items()):
+            if not args.verbose:
+                print(name)
+                continue
+            ref = source_ref(s)
+            n = len(source_files(reg, name))
+            newest = ""
+            if ref and ref[0] == "tag":
+                try:
+                    newest = ctx.source(s.get("url", ""), ref, name).newest_tag(ref[1])
+                    newest = f", newest {newest}" if newest else ""
+                except FsError as e:
+                    warn(f"{name}: {e}")
+            print(f"{name}\t{s.get('url', '')} "
+                  f"({ref_text(ref) if ref else 'branch or tag missing'}{newest}, "
+                  f"{n} file{'' if n == 1 else 's'})")
+        return EXIT_OK
+    if args.name not in reg.sources:
+        raise FsError(f"no source '{args.name}' in {REGISTRY}"
+                      + (f" (known: {', '.join(sorted(reg.sources))})" if reg.sources else ""))
+    s = reg.sources[args.name]
+    if action == "rename":
+        if args.value in reg.sources:
+            raise FsError(f"source '{args.value}' already exists")
+        if not args.value or "\n" in args.value:
+            raise FsError("invalid source name")
+        reg.rename_source(args.name, args.value)
+        done = f"renamed {args.name} -> {args.value}"
+    else:
+        url, ref = s.get("url", ""), source_ref(s)
+        if action == "set-url":
+            url = args.value
+        else:
+            ref = ("tag" if action == "set-tag" else "branch", args.value)
+        other = reg.find_source(url, ref, exclude=args.name) if ref else None
+        if other:
+            raise FsError(f"source '{other}' already has this URL and {ref[0]} - "
+                          f"link the files to it with 'git filesync add --force FILE {other}'")
+        if action == "set-url":
+            reg.set_source(args.name, "url", url)
+            done = f"{args.name}: url {url}"
+        else:
+            old = source_ref(s)
+            reg.set_source(args.name, "tag" if ref[0] == "branch" else "branch", None)
+            reg.set_source(args.name, ref[0], ref[1])
+            done = f"{args.name}: {ref[0]} {ref[1]}" + \
+                (f" (was {old[0]} {old[1]})" if old and old != ref else "")
+    reg.finish()
+    print(f"{paint(done, 'green')}; {REGISTRY} staged")
+    files = source_files(reg, args.value if action == "rename" else args.name)
+    if action != "rename" and files:
+        print(f'  (use "git filesync status" to see what changes for its {len(files)} '
+              f'linked file{"" if len(files) == 1 else "s"}, '
+              '"git filesync pull <file>..." to sync them)')
     return EXIT_OK
 
 
@@ -1763,7 +2255,10 @@ def main(argv=None):
     p = sub.add_parser("pull", parents=[common], help="sync file(s) from master")
     p.add_argument("files", nargs="*", help="files or directories")
     p.add_argument("--all", action="store_true", help="sync all files with something to sync")
-    p.add_argument("--commit", metavar="REV", help="sync to this master revision (exactly one file)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--commit", metavar="REV", help="sync to this master revision (exactly one file)")
+    g.add_argument("-b", "--branch", help="switch to following this master branch, and sync")
+    g.add_argument("--tag", help="switch to (pin to) this master tag, and sync")
     p.add_argument("--no-edit", action="store_true", help="commit without opening the editor")
     p.add_argument("--no-commit", action="store_true",
                    help="only stage; print commit message and command")
@@ -1771,6 +2266,8 @@ def main(argv=None):
                    help="discard local adaptations instead of merging them")
     p.add_argument("--autostash", action="store_true",
                    help="set uncommitted changes aside and re-apply them after the sync")
+    p.add_argument("--dry-run", action="store_true",
+                   help="only report what would happen (incl. merge conflicts)")
 
     for name, hlp in (("diff", "show local modifications against the synced master version"),
                       ("difftool", "same in the configured difftool")):
@@ -1791,12 +2288,22 @@ def main(argv=None):
             p.add_argument("--prompt", action="store_true",
                            help="ask before each file even if files are given")
 
-    p = sub.add_parser("add", parents=[common], help="link a file to a file in a master repository")
-    p.add_argument("file", help="file in this repository (fetched from master if missing)")
+    p = sub.add_parser("add", parents=[common], help="link a file (or all files of a directory) "
+                                                     "to the master repository")
+    p.add_argument("file", metavar="FILE|DIR",
+                   help="file in this repository (fetched from master if missing), or a "
+                        "directory: all files below the master directory are linked")
     p.add_argument("source", metavar="URL|SOURCE", help="master URL or name of a [source] in "
                    + REGISTRY)
-    p.add_argument("-b", "--branch", help="master branch (default: remote HEAD, or the branch of SOURCE)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("-b", "--branch", help="master branch (default: remote HEAD, or the ref of SOURCE)")
+    g.add_argument("--tag", help="pin to this master tag instead of following a branch")
     p.add_argument("-p", "--path", help="path in master repo (default: same as here)")
+    p.add_argument("--include", metavar="PATTERN", action="append",
+                   help="directory: only files matching PATTERN (gitignore-like; repeatable)")
+    p.add_argument("--exclude", metavar="PATTERN", action="append",
+                   help="directory: skip files matching PATTERN (repeatable)")
+    p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be linked")
     p.add_argument("--commit", metavar="REV", help="master revision the local file corresponds to")
     p.add_argument("--force", action="store_true", help="relink an already linked file")
     p.add_argument("--strict", action="store_true",
@@ -1807,10 +2314,26 @@ def main(argv=None):
 
     p = sub.add_parser("unlink", parents=[colorp], help="remove links (the files are kept)")
     p.add_argument("files", nargs="+", help="files or directories")
+    p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be unlinked")
 
     p = sub.add_parser("mv", parents=[colorp], help="move a linked file, keeping its link")
     p.add_argument("src", metavar="OLD", help="linked file")
     p.add_argument("dst", metavar="NEW", help="new path or existing directory")
+    p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be moved")
+
+    p = sub.add_parser("source", parents=[common], help="list or change the [source]s "
+                                                        "(like 'git remote')")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="list with URL, branch or tag (and newest tag), and file count")
+    actions = p.add_subparsers(dest="action", metavar="ACTION")
+    for name, arg, hlp in (("rename", "NEW", "rename a source and all references to it"),
+                           ("set-url", "URL", "change the URL of a source"),
+                           ("set-branch", "BRANCH", "follow BRANCH (replaces a tag)"),
+                           ("set-tag", "TAG", "pin to TAG (replaces a branch)")):
+        a = actions.add_parser(name, parents=[colorp], help=hlp)
+        a.add_argument("name", metavar="NAME" if name != "rename" else "OLD",
+                       help="key of the [source]")
+        a.add_argument("value", metavar=arg)
 
     p = sub.add_parser("map", parents=[colorp], help="use a local checkout for a master URL "
                                                      "(this repo's config; --global for all repos)")
@@ -1849,7 +2372,7 @@ def main(argv=None):
             return cmd_uninstall_hooks(slave, args)
         ctx = Context(args, slave)
         return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add,
-                "unlink": cmd_unlink, "mv": cmd_mv,
+                "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
                 "diff": cmd_diff, "difftool": cmd_difftool}[args.cmd](ctx, slave, args)
     except FsError as e:
         error(str(e))

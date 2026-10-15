@@ -44,19 +44,36 @@ meaningful commit.
 Submodules remain the better choice when you want a whole repository
 unchanged and work on it directly; git-filesync fits when a few files are
 shared, may differ slightly per repository, and your repository should stay
-self-contained. (`git subtree` also copies content, but always a whole
-directory, and it has no per-file view of what is behind or adapted.)
+self-contained.
+
+### Compared to vendoring tools
+
+`git subtree` and tools like
+[git-vendor](https://github.com/thejoshwolfe/git-vendor) also copy content
+into your repository, but always a whole directory (git-vendor: filtered).
+git-vendor manages that directory exclusively – files of your own in it are
+removed – and discards local changes on update (keeping them as a patch is
+experimental there). git-filesync links single files at any path – next to
+your own files, under another name if you like – keeps your committed
+adaptations by merging, and lists the master commits in every sync commit.
+To take a whole directory, `add` links all its files (with `--include` /
+`--exclude` patterns) in one go; each of them is an ordinary link
+afterwards.
 
 ## Features
 
-- Links single files between repositories; all links of a slave live in one
-  file, `.git-filesync`, at its root (git-config format, like `.gitmodules`)
+- Links single files between repositories – one by one or all files of a
+  master directory at once; all links of a slave live in one file,
+  `.git-filesync`, at its root (git-config format, like `.gitmodules`)
+- Follows a branch of the master, or is pinned to a tag (e.g. a release) –
+  with a hint at newer tags; `pull --tag` switches and syncs in one step
 - Proposed commit message lists all master commits touching the file since
   the last sync
 - Local adaptations on top of the master version are kept via 3-way merge,
   shown with `diff` / `difftool` – or forbidden per file (`strict`)
+- Files renamed in the master are followed, deleted ones reported
 - Commands named like Git commands behave like them (`status`, `pull`,
-  `diff`, `difftool`, `mv`)
+  `diff`, `difftool`, `mv`); dry runs for `pull`, `add`, `unlink`, `mv`
 - Optional local checkout of the master instead of fetching – works offline
 - Git LFS in the master, the slave, both or neither
 - Correct with differing line-ending conventions (`core.autocrlf`, `text=auto`)
@@ -90,8 +107,10 @@ your `PATH`. Either way the tool is invoked as `git filesync …`; check with
 changes of each version.
 
 You can also clone the repository and point the alias at the script in
-it: `main` is the current development state, a tag like `v0.1.2` a
-release.
+it: `main` is the current development state, a tag like `v0.2.0` a
+release. Or let git-filesync keep a copy of itself in your project, so
+everyone has the same version – see
+[Shipping git-filesync with your repository](MANUAL.md#shipping-git-filesync-with-your-repository).
 
 ## Quick start
 
@@ -130,8 +149,9 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `status [PATH…]` | state of the linked files, like `git status` |
 | `pull PATH…`, `pull --all` | sync files from the master, keeping local adaptations |
 | `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced master version |
-| `add FILE URL\|SOURCE` | link a file to a file in a master repository |
+| `add FILE\|DIR URL\|SOURCE` | link a file (or all files of a master directory) to the master |
 | `unlink PATH…`, `mv OLD NEW` | remove or move links |
+| `source [ACTION …]` | list sources; rename, change URL, branch or tag |
 | `map [URL [DIR]]` | use a local checkout of the master instead of fetching |
 | `install-hooks`, `uninstall-hooks` | reminder hooks for `push` and `merge` |
 
@@ -153,7 +173,8 @@ and checks linking, status, pull, merge, conflicts, diff / difftool, strict
 files, `.git-filesync` handling (sources, unlink, mv, commit consistency),
 unsafe registry entries, wildcard characters in file names, local checkout
 mappings, offline operation, eol handling (autocrlf /
-text=auto / plain), Git LFS in all combinations, colors and hooks. It runs on
+text=auto / plain), Git LFS in all combinations, colors, hooks, tags,
+sources, files renamed or deleted in the master, dry runs and directories. It runs on
 every push via GitHub Actions.
 
 Issues and pull requests are welcome. Please add a test to `test/regress.sh`
