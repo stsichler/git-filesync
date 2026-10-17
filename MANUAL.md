@@ -16,7 +16,7 @@ For motivation and installation see the [README](README.md).
   - [`add`](#add) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map)
   - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
 - [Further topics](#further-topics)
-  - [Pinning to a tag](#pinning-to-a-tag) · [Files renamed or deleted in the master](#files-renamed-or-deleted-in-the-master)
+  - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted in the master](#files-renamed-or-deleted-in-the-master)
   - [Git LFS](#git-lfs) · [Line endings](#line-endings) · [Offline operation](#offline-operation)
   - [Colors](#colors) · [CI](#ci) · [Exit codes](#exit-codes) · [Binary files](#binary-files)
   - [Shipping git-filesync with your repository](#shipping-git-filesync-with-your-repository)
@@ -247,14 +247,16 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `--overwrite` | discard local adaptations and take the master version as is (also when the file is up to date) |
 | `--autostash` | set uncommitted changes aside, sync, re-apply them |
 | `--no-edit` | commit with the proposed message without opening the editor |
-| `--no-commit` | only update and stage the file and its entry; prints the proposed commit message (for copying) and the `git commit` command |
+| `--no-commit` | only update and stage the file and its entry; prints the proposed commit message (for copying) and the `git commit` command; a plain `git commit` offers the message too (see [Proposed commit messages](#proposed-commit-messages)) |
 | `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename in the master, and every refusal |
 
 **Adaptations** are merged with the new master version (3-way merge, base =
 the last synced version). On conflicts the file gets the usual conflict
 markers; resolve them, then run the `git add` / `git commit -e -F …` command
-printed by the tool – the prepared message is kept in `.git/FILESYNC_MSG_*`.
-`--overwrite` skips the merge and discards the adaptations.
+printed by the tool – the prepared message is kept in `.git/FILESYNC_MSG_*`
+(or `git add` the file and run a plain `git commit`, see [Proposed commit
+messages](#proposed-commit-messages)). `--overwrite` skips the merge and
+discards the adaptations.
 
 **Uncommitted changes:** like `git pull`, `pull` refuses a file with
 uncommitted changes (`your local changes … would be overwritten by pull`):
@@ -406,7 +408,7 @@ master (see [below](#linking-a-directory)).
 | `--strict` | the file must stay an exact copy (see [Strict files](#strict-files)) |
 | `--force` | relink a file that is already linked |
 | `--no-edit` | commit with the proposed message without opening the editor |
-| `--no-commit` | only stage FILE and `.git-filesync`; prints the proposed commit message (for copying) and the `git commit` command |
+| `--no-commit` | only stage FILE and `.git-filesync`; prints the proposed commit message (for copying) and the `git commit` command; a plain `git commit` offers the message too |
 | `-n`, `--dry-run` | change nothing, only show what would be linked and on which master version it would be based |
 
 - If FILE exists, the master version it matches is looked up and recorded
@@ -426,7 +428,8 @@ master (see [below](#linking-a-directory)).
   For an existing FILE the subject is `Link FILE to …` (`Relink …` with
   `--force`); the message notes local modifications and `--strict`. If the
   commit is aborted, everything stays staged and the `git commit -e -F …`
-  command to finish it is printed.
+  command to finish it is printed (a plain `git commit` offers the message
+  too, see [Proposed commit messages](#proposed-commit-messages)).
 
 ```sh
 git filesync add src/foo.c https://github.com/owner/lib.git -p lib/foo.c
@@ -654,6 +657,22 @@ went through. Tags on side branches merged into it don't count.
 Pre-releases count like any other tag. Branches are those of the master
 (`origin/…` in the cache); with a [mapped checkout](#map) its local branches
 and tags, unpushed ones included.
+
+### Proposed commit messages
+
+Whenever `pull` or `add` don't commit themselves – with `--no-commit`, after
+merge conflicts, or when the commit was aborted – the proposed message is
+kept in `.git/FILESYNC_MSG_*` for the printed `git commit -e -F …` command,
+and is also put into `.git/SQUASH_MSG`. Git offers that file as the message
+of the next plain `git commit` (as after `git merge --squash`), and so do
+IDEs such as VS Code in their commit message box. Git removes it after the
+next commit, whatever its message, and on `git reset`.
+
+- Several commands in a row (e.g. `add --no-commit` for some files, then
+  one commit for all of them) collect their messages there.
+- A `SQUASH_MSG` that git-filesync didn't write (e.g. from `git merge
+  --squash`) is left alone; the tool then says that a plain `git commit`
+  won't offer its message.
 
 ### Files renamed or deleted in the master
 

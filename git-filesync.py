@@ -69,7 +69,9 @@ follow the command.
         --autostash             set uncommitted changes aside, re-apply after
         --no-edit               commit without opening the editor
         --no-commit             only stage; print the proposed commit message
-                                and the commit command
+                                and the commit command (the message is also
+                                put into .git/SQUASH_MSG: a plain `git
+                                commit` offers it)
         --dry-run               only report what would happen (incl.
                                 merge conflicts); change nothing
 
@@ -1546,6 +1548,32 @@ def message_file(slave, name, msg, rels=None):
     return msgfile, f'git commit -e -F "{msgfile}" -- {paths}'
 
 
+def propose_message(slave, msg):
+    """Also put a proposed commit message into .git/SQUASH_MSG, which a plain
+    `git commit` (and IDEs) offer; git removes it after the next commit.
+    Proposals of several commands are collected. A SQUASH_MSG of git's own
+    (e.g. from merge --squash) is left alone. Returns True if done."""
+    squash = slave.gitdir / "SQUASH_MSG"
+    ours = slave.state_file("FILESYNC_", "SQUASH_MSG")     # copy of what we wrote
+    if squash.exists():
+        prev = squash.read_text(encoding="utf-8", errors="replace")
+        if not ours.exists() or ours.read_text(encoding="utf-8", errors="replace") != prev:
+            return False
+        if msg in prev:
+            return True
+        msg = prev.rstrip("\n") + "\n\n" + msg
+    for f in (squash, ours):
+        f.write_bytes(msg.encode("utf-8"))
+    return True
+
+
+def proposed_note(slave, msg):
+    """Line telling where else the proposed message is, see propose_message."""
+    if propose_message(slave, msg):
+        return "\n(also prepared for a plain 'git commit')"
+    return "\n(.git/SQUASH_MSG is in use, so a plain 'git commit' won't offer it)"
+
+
 def commit_staged(slave, name, msg, args, done, rels=None):
     """Commit the staged files (default: name) and their entries with the
     proposed message (in the editor unless --no-edit). With --no-commit,
@@ -1555,13 +1583,13 @@ def commit_staged(slave, name, msg, args, done, rels=None):
     msgfile, commit_cmd = message_file(slave, name, msg, rels)
     if args.no_commit:
         print(f"{name}: {paint(done, 'green')}. Proposed commit message:\n\n{msg}\n"
-              f"Commit with:\n    {commit_cmd}")
+              f"Commit with:\n    {commit_cmd}{proposed_note(slave, msg)}")
         return EXIT_OK
     cmd = ["git", "commit", "-F", str(msgfile)] + ([] if args.no_edit else ["-e"]) + \
         ["--"] + [lit(r) for r in rels] + [REGISTRY]
     if subprocess.run(cmd, cwd=slave.top).returncode:
         print(f"{name}: {paint('commit not done', 'yellow')}; changes stay staged. "
-              f"Commit later with:\n    {commit_cmd}")
+              f"Commit later with:\n    {commit_cmd}{proposed_note(slave, msg)}")
         return EXIT_PENDING
     msgfile.unlink()
     return EXIT_OK
@@ -1664,7 +1692,8 @@ def pull_one(slave, reg, st, args):
             stashfile.write_bytes(slave.to_worktree(stash, st.rel))
             print(f"{st.rel}: autostash kept in {stashfile} (not re-applied because of the conflicts)")
         print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}. "
-              f"Resolve them, then run:\n    git add {cmd_arg(st.rel)}\n    {commit_cmd}")
+              f"Resolve them, then run:\n    git add {cmd_arg(st.rel)}\n    {commit_cmd}"
+              + proposed_note(slave, msg))
         return EXIT_PENDING
     slave.git(["add", "--", lit(st.rel)])
     rc = commit_staged(slave, st.rel, msg, args, "synced and staged")

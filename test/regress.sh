@@ -148,8 +148,11 @@ git commit -qam "local e"
 up 's/^e$/E-up/' "Change E"
 check "conflict rc" "$(rc git filesync pull src/lib.c)" "1"
 check "conflict markers" "$(grep -c '^<<<<<<<' src/lib.c)" "1"
+check "conflict: message prepared for git commit" \
+  "$(head -1 "$(git rev-parse --git-dir)/SQUASH_MSG" | grep -c '^Sync src/lib.c from')" "1"
 git checkout -q src/lib.c 2>/dev/null
 git reset -q --hard
+check "git reset drops the prepared message" "$(ls "$(git rev-parse --git-dir)/SQUASH_MSG" 2>/dev/null)" ""
 
 # mapped to the local checkout, unpushed master commits are seen and warned
 git filesync map "$URL" "$T/master" >/dev/null
@@ -492,6 +495,9 @@ check "add --no-commit: staged, not committed" "$(git status --porcelain | oneli
 check "add --no-commit: prints the message" "$(echo "$OUT" | grep -c "^Add include/new.h from $SRC@")" "1"
 check "add --no-commit: prints the commit command" \
   "$(echo "$OUT" | grep -c 'git commit -e -F ".*FILESYNC_MSG_include_new.h" -- include/new.h .git-filesync')" "1"
+check "add --no-commit: message prepared for git commit" \
+  "$(head -1 "$(git rev-parse --git-dir)/SQUASH_MSG" | grep -c "^Add include/new.h from $SRC@")" "1"
+check "add --no-commit: says so" "$(echo "$OUT" | grep -c "also prepared for a plain 'git commit'")" "1"
 
 # pull commits .git-filesync, so it refuses while another entry is uncommitted
 check "pull refused while other entry uncommitted" "$(rc git filesync pull --no-edit src/foo.c)" "2"
@@ -500,6 +506,7 @@ check "refusal names the entry" \
 check "add refused while other entry uncommitted" "$(rc git filesync add include/new2.h "$SRC" -p lib/new.h)" "2"
 git commit -q -F "$(git rev-parse --git-dir)/FILESYNC_MSG_include_new.h"
 check "add --no-commit: message file usable" "$(git log -1 --format=%s | grep -c '^Add include/new.h from')" "1"
+check "commit drops the prepared message" "$(ls "$(git rev-parse --git-dir)/SQUASH_MSG" 2>/dev/null)" ""
 check "registry committed with link" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync include/new.h "
 
 # mv: moves file and entry
@@ -637,7 +644,9 @@ check "pull merges committed adaptation" "$(oneline < b.c)" "1-adapt 2 3 4 5-up 
 OUT=$(git filesync pull --no-commit a.c)
 check "pull --no-commit: staged, not committed" "$(git status --porcelain a.c .git-filesync | oneline)" "M  .git-filesync M  a.c "
 check "pull --no-commit: prints the message" "$(echo "$OUT" | grep -cE '^(Sync a\.c from |- up \()')" "2"
-git commit -q -F "$(git rev-parse --git-dir)/FILESYNC_MSG_a.c"
+git commit -q
+check "pull --no-commit: plain git commit takes the message" \
+  "$(git log -1 --format=%B | grep -cE '^(Sync a\.c from |- up \()')" "2"
 
 # diff --committed: without uncommitted changes; diff exit code passed on
 check "diff --committed: adaptations only" \
@@ -975,6 +984,8 @@ quiet git filesync add --no-commit a.c "$URL9" -p t.c
 check "add by URL, default branch: branch source reused" "$(git config -f .git-filesync file.a.c.source)" "lib9"
 quiet git filesync add --no-commit b.c "$URL9" -p t.c --tag v1
 check "add by URL + tag: first source with that tag" "$(git config -f .git-filesync file.b.c.source)" "$SRC9B"
+check "--no-commit twice: both messages prepared" \
+  "$(grep -cE '^Add (a|b)\.c from' "$(git rev-parse --git-dir)/SQUASH_MSG")" "2"
 quiet git filesync add --no-commit c.c "$URL9" -p t.c --tag v2 -b main
 SRC9C=$(git config -f .git-filesync file.c.c.source)
 check "add by URL, other tag: new source" "$(echo "$SRC9C" | grep -cvE "^(lib9|$SRC9B|dup)$")" "1"
@@ -984,6 +995,13 @@ quiet git filesync add --no-commit d.c "$URL9" -p t.c --tag v2
 check "add by URL + tag, no -b: source with a branch reused" "$(git config -f .git-filesync file.d.c.source)" "$SRC9C"
 check "add --tag -b: tag not on the branch" \
   "$(git filesync add --no-commit e.c "$URL9" -p t.c --tag v2 -b nope 2>&1 | grep -c "branch 'nope' not found")" "1"
+git reset -q --hard
+
+# a SQUASH_MSG of git's own (e.g. merge --squash) is left alone
+echo "squashed" > "$(git rev-parse --git-dir)/SQUASH_MSG"
+check "foreign SQUASH_MSG: said so" \
+  "$(git filesync add --no-commit f.c "$URL9" -p t.c | grep -c "SQUASH_MSG is in use")" "1"
+check "foreign SQUASH_MSG: kept" "$(cat "$(git rev-parse --git-dir)/SQUASH_MSG")" "squashed"
 git reset -q --hard
 
 
