@@ -37,7 +37,7 @@
 #   15. Files renamed or deleted in the master
 #   16. Dry runs: pull --dry-run, add / unlink / mv -n
 #   17. add DIR: all files of a master directory, --include / --exclude
-#   18. pull -b / --tag: switching branch or tag; newest tag hints
+#   18. pull -b / --tag: switching branch or tag; newer tags
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -868,7 +868,6 @@ git clone -q m9.git co9 2>/dev/null
 URL9=file://$T/m9.git
 
 new_slave s9
-check "add -b and --tag exclude each other" "$(rc git filesync add -b main --tag v1 t.c "$URL9")" "2"
 quiet git filesync add --tag v1 t.c "$URL9"
 SRC9=$(git config -f .git-filesync --get-regexp '^source\..*\.url' | sed 's/^source\.\(.*\)\.url .*/\1/')
 check "add --tag: source with tag, no branch" \
@@ -906,11 +905,20 @@ check "mapped: tag from the checkout" "$(st)" "P"
 git filesync map "$URL9" --unset >/dev/null
 check "tag unknown on the server: error" "$(st)" "E"
 
-# back to following the branch
+# back to following the branch: set-branch only sets the branch (the one to
+# look for newer tags on), set-tag --unset removes the pin
+check "set-tag: TAG or --unset" "$(rc git filesync source set-tag "$SRC9")" "2"
+check "set-tag --unset without a branch: refused" "$(rc git filesync source set-tag "$SRC9" --unset)" "2"
 git filesync source set-branch "$SRC9" main >/dev/null
-check "set-branch: branch set, tag removed" \
+check "set-branch on a pinned source: tag kept" \
+  "$(git config -f .git-filesync source.$SRC9.branch) $(git config -f .git-filesync source.$SRC9.tag)" "main v3"
+check "set-branch on a pinned source: still pinned" "$(st)" "E"
+git filesync source set-tag "$SRC9" --unset >/dev/null
+check "set-tag --unset: branch kept, tag removed" \
   "$(git config -f .git-filesync source.$SRC9.branch) $(git config -f .git-filesync source.$SRC9.tag)" "main "
-check "set-branch: up to date with main" "$(st)" ""
+check "set-tag --unset: up to date with main" "$(st)" ""
+check "set-branch --unset on a following source: refused" \
+  "$(rc git filesync source set-branch "$SRC9" --unset)" "2"
 git commit -qm "follow main"
 
 
@@ -939,7 +947,11 @@ check "set-url: status works" "$(st)" ""
 quiet git filesync add --tag v1 u.c "$URL9" -p t.c
 SRC9B=$(git config -f .git-filesync file.u.c.source)
 check "same URL, other ref: own source" "$([ "$SRC9B" != lib9 ] && echo own)" "own"
-check "set-branch: duplicate refused" "$(rc git filesync source set-branch "$SRC9B" main)" "2"
+quiet git filesync source set-branch "$SRC9B" main
+check "set-tag --unset: duplicate refused" "$(rc git filesync source set-tag "$SRC9B" --unset)" "2"
+quiet git filesync source set-branch "$SRC9B" --unset
+check "set-branch --unset: pinned, no branch" \
+  "$(git config -f .git-filesync --get-regexp "^source\.$SRC9B\." | cut -d' ' -f1 | sed 's/.*\.//' | sort | oneline)" "tag url "
 check "rename: existing name refused" "$(rc git filesync source rename "$SRC9B" lib9)" "2"
 
 # add by name: exactly that source, whatever its branch or tag; -b/--tag may
@@ -951,18 +963,27 @@ check "add by name: pinned source joined" "$(git config -f .git-filesync file.w.
 check "add by name: content at the tag" "$(oneline < w.c)" "1 2 3 "
 check "add by name, other ref: refused" "$(rc git filesync add --no-commit -b main x.c "$SRC9B" -p t.c)" "2"
 check "add by name, same ref repeated" "$(rc git filesync add --no-commit --tag v1 y.c "$SRC9B" -p t.c)" "0"
+check "add by name, other branch for the tag: refused" \
+  "$(rc git filesync add --no-commit --tag v1 -b main y2.c "$SRC9B" -p t.c)" "2"
 printf '[source "dup"]\n\turl = %s\n\ttag = v1\n' "$URL9" >> .git-filesync
 quiet git filesync add --no-commit v.c dup -p t.c
 check "add by name: that source, not an equal one" "$(git config -f .git-filesync file.v.c.source)" "dup"
 
-# add by URL: a source is reused only if URL and branch/tag both match
+# add by URL: a source is reused only if URL and branch/tag both match;
+# with --tag but no -b, one pinned to the tag whatever its branch
 quiet git filesync add --no-commit a.c "$URL9" -p t.c
 check "add by URL, default branch: branch source reused" "$(git config -f .git-filesync file.a.c.source)" "lib9"
 quiet git filesync add --no-commit b.c "$URL9" -p t.c --tag v1
 check "add by URL + tag: first source with that tag" "$(git config -f .git-filesync file.b.c.source)" "$SRC9B"
-quiet git filesync add --no-commit c.c "$URL9" -p t.c --tag v2
-check "add by URL, other tag: new source" \
-  "$(git config -f .git-filesync file.c.c.source | grep -cvE "^(lib9|$SRC9B|dup)$")" "1"
+quiet git filesync add --no-commit c.c "$URL9" -p t.c --tag v2 -b main
+SRC9C=$(git config -f .git-filesync file.c.c.source)
+check "add by URL, other tag: new source" "$(echo "$SRC9C" | grep -cvE "^(lib9|$SRC9B|dup)$")" "1"
+check "add --tag -b: both recorded" \
+  "$(git config -f .git-filesync source.$SRC9C.tag) $(git config -f .git-filesync source.$SRC9C.branch)" "v2 main"
+quiet git filesync add --no-commit d.c "$URL9" -p t.c --tag v2
+check "add by URL + tag, no -b: source with a branch reused" "$(git config -f .git-filesync file.d.c.source)" "$SRC9C"
+check "add --tag -b: tag not on the branch" \
+  "$(git filesync add --no-commit e.c "$URL9" -p t.c --tag v2 -b nope 2>&1 | grep -c "branch 'nope' not found")" "1"
 git reset -q --hard
 
 
@@ -1108,12 +1129,12 @@ check "repo alias to a copy of the script, from a subdirectory" "$(cd proto && g
 
 
 # =============================================================================
-section "18. pull -b / --tag: switching branch or tag; newest tag hints"
+section "18. pull -b / --tag: switching branch or tag; newer tags"
 # =============================================================================
 cd "$T"
 
 # m12.git (bare, via the cache) and checkout co12: a.c b.c c.c (lines 1..5).
-# v1.0; v1.1 changes line 5 of a.c and b.c; v2.0-rc1 (pre-release) changes a.c
+# v1.0; v1.1 changes line 5 of a.c and b.c; v2.0-rc1 changes a.c
 git init -q --bare m12.git
 git -C m12.git config uploadpack.allowFilter true
 git clone -q m12.git co12 2>/dev/null
@@ -1128,27 +1149,61 @@ new_slave s12
 for f in a b c; do quiet git filesync add --tag v1.0 $f.c "$URL12"; done
 SRC12=$(git config -f .git-filesync file.a.c.source)
 
-# hints at the newest tag (pre-releases don't count): status -v, source -v, pull
-check "status -v: newest tag" "$(git filesync status -v | grep -c '(tag v1.0, newest v1.1)')" "3"
+# newer tags by their place in the commit graph - names are opaque, so a
+# pre-release counts like any tag: status -v, source -v, pull
+check "status -v: newest tag" "$(git filesync status -v | grep -c '(tag v1.0, newest v2.0-rc1 on main)')" "3"
 check "plain status: no hint" "$(git filesync status | grep -c newest)" "0"
 check "source -v: newest tag" "$(git filesync source -v)" \
-  "$(printf '%s\t%s (tag v1.0, newest v1.1, 3 files)' "$SRC12" "$URL12")"
-check "pull: hint" \
-  "$(git filesync pull --all 2>&1 | grep -c "^hint: $SRC12 is pinned to tag v1.0; the newest tag is v1.1 ")" "1"
-(cd ../co12 && git tag v1.2 HEAD~1 && git push -q origin v1.2)
-check "newer tag on the server is seen" "$(git filesync source -v | grep -c 'newest v1.2,')" "1"
+  "$(printf '%s\t%s (tag v1.0, newest v2.0-rc1 on main, 3 files)' "$SRC12" "$URL12")"
+check "pull: hint" "$(git filesync pull --all 2>&1 | grep -c "^hint: $SRC12 is pinned to tag v1.0; \
+the newest tag is v2.0-rc1 on main (use 'git filesync pull --tag v2.0-rc1 <file>...' to switch)$")" "1"
+
+# a maintenance branch from v1.0 with v1.0.1; a feature branch from v1.1
+# with tag f1, merged into main; rel-2 on the same commit as v2.0-rc1; v1.2
+# on the v1.1 commit (older than v2.0-rc1 on main, whatever its name)
+(cd ../co12 && git checkout -qb maint v1.0 && echo m > m.txt && git add m.txt \
+  && git commit -qm maint && git tag -a -m 1.0.1 v1.0.1 \
+  && git checkout -qb feature v1.1 && echo f > f.txt && git add f.txt && git commit -qm f \
+  && git tag f1 && git checkout -q main && git merge -q --no-ff -m "merge feature" feature \
+  && git tag rel-2 HEAD^1 && git tag v1.2 v1.1 && git push -q origin main maint feature --tags)
+check "all branches: newest per branch" "$(git filesync source -v | grep -c \
+  'newest f1 on feature; rel-2 = v2.0-rc1 on main; v1.0.1 on maint, 3 files)')" "1"
+check "pull: hint with several" "$(git filesync pull --all 2>&1 | grep -c "^hint: $SRC12 is pinned \
+to tag v1.0; newer tags: f1 on feature; rel-2 = v2.0-rc1 on main; v1.0.1 on maint (use .*set-branch")" "1"
+git filesync source set-branch "$SRC12" main >/dev/null
+check "branch: only its line, merged side branch ignored" \
+  "$(git filesync source -v | grep -c '(tag v1.0 on main, newest rel-2 = v2.0-rc1, 3 files)')" "1"
+check "pull: hint for the branch" "$(git filesync pull --all 2>&1 | grep -c "^hint: $SRC12 is pinned \
+to tag v1.0; the newest tag on branch main is rel-2 = v2.0-rc1 (use 'git filesync pull --tag rel-2 ")" "1"
+git filesync source set-branch "$SRC12" maint >/dev/null
+check "branch maint" "$(git filesync source -v | grep -c '(tag v1.0 on maint, newest v1.0.1, 3 files)')" "1"
+git filesync source set-tag "$SRC12" v1.0.1 >/dev/null
+check "newest tag pinned: no newer" "$(git filesync source -v | grep -c newest)" "0"
+git filesync source set-branch "$SRC12" main >/dev/null
+check "tag not on the branch: warning (per file)" "$(git filesync status -v 2>&1 | grep -c "tag v1.0.1 is not on branch 'main'")" "3"
+git filesync source set-tag "$SRC12" v1.0 >/dev/null
+git commit -qm "pinned to v1.0 on main"
+
+# with a mapped checkout: its branches and tags, unpushed ones included
+(cd ../co12 && git tag local-3)
+git filesync map "$URL12" "$T/co12" >/dev/null
+check "mapped: newest tag from the checkout" \
+  "$(git filesync source -v | grep -c '(tag v1.0 on main, newest local-3, 3 files)')" "1"
+git filesync map "$URL12" --unset >/dev/null
+(cd ../co12 && git tag -d local-3 >/dev/null)
 
 # switching only some files of a source splits it; the adaptation is merged
 sed -i 's/^1$/1-local/' a.c
 git commit -qam adapt
 quiet git filesync pull --no-edit --tag v1.1 a.c
 check "partial switch: file moved to a new source" "$(git config -f .git-filesync file.a.c.source)" "$SRC12-2"
-check "partial switch: new source pinned" "$(git config -f .git-filesync source.$SRC12-2.tag)" "v1.1"
+check "partial switch: new source pinned, branch kept" \
+  "$(git config -f .git-filesync source.$SRC12-2.tag) $(git config -f .git-filesync source.$SRC12-2.branch)" "v1.1 main"
 check "partial switch: old source unchanged" \
   "$(git config -f .git-filesync source.$SRC12.tag) $(git config -f .git-filesync file.b.c.source)" "v1.0 $SRC12"
 check "partial switch: merged" "$(oneline < a.c)" "1-local 2 3 4 5-v11 "
 check "partial switch: message" \
-  "$(git log -1 --format=%B | grep -cE '^(Sync a.c from |Switched from tag v1.0 to tag v1.1.$)')" "2"
+  "$(git log -1 --format=%B | grep -cE '^(Sync a.c from |Switched from tag v1.0 on main to tag v1.1 on main.$)')" "2"
 check "partial switch: all committed" "$(git status --porcelain)" ""
 
 # the remaining files join the source that already has v1.1; the emptied
@@ -1162,7 +1217,7 @@ check "switch rest: all committed" "$(git status --porcelain)" ""
 # all files of a source: the source itself is changed; nothing to sync -> own commit
 quiet git filesync pull --no-edit --all --tag v1.2
 check "whole source switched in place" "$(git config -f .git-filesync source.$SRC12-2.tag)" "v1.2"
-check "switch without sync: own commit" "$(git log -1 --format=%s)" "Switch $SRC12-2 from tag v1.1 to tag v1.2"
+check "switch without sync: own commit" "$(git log -1 --format=%s)" "Switch $SRC12-2 from tag v1.1 on main to tag v1.2 on main"
 check "switch without sync: committed" "$(git status --porcelain)" ""
 
 # back to the branch
@@ -1176,6 +1231,8 @@ check "switch to a missing tag" "$(rc git filesync pull --no-edit --tag v9 a.c)"
 check "missing tag: registry unchanged" "$(git status --porcelain) $(git config -f .git-filesync source.$SRC12-2.branch)" " main"
 check "--commit and --tag exclude each other" "$(rc git filesync pull --commit v1.0 --tag v1.0 a.c)" "2"
 check "pull --dry-run --tag" "$(git filesync pull --dry-run --tag v1.0 a.c | grep -cE '^(would: Move a.c from|a.c: would sync to .*from branch main)')" "2"
+check "pull --dry-run --tag -b" \
+  "$(git filesync pull --dry-run --tag v1.0 -b maint a.c | grep -c '^would: Move a.c from .* (tag v1.0 on maint)')" "1"
 check "pull --dry-run --tag: nothing changed" "$(git status --porcelain)" ""
 
 # an uncommitted source rename doesn't block pull; it goes into the sync commit

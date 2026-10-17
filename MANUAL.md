@@ -57,12 +57,16 @@ file. Git-config format:
 [source "owner/lib-2"]
 	url = https://github.com/owner/lib.git
 	tag = v1.2.0           # pinned to a tag instead of following a branch
+	branch = main          # optional: where newer tags are looked for
 ```
 
-- A `[source]` names a master repository and either a branch or a tag
-  ([pinned](#pinning-to-a-tag)) once. `add` with a URL reuses an existing
-  source only if URL *and* branch/tag match, and creates one otherwise;
-  `add` with the name of a source uses exactly that source. A new source is
+- A `[source]` names a master repository and either a branch it follows or
+  a tag it is [pinned](#pinning-to-a-tag) to – the latter optionally with
+  the branch on which [newer tags](#newer-tags) are looked for. `add` with
+  a URL reuses an existing source only if URL *and* branch/tag match (with
+  `--tag` but no `-b`: a source pinned to that tag, whatever its branch),
+  and creates one otherwise; `add` with the name of a source uses exactly
+  that source. A new source is
   named `owner/repo` after its URL; if that name is already taken by another
   URL, branch or tag, a number is appended (`owner/repo-2`, …). Rename it
   with [`source rename`](#source); `status`, `add` and the commit messages
@@ -157,7 +161,7 @@ directory stands for all linked files below it. Options follow the command
 | Option | Effect |
 |---|---|
 | `-s`, `--short` | short format, three columns |
-| `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one also the newest tag of the master |
+| `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one also the [newer tags](#newer-tags) of the master |
 | `--exit-code` | exit with 1 if something is to sync or a strict file is modified |
 | `--hook` | terse output on stderr, used by the [reminder hooks](#install-hooks-uninstall-hooks) |
 
@@ -238,8 +242,8 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 |---|---|
 | `--all` | all linked files with something to sync |
 | `--commit REV` | sync to this master revision instead – branch, tag or commit id, also backwards; exactly one file. The link keeps its branch or tag |
-| `-b`, `--branch BRANCH` | switch the files to following BRANCH and sync them (see [Switching branch or tag](#switching-branch-or-tag)) |
-| `--tag TAG` | switch the files to (pin them to) TAG and sync them |
+| `-b`, `--branch BRANCH` | switch the files to following BRANCH and sync them (see [Switching branch or tag](#switching-branch-or-tag)); with `--tag`: the branch to look for newer tags on |
+| `--tag TAG` | switch the files to (pin them to) TAG and sync them; the source's branch stays the one to look for newer tags on |
 | `--overwrite` | discard local adaptations and take the master version as is (also when the file is up to date) |
 | `--autostash` | set uncommitted changes aside, sync, re-apply them |
 | `--no-edit` | commit with the proposed message without opening the editor |
@@ -277,10 +281,10 @@ With `--all`, a file that can't be synced (conflict, strict violation, file
 deleted in the master, …) is reported and the other files are still synced.
 
 For files of a source [pinned to a tag](#pinning-to-a-tag), `pull` ends with
-a hint if the master has a newer tag:
+a hint if the master has [newer tags](#newer-tags):
 
 ```
-hint: owner/lib is pinned to tag v1.2.0; the newest tag is v1.4.0 (use 'git filesync pull --tag v1.4.0 <file>...' to switch)
+hint: owner/lib is pinned to tag v1.2.0; the newest tag on branch main is v1.4.0 (use 'git filesync pull --tag v1.4.0 <file>...' to switch)
 ```
 
 A file **renamed in the master** is followed: `pull` takes the new path into
@@ -295,11 +299,14 @@ branch or tag of their master and sync them in the same step – adaptations
 are merged with the 3-way merge as usual, the base being the version synced
 so far. The commit message says `Switched from tag v1.2.0 to tag v1.3.0.`
 
+- `--tag TAG` keeps the source's branch as the one to look for [newer
+  tags](#newer-tags) on; `--tag TAG -b BRANCH` sets both; `-b BRANCH`
+  alone makes the files follow BRANCH (the tag is removed).
 - If the given files (or `--all`) are **all files of a source**, the source
   itself is changed, as with [`source set-tag`](#source) /
   `set-branch`.
 - If they are only **some of its files**, the source is split: the given
-  files move to the source with the same URL and the new branch or tag – an
+  files move to the source with the same URL and the new branch and tag – an
   existing one, or a new one (`owner/lib-2`) – and the others stay where
   they are. A source left without files is removed.
 - Files that don't change between the two versions get no sync commit of
@@ -377,7 +384,9 @@ its URL or by the name of a `[source]` already in `.git-filesync`:
 
 - **URL**: the file joins an existing source only if the URL and the
   branch or tag (`-b`, `--tag`, default: the master's default branch) both
-  match; otherwise a new source is created.
+  match – with `--tag` but no `-b`, a source pinned to that tag is taken
+  whatever branch it looks for newer tags on; otherwise a new source is
+  created.
 - **Name of a source**: the file joins exactly this source, whether it
   follows a branch or is pinned to a tag. `-b` / `--tag` are not needed; if
   given, they must match the source (otherwise `add` refuses – give the URL
@@ -388,7 +397,7 @@ master (see [below](#linking-a-directory)).
 
 | Option | Effect |
 |---|---|
-| `-b`, `--branch BRANCH` | master branch; default: the master's default branch, or the branch/tag of the given `[source]` |
+| `-b`, `--branch BRANCH` | master branch; default: the master's default branch, or the branch/tag of the given `[source]`. With `--tag`: the branch to look for [newer tags](#newer-tags) on (a warning if the tag isn't on it) |
 | `--tag TAG` | [pin](#pinning-to-a-tag) to a master tag instead of following a branch |
 | `-p`, `--path PATH` | path in the master; default: the same as FILE or DIR (`/`: the master's root) |
 | `--include PATTERN` | directory: only files matching PATTERN; repeatable |
@@ -483,16 +492,19 @@ own, or it goes into the next sync commit.
 
 | Command | Effect |
 |---|---|
-| `source` | list the source names (`-v`: with URL, branch or tag – for a tag also the newest tag of the master – and number of linked files) |
+| `source` | list the source names (`-v`: with URL, branch or tag – for a tag also the [newer tags](#newer-tags) of the master – and number of linked files) |
 | `source rename OLD NEW` | rename a source, including every `source =` line |
 | `source set-url NAME URL` | change the URL, e.g. after the master moved (its commits must be there) |
-| `source set-branch NAME BRANCH` | follow BRANCH (replaces a tag) |
-| `source set-tag NAME TAG` | [pin](#pinning-to-a-tag) to TAG (replaces a branch) |
+| `source set-branch NAME BRANCH` | follow BRANCH; for a source pinned to a tag only the branch to look for newer tags on (the tag stays) |
+| `source set-branch NAME --unset` | for a pinned source: look for newer tags on all branches |
+| `source set-tag NAME TAG` | [pin](#pinning-to-a-tag) to TAG; a branch stays, as the one to look for newer tags on |
+| `source set-tag NAME --unset` | remove the tag: follow the source's branch again (it needs one) |
 
 ```
 $ git filesync source -v
 owner/lib	https://github.com/owner/lib.git (main, 3 files)
-owner/lib-2	https://github.com/owner/lib.git (tag v1.2.0, newest v1.4.0, 1 file)
+owner/lib-2	https://github.com/owner/lib.git (tag v1.2.0 on main, newest v1.4.0, 1 file)
+owner/lib-3	https://github.com/owner/lib.git (tag v1.2.0, newest v1.2.1 on maint; v1.4.0 on main, 1 file)
 ```
 
 `source -v` accepts `--no-fetch` and `--remote` like `status`.
@@ -584,9 +596,11 @@ release of the master:
 git filesync add cfg/x.yml https://github.com/owner/lib.git --tag v1.2.0
 ```
 
-`.git-filesync` then has `tag = v1.2.0` instead of `branch = …` in the
-`[source]`. `status` compares against the version at the tag – commits on
-the master's branches don't matter – and `pull` syncs to it.
+`.git-filesync` then has `tag = v1.2.0` in the `[source]`. `status`
+compares against the version at the tag – commits on the master's branches
+don't matter – and `pull` syncs to it. A `branch` in a pinned source (`add
+--tag v1.2.0 -b main`, or kept when a source following `main` is pinned)
+only says where to look for [newer tags](#newer-tags).
 
 Tags are taken as immutable, like Git does: once the tag is in the cache,
 `status` (and the hooks) fetch nothing for it, so they need no network for
@@ -598,8 +612,7 @@ Since a pinned file only changes when the tag does, `pull` usually has
 nothing to do – except to bring a file back to the tag's version (e.g. after
 `pull --commit`) or after the tag was changed. To learn about newer
 releases, `pull`, `status -v` and `source -v` fetch the master's tags (unless
-`--no-fetch`) and name the newest one – the highest version with the same
-prefix (`v…`); pre-releases (`-rc1`, …) only count if the pinned tag is one.
+`--no-fetch`) and name the [newer tags](#newer-tags).
 
 To move on to a newer release, switch and sync in one step:
 
@@ -608,9 +621,39 @@ git filesync pull --tag v1.3.0 --all        # or only some files, see pull
 ```
 
 or change the source and sync later: `git filesync source set-tag owner/lib
-v1.3.0`, then `git filesync pull --all`. `pull -b BRANCH` / `source
-set-branch` go back to following a branch. `pull --commit` still syncs a
+v1.3.0`, then `git filesync pull --all`. `pull -b BRANCH` / `source set-tag
+NAME --unset` go back to following a branch. `pull --commit` still syncs a
 single file to any revision.
+
+#### Newer tags
+
+Tag names are taken as opaque – `v1.10` and `v1.9`, `release-7` or
+`tool-20261016` are just names – and tags carry no reliable date
+(lightweight tags have none of their own, and a tag may be set on an old
+commit later). So "newer" is defined by the commit graph alone: on a branch,
+the newest tag after the pinned one is on the first tagged commit after it
+along the branch's first-parent line, i.e. the commits the branch itself
+went through. Tags on side branches merged into it don't count.
+
+- With a `branch` in the source, only that branch is looked at, so there is
+  at most one newest tag (several names if several tags are on that commit:
+  `v1.4.0 = release-7`):
+
+  ```
+  hint: owner/lib is pinned to tag v1.2.0; the newest tag on branch main is v1.4.0 (use 'git filesync pull --tag v1.4.0 <file>...' to switch)
+  ```
+
+  If the pinned tag isn't on that branch, `status` warns.
+- Without, every branch containing the pinned tag is looked at, so there
+  may be several – e.g. a maintenance release and the next major one:
+
+  ```
+  hint: owner/lib is pinned to tag v1.2.0; newer tags: v1.2.1 on maint; v1.4.0 on main (use 'git filesync pull --tag TAG <file>...' to switch, 'git filesync source set-branch owner/lib BRANCH' to look on one branch only)
+  ```
+
+Pre-releases count like any other tag. Branches are those of the master
+(`origin/…` in the cache); with a [mapped checkout](#map) its local branches
+and tags, unpushed ones included.
 
 ### Files renamed or deleted in the master
 
@@ -707,7 +750,7 @@ jobs:
 ```
 
 This uses the latest release. To pin a version, download
-`https://github.com/stsichler/git-filesync/releases/download/v0.2.0/git-filesync.py`
+`https://github.com/stsichler/git-filesync/releases/download/v0.3.0/git-filesync.py`
 instead. (For private master repositories the job needs a token with read
 access.)
 
@@ -734,7 +777,7 @@ the same version without installing it:
 
 ```sh
 git filesync add tools/git-filesync.py https://github.com/stsichler/git-filesync.git \
-    -p git-filesync.py --tag v0.2.0 --strict
+    -p git-filesync.py --tag v0.3.0 --strict
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
 ```
 
