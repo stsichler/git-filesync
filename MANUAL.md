@@ -18,7 +18,7 @@ For motivation and installation see the [README](README.md).
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted in the master](#files-renamed-or-deleted-in-the-master)
   - [Git LFS](#git-lfs) · [Line endings](#line-endings) · [Offline operation](#offline-operation)
-  - [Colors](#colors) · [CI](#ci) · [Exit codes](#exit-codes) · [Binary files](#binary-files)
+  - [Colors](#colors) · [CI](#ci) · [Exit codes](#exit-codes) · [Binary files](#binary-files) · [Windows](#windows)
   - [Shipping git-filesync with your repository](#shipping-git-filesync-with-your-repository)
 
 ## Concepts
@@ -795,6 +795,29 @@ are reported but don't change the exit code.
 ### Binary files
 
 Binary files can be synced, but not merged with local modifications.
+
+### Windows
+
+git-filesync runs with Git for Windows and a Python from python.org (or
+the Microsoft Store); set the alias with `py` or `python`, see the
+[README](README.md). Output has LF line ends, like git's.
+
+Git for Windows runs the alias through its own (MSYS) shell, also when you
+call `git filesync` from cmd or PowerShell. That shell changes two kinds of
+arguments before git-filesync sees them:
+
+- **Wildcard characters** in file names (`*`, `?`, `[…]`) are expanded if a
+  file matches: `git filesync add 'f[1].txt' …` turns into `f1.txt` when
+  that file exists.
+- **Arguments starting with `/`** become Windows paths: `--include /x.md`
+  turns into `C:/Program Files/Git/x.md`. For the master's root, `-p .`
+  works as well as `-p /`.
+
+For such arguments, run the script directly instead of through the alias,
+e.g. `py C:/tools/git-filesync.py add docs owner/lib --include /x.md` in
+cmd or PowerShell; in Git Bash, put `MSYS_NO_PATHCONV=1` in front of it.
+Don't set `MSYS_NO_PATHCONV` (or `MSYS=noglob`) for git itself: it breaks
+how git passes the arguments to the alias.
 
 ### Shipping git-filesync with your repository
 
