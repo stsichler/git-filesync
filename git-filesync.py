@@ -2509,7 +2509,8 @@ def cmd_uninstall_hooks(slave, args):
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(errors="replace")
+            # LF line ends like git's output, also on Windows (no CRLF translation)
+            stream.reconfigure(errors="replace", newline="\n")
         except AttributeError:
             pass
 
