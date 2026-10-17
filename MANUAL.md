@@ -139,8 +139,12 @@ or lift the restriction (`strict = false`).
 | [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks) | reminder hooks |
 
 Commands named like a Git command behave like it (`status`, `pull`, `diff`,
-`difftool`, `mv`; `source` like `git remote`): same kind of output, same
-exit codes, same caution with uncommitted changes. `git filesync` without a command runs `status`.
+`difftool`, `add`, `mv`; `source` like `git remote`): same kind of output,
+same exit codes, same caution with uncommitted changes. Like in Git, only
+`pull` commits; `add`, `mv`, `unlink` and `source` stage their changes, and
+`add` prepares a proposed commit message that a plain `git commit` offers
+(see [Proposed commit messages](#proposed-commit-messages)). `git filesync`
+without a command runs `status`.
 
 Paths are relative to the current directory. Where `PATH…` is accepted, a
 directory stands for all linked files below it. Options follow the command
@@ -247,14 +251,13 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `--overwrite` | discard local adaptations and take the master version as is (also when the file is up to date) |
 | `--autostash` | set uncommitted changes aside, sync, re-apply them |
 | `--no-edit` | commit with the proposed message without opening the editor |
-| `--no-commit` | only update and stage the file and its entry; prints the proposed commit message (for copying) and the `git commit` command; a plain `git commit` offers the message too (see [Proposed commit messages](#proposed-commit-messages)) |
+| `--no-commit` | only update and stage the file and its entry; a plain `git commit` then offers the proposed message (see [Proposed commit messages](#proposed-commit-messages)) |
 | `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename in the master, and every refusal |
 
 **Adaptations** are merged with the new master version (3-way merge, base =
 the last synced version). On conflicts the file gets the usual conflict
-markers; resolve them, then run the `git add` / `git commit -e -F …` command
-printed by the tool – the prepared message is kept in `.git/FILESYNC_MSG_*`
-(or `git add` the file and run a plain `git commit`, see [Proposed commit
+markers; resolve them, then `git add` the file and run `git commit`, which
+offers the proposed message (see [Proposed commit
 messages](#proposed-commit-messages)). `--overwrite` skips the merge and
 discards the adaptations.
 
@@ -275,9 +278,8 @@ the same way; the commit message then lists what is reverted.
 sync commit must not pick up uncommitted entries of *other* files (that
 commit would record their new state without their content). `pull`
 therefore refuses to commit while `.git-filesync` has uncommitted changes
-for other files – commit those first (e.g. after `add --no-commit`), or use
-`--no-commit` to stage everything and commit it together. The same applies
-to [`add`](#add).
+for other files – commit those first (e.g. after [`add`](#add)), or use
+`--no-commit` to stage everything and commit it together.
 
 With `--all`, a file that can't be synced (conflict, strict violation, file
 deleted in the master, …) is reported and the other files are still synced.
@@ -407,17 +409,17 @@ master (see [below](#linking-a-directory)).
 | `--commit REV` | master revision FILE corresponds to, instead of looking it up |
 | `--strict` | the file must stay an exact copy (see [Strict files](#strict-files)) |
 | `--force` | relink a file that is already linked |
-| `--no-edit` | commit with the proposed message without opening the editor |
-| `--no-commit` | only stage FILE and `.git-filesync`; prints the proposed commit message (for copying) and the `git commit` command; a plain `git commit` offers the message too |
 | `-n`, `--dry-run` | change nothing, only show what would be linked and on which master version it would be based |
 
 - If FILE exists, the master version it matches is looked up and recorded
   as its base. If none matches, the branch head is taken (with a warning) and
   the differences count as adaptations; `--commit` chooses a better base.
 - If FILE doesn't exist, it is fetched from the master.
-- Like [`pull`](#pull), `add` commits FILE (as it is in the working tree)
-  together with its entry in `.git-filesync`; the editor opens with the
-  proposed commit message:
+- Like `git add`, `add` stages FILE (as it is in the working tree) and its
+  entry in `.git-filesync`, but doesn't commit. A plain `git commit` then
+  opens the editor with the proposed commit message (`git commit --no-edit`
+  takes it as it is; see [Proposed commit
+  messages](#proposed-commit-messages)):
 
   ```
   Add src/foo.c from owner/lib@a1b2c3d
@@ -426,13 +428,13 @@ master (see [below](#linking-a-directory)).
   ```
 
   For an existing FILE the subject is `Link FILE to …` (`Relink …` with
-  `--force`); the message notes local modifications and `--strict`. If the
-  commit is aborted, everything stays staged and the `git commit -e -F …`
-  command to finish it is printed (a plain `git commit` offers the message
-  too, see [Proposed commit messages](#proposed-commit-messages)).
+  `--force`); the message notes local modifications and `--strict`. Several
+  `add`s (and `pull --no-commit`) in a row go into one commit, with all
+  their messages.
 
 ```sh
 git filesync add src/foo.c https://github.com/owner/lib.git -p lib/foo.c
+git commit                                            # with the proposed message
 git filesync add include/bar.h owner/lib --strict     # reuse [source "owner/lib"]
 git filesync add src/ owner/lib -p lib/util.h         # into an existing directory: src/util.h
 git filesync add cfg/x.yml https://github.com/owner/lib.git --tag v1.2.0
@@ -446,7 +448,7 @@ directory: `-p api` with DIR `proto` links `api/v1/x.proto` as
 `proto/v1/x.proto`. (A master *file* given for an existing directory goes
 into it, like `cp`.) Each file gets its own ordinary `[file]` entry – after
 `add` there is no difference to files linked one by one – and all of them
-are committed together:
+are staged together, with one proposed message:
 
 ```
 Add 2 files from owner/backend@a1b2c3d
@@ -660,19 +662,21 @@ and tags, unpushed ones included.
 
 ### Proposed commit messages
 
-Whenever `pull` or `add` don't commit themselves – with `--no-commit`, after
-merge conflicts, or when the commit was aborted – the proposed message is
-kept in `.git/FILESYNC_MSG_*` for the printed `git commit -e -F …` command,
-and is also put into `.git/SQUASH_MSG`. Git offers that file as the message
-of the next plain `git commit` (as after `git merge --squash`), and so do
-IDEs such as VS Code in their commit message box. Git removes it after the
-next commit, whatever its message, and on `git reset`.
+Whenever changes are staged with a proposed commit message but not committed
+– by `add`, by `pull --no-commit`, after merge conflicts, or when the commit
+was aborted – the message is put into `.git/SQUASH_MSG`. Git offers that
+file as the message of the next plain `git commit` (as after `git merge
+--squash`); `git commit --no-edit` takes it as it is. IDEs such as VS Code
+fill their commit message box with it. Git removes it after the next commit,
+whatever its message, and on `git reset`.
 
-- Several commands in a row (e.g. `add --no-commit` for some files, then
-  one commit for all of them) collect their messages there.
+- Several commands in a row (e.g. `add` for some files and `pull
+  --no-commit` for others, then one commit for all of them) collect their
+  messages there.
 - A `SQUASH_MSG` that git-filesync didn't write (e.g. from `git merge
-  --squash`) is left alone; the tool then says that a plain `git commit`
-  won't offer its message.
+  --squash`) is left alone. The tool then keeps the message in
+  `.git/FILESYNC_MSG_*` and prints a `git commit -e -F …` command that uses
+  it.
 
 ### Files renamed or deleted in the master
 

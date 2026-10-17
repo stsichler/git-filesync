@@ -68,10 +68,8 @@ follow the command.
         --overwrite             discard local adaptations instead of merging
         --autostash             set uncommitted changes aside, re-apply after
         --no-edit               commit without opening the editor
-        --no-commit             only stage; print the proposed commit message
-                                and the commit command (the message is also
-                                put into .git/SQUASH_MSG: a plain `git
-                                commit` offers it)
+        --no-commit             only stage; a plain `git commit` offers the
+                                proposed message (via .git/SQUASH_MSG)
         --dry-run               only report what would happen (incl.
                                 merge conflicts); change nothing
 
@@ -94,10 +92,11 @@ follow the command.
                                 a number appended if taken); an existing FILE's
                                 master version is detected, a missing FILE
                                 is fetched; FILE and .git-filesync are
-                                committed with a proposed message
+                                staged like `git add` - a plain `git commit`
+                                offers the proposed message
     add DIR URL|SOURCE          link every file below a master directory
                                 (-p, default: same as DIR) as DIR/...; files
-                                already linked are skipped; one commit
+                                already linked are skipped
         -b, --branch BRANCH     master branch (default: master's default
                                 branch or that of SOURCE); with --tag: the
                                 branch to look for newer tags on
@@ -109,7 +108,6 @@ follow the command.
         --commit REV            master revision FILE corresponds to
         --strict                FILE must stay an exact copy
         --force                 relink an already linked file
-        --no-edit, --no-commit  as for pull
         -n, --dry-run           only show what would be linked
 
     unlink PATH...              remove links (the files are kept)
@@ -1567,29 +1565,36 @@ def propose_message(slave, msg):
     return True
 
 
-def proposed_note(slave, msg):
-    """Line telling where else the proposed message is, see propose_message."""
+def commit_hint(slave, name, msg, rels=None):
+    """(command, note) for committing staged changes with the proposed
+    message: a plain `git commit` if the message could be prepared for it
+    (see propose_message), otherwise one with a message file."""
     if propose_message(slave, msg):
-        return "\n(also prepared for a plain 'git commit')"
-    return "\n(.git/SQUASH_MSG is in use, so a plain 'git commit' won't offer it)"
+        return "git commit", "it offers the proposed commit message"
+    _, cmd = message_file(slave, name, msg, rels)
+    return cmd, "a plain 'git commit' won't offer the proposed message: .git/SQUASH_MSG is in use"
+
+
+def report_staged(slave, name, msg, done, rels=None, how="Commit with"):
+    """Tell how to commit what a command staged without committing."""
+    cmd, note = commit_hint(slave, name, msg, rels)
+    print(f"{name}: {done}. {how}:\n    {cmd}\n({note})")
 
 
 def commit_staged(slave, name, msg, args, done, rels=None):
     """Commit the staged files (default: name) and their entries with the
     proposed message (in the editor unless --no-edit). With --no-commit,
-    print the message, so it can be copied, and the command to commit later.
-    done: e.g. 'synced and staged'."""
+    leave them staged and tell how to commit. done: e.g. 'synced and staged'."""
     rels = [name] if rels is None else rels
-    msgfile, commit_cmd = message_file(slave, name, msg, rels)
     if args.no_commit:
-        print(f"{name}: {paint(done, 'green')}. Proposed commit message:\n\n{msg}\n"
-              f"Commit with:\n    {commit_cmd}{proposed_note(slave, msg)}")
+        report_staged(slave, name, msg, paint(done, "green"), rels)
         return EXIT_OK
+    msgfile, _ = message_file(slave, name, msg, rels)
     cmd = ["git", "commit", "-F", str(msgfile)] + ([] if args.no_edit else ["-e"]) + \
         ["--"] + [lit(r) for r in rels] + [REGISTRY]
     if subprocess.run(cmd, cwd=slave.top).returncode:
-        print(f"{name}: {paint('commit not done', 'yellow')}; changes stay staged. "
-              f"Commit later with:\n    {commit_cmd}{proposed_note(slave, msg)}")
+        report_staged(slave, name, msg, paint("commit not done", "yellow")
+                      + "; changes stay staged", rels, "Commit later with")
         return EXIT_PENDING
     msgfile.unlink()
     return EXIT_OK
@@ -1686,14 +1691,13 @@ def pull_one(slave, reg, st, args):
 
     msg = build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discard)
     if conflicts:
-        _, commit_cmd = message_file(slave, st.rel, msg)
         if stash is not None:
             stashfile = slave.state_file("FILESYNC_STASH_", st.rel)
             stashfile.write_bytes(slave.to_worktree(stash, st.rel))
             print(f"{st.rel}: autostash kept in {stashfile} (not re-applied because of the conflicts)")
+        cmd, note = commit_hint(slave, st.rel, msg)
         print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}. "
-              f"Resolve them, then run:\n    git add {cmd_arg(st.rel)}\n    {commit_cmd}"
-              + proposed_note(slave, msg))
+              f"Resolve them, then run:\n    git add {cmd_arg(st.rel)}\n    {cmd}\n({note})")
         return EXIT_PENDING
     slave.git(["add", "--", lit(st.rel)])
     rc = commit_staged(slave, st.rel, msg, args, "synced and staged")
@@ -2174,7 +2178,6 @@ def cmd_add(ctx, slave, args):
             print(f"would link {p.rel} -> {name}:{p.path} ({shown_ref}), "
                   f"{note}, based on {src.short(p.commit)}")
         return EXIT_OK
-    check_other_entries(reg, rels, args)
 
     for p in plan:
         if p.rel in reg.files:
@@ -2197,9 +2200,11 @@ def cmd_add(ctx, slave, args):
         print(f"{rel}: link{'s' if len(rels) > 1 else ''} and "
               f"file{'s' if len(rels) > 1 else ''} unchanged, nothing to commit")
         return EXIT_OK
+    # staged only, like git add; the proposed message is prepared for the commit
     msg = build_add_message(plan, src, name, url, ref, path, relink, args.strict, at or head)
     msg_name = rels[0] if len(rels) == 1 else (rel if rel != "." else "root")
-    return commit_staged(slave, msg_name, msg, args, "staged", rels)
+    report_staged(slave, msg_name, msg, paint("staged", "green"), rels)
+    return EXIT_OK
 
 
 def plan_dir(slave, reg, src, args, at, rel, path, target):
@@ -2535,7 +2540,7 @@ def main(argv=None):
     p.add_argument("--tag", help="switch to (pin to) this master tag, and sync")
     p.add_argument("--no-edit", action="store_true", help="commit without opening the editor")
     p.add_argument("--no-commit", action="store_true",
-                   help="only stage; print commit message and command")
+                   help="only stage; a plain 'git commit' offers the proposed message")
     p.add_argument("--overwrite", action="store_true",
                    help="discard local adaptations instead of merging them")
     p.add_argument("--autostash", action="store_true",
@@ -2583,9 +2588,6 @@ def main(argv=None):
     p.add_argument("--force", action="store_true", help="relink an already linked file")
     p.add_argument("--strict", action="store_true",
                    help="file must stay an exact copy (no local modifications)")
-    p.add_argument("--no-edit", action="store_true", help="commit without opening the editor")
-    p.add_argument("--no-commit", action="store_true",
-                   help="only stage; print commit message and command")
 
     p = sub.add_parser("unlink", parents=[colorp], help="remove links (the files are kept)")
     p.add_argument("files", nargs="+", help="files or directories")

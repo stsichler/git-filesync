@@ -91,6 +91,10 @@ quiet() { "$@" >/dev/null 2>&1; }
 # rc CMD... - run a command quietly and print its exit code
 rc() { "$@" >/dev/null 2>&1; echo $?; }
 
+# addc ARGS... - 'git filesync add' (which only stages, like git add), then
+# commit with the proposed message, as 'git commit --no-edit' offers it
+addc() { git filesync add "$@" >/dev/null 2>&1 && git commit -q --no-edit >/dev/null 2>&1; }
+
 # oneline - join the lines of stdin with blanks ("a\nb\n" -> "a b ")
 oneline() { tr '\n' ' '; }
 
@@ -119,9 +123,12 @@ up() { (cd "$T/master" && sed -i "$1" lib.c && git commit -qam "$2" && git push 
 
 # slave: links master's lib.c as src/lib.c
 new_slave slave
-quiet git filesync add src/lib.c "$URL" -p lib.c
-check "add + status clean" "$(st)" ""
-check "add commits file and entry" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync src/lib.c "
+OUT=$(git filesync add src/lib.c "$URL" -p lib.c 2>&1)
+check "add stages, like git add" "$(git status --porcelain | oneline)" "A  .git-filesync A  src/lib.c "
+check "add: says how to commit" "$(echo "$OUT" | grep -cxE '    git commit|\(it offers the proposed commit message\)')" "2"
+git commit -q --no-edit
+check "add + commit: status clean" "$(st)" ""
+check "add + commit: file and entry" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync src/lib.c "
 check "add: proposed commit message" "$(git log -1 --format=%B | sed '/^$/d' | sed 's/@[0-9a-f]*$/@X/' | oneline)" \
   "Add src/lib.c from $(basename "$T")/master@X Upstream: $URL (main:lib.c) "
 
@@ -223,7 +230,7 @@ for mode in autocrlf textauto plain; do
     textauto) echo '* text=auto' > .gitattributes; git add .gitattributes ;;
   esac
   git commit -q --allow-empty -m i
-  quiet git filesync add w.c "$URL2"
+  addc w.c "$URL2"
   check "$mode: clean after add" "$(st)" ""
 
   # upstream change; git's "CRLF will be replaced by LF" must not appear
@@ -256,7 +263,7 @@ section "3. Branch name as --commit"
 (cd m && git checkout -q -b develop && printf 'x\r\n' > w.c && git commit -qam d1 && git push -q origin develop)
 rm -rf s
 new_slave s
-quiet git filesync add w.c "$URL2"
+addc w.c "$URL2"
 (cd ../m && printf 'y\r\n' > w.c && git commit -qam d2 && git push -q origin develop && git checkout -q main)
 quiet git filesync pull --no-edit --commit develop w.c
 check "--commit <branch> gets current head" "$(tr -d '\r' < w.c)" "y"
@@ -278,7 +285,7 @@ git clone -q m3.git coB
 
 # three slaves linking x.c
 for s in sA sB sC; do
-  (new_slave $s && quiet git filesync add x.c "$URL3")
+  (new_slave $s && addc x.c "$URL3")
 done
 
 # sA -> coA (given as relative path from a subdirectory), sB -> coB
@@ -336,7 +343,7 @@ check "mapped: uncommitted change not synced" "$(cd sB && st)" ""
 git init -q sD
 (cd sD && git commit -q --allow-empty -m i \
   && git filesync map "$URL3" "$T/coB" >/dev/null \
-  && quiet git filesync add -b rel x.c "$URL3")
+  && addc -b rel x.c "$URL3")
 check "mapped: falls back to origin/<branch>" "$(cat sD/x.c)" "v2"
 check "mapped: fallback noted" "$(cd sD && git filesync status | grep -c 'using origin/rel')" "1"
 git filesync map --global "$URL3" --unset >/dev/null
@@ -357,6 +364,7 @@ check "offline add via mapping (no -b)" "$(rc git filesync add x.c "$OFF")" "0"
 check "offline add: branch from checkout" \
   "$(git config -f .git-filesync --get-regexp "^source\..*\.branch" | cut -d" " -f2)" "main"
 check "offline add: content from checkout" "$(cat x.c)" "v2"
+git commit -q --no-edit
 
 # All commands, including the pre-push hook, with network access forbidden
 # (GIT_ALLOW_PROTOCOL=file: any http/https/ssh access fails loudly). Allowed
@@ -410,8 +418,8 @@ git init -q m4
   && git add . && git commit -qm init)
 new_slave s4
 git filesync map file:///nowhere/m4.git "$T/m4" >/dev/null
-quiet git filesync add src/foo.c file:///nowhere/m4.git -p lib/foo.c
-quiet git filesync add src/bar.h file:///nowhere/m4.git -p lib/bar.h --strict
+addc src/foo.c file:///nowhere/m4.git -p lib/foo.c
+addc src/bar.h file:///nowhere/m4.git -p lib/bar.h --strict
 
 # diff: synced version <-> local file
 check "diff: nothing when clean" "$(git filesync diff)" ""
@@ -487,25 +495,20 @@ check "one [source] for files of one master" \
   "$(git config -f .git-filesync --get-regexp '^source\..*\.url' | wc -l)" "1"
 SRC=$(git config -f .git-filesync --get-regexp '^source\..*\.url' | sed 's/^source\.\(.*\)\.url .*/\1/')
 (cd ../m4 && printf 'n\n' > lib/new.h && sed -i 's/^d$/D-up/' lib/foo.c && git add . && git commit -qm "add new.h")
-# --no-commit: only staged; the proposed message is printed for copying
-OUT=$(git filesync add --no-commit include/new.h "$SRC" -p lib/new.h 2>&1)
+# add only stages; the proposed message is prepared for a plain git commit
+OUT=$(git filesync add include/new.h "$SRC" -p lib/new.h 2>&1)
 check "add by source name" "$?" "0"
 check "add by source name: same source" "$(git config -f .git-filesync file.include/new.h.source)" "$SRC"
-check "add --no-commit: staged, not committed" "$(git status --porcelain | oneline)" "M  .git-filesync A  include/new.h "
-check "add --no-commit: prints the message" "$(echo "$OUT" | grep -c "^Add include/new.h from $SRC@")" "1"
-check "add --no-commit: prints the commit command" \
-  "$(echo "$OUT" | grep -c 'git commit -e -F ".*FILESYNC_MSG_include_new.h" -- include/new.h .git-filesync')" "1"
-check "add --no-commit: message prepared for git commit" \
+check "add: staged, not committed" "$(git status --porcelain | oneline)" "M  .git-filesync A  include/new.h "
+check "add: message prepared for git commit" \
   "$(head -1 "$(git rev-parse --git-dir)/SQUASH_MSG" | grep -c "^Add include/new.h from $SRC@")" "1"
-check "add --no-commit: says so" "$(echo "$OUT" | grep -c "also prepared for a plain 'git commit'")" "1"
 
 # pull commits .git-filesync, so it refuses while another entry is uncommitted
 check "pull refused while other entry uncommitted" "$(rc git filesync pull --no-edit src/foo.c)" "2"
 check "refusal names the entry" \
   "$(git filesync pull --no-edit src/foo.c 2>&1 | grep -c 'uncommitted changes for include/new.h')" "1"
-check "add refused while other entry uncommitted" "$(rc git filesync add include/new2.h "$SRC" -p lib/new.h)" "2"
-git commit -q -F "$(git rev-parse --git-dir)/FILESYNC_MSG_include_new.h"
-check "add --no-commit: message file usable" "$(git log -1 --format=%s | grep -c '^Add include/new.h from')" "1"
+git commit -q
+check "add: plain git commit takes the message" "$(git log -1 --format=%s | grep -c '^Add include/new.h from')" "1"
 check "commit drops the prepared message" "$(ls "$(git rev-parse --git-dir)/SQUASH_MSG" 2>/dev/null)" ""
 check "registry committed with link" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync include/new.h "
 
@@ -532,7 +535,7 @@ git reset -q --hard
 check "source key from URL" "$SRC" "nowhere/m4"
 git filesync map file:///other/nowhere/m4.git "$T/m4" >/dev/null
 check "add: output shows the new key" \
-  "$(git filesync add --no-commit include/other.h file:///other/nowhere/m4.git -p lib/bar.h 2>&1 | grep -c '^linked include/other.h -> nowhere/m4-2:lib/bar.h (main)')" "1"
+  "$(git filesync add include/other.h file:///other/nowhere/m4.git -p lib/bar.h 2>&1 | grep -c '^linked include/other.h -> nowhere/m4-2:lib/bar.h (main)')" "1"
 check "same key, other URL: own source" \
   "$(git config -f .git-filesync source.nowhere/m4-2.url)" "file:///other/nowhere/m4.git"
 check "same key, other URL: existing source unchanged" \
@@ -552,22 +555,23 @@ check "status -v: source key as label" \
 quiet git filesync pull --no-edit src/foo.c
 check "pull: source key in commit message" \
   "$(git log -1 --format=%s)" "Sync src/foo.c from mylib@$(git -C ../m4 log -1 --format=%h -- lib/foo.c)"
-quiet git filesync add include/x.h file:///nowhere/m4.git -p lib/bar.h
+addc include/x.h file:///nowhere/m4.git -p lib/bar.h
 check "add finds the source by URL, not by key" \
   "$(git config -f .git-filesync file.include/x.h.source)" "mylib"
 check "add by URL: no new source" "$(git config -f .git-filesync --get-regexp '^source\..*\.url' | wc -l)" "1"
 
 # add over an existing, different file: message notes modifications and strict
 echo mine > include/y.h
-quiet git filesync add --strict include/y.h mylib -p lib/bar.h
+addc --strict include/y.h mylib -p lib/bar.h
 check "add existing file: subject" "$(git log -1 --format=%s | sed 's/@[0-9a-f]*$//')" "Link include/y.h to mylib"
 check "add existing file: notes" \
   "$(git log -1 --format=%B | grep -cE '^(Contains local modifications|Strict:)')" "2"
 check "add existing file: committed as is" "$(git show HEAD:include/y.h)" "mine"
 
-# commit aborted in the editor: changes stay staged, rc 1
-check "add: commit aborted" "$(GIT_EDITOR=false rc git filesync add include/z.h mylib -p lib/bar.h)" "1"
-check "add: aborted commit leaves it staged" "$(git status --porcelain | oneline)" "M  .git-filesync A  include/z.h "
+# a commit aborted in the editor leaves the changes staged (pull: rc 1)
+(cd ../m4 && sed -i 's/^D-up$/D-up2/' lib/foo.c && git commit -qam "foo up2")
+check "pull: commit aborted" "$(GIT_EDITOR=false rc git filesync pull src/foo.c)" "1"
+check "pull: aborted commit leaves it staged" "$(git status --porcelain | oneline)" "M  .git-filesync M  src/foo.c "
 git reset -q --hard "$BASE"
 
 
@@ -643,7 +647,7 @@ check "pull merges committed adaptation" "$(oneline < b.c)" "1-adapt 2 3 4 5-up 
 # --no-commit: only staged; the proposed message is printed for copying
 OUT=$(git filesync pull --no-commit a.c)
 check "pull --no-commit: staged, not committed" "$(git status --porcelain a.c .git-filesync | oneline)" "M  .git-filesync M  a.c "
-check "pull --no-commit: prints the message" "$(echo "$OUT" | grep -cE '^(Sync a\.c from |- up \()')" "2"
+check "pull --no-commit: says how to commit" "$(echo "$OUT" | grep -cx '    git commit')" "1"
 git commit -q
 check "pull --no-commit: plain git commit takes the message" \
   "$(git log -1 --format=%B | grep -cE '^(Sync a\.c from |- up \()')" "2"
@@ -690,13 +694,13 @@ check "add into .git refused" "$(rc git filesync add .git/x file:///nowhere/m6.g
 check "add outside refused" "$(rc git filesync add ../x file:///nowhere/m6.git -p a.txt)" "2"
 # a master file added to an existing directory goes into it, like cp
 mkdir d
-quiet git filesync add --no-commit d file:///nowhere/m6.git -p a.txt
+quiet git filesync add d file:///nowhere/m6.git -p a.txt
 check "add FILE into existing directory" "$(git config -f .git-filesync file.d/a.txt.path)" "a.txt"
 git reset -q --hard
 # a master directory links the files below it
 check "master path is a directory" "$(git filesync add -n x.txt file:///nowhere/m6.git -p sub | cut -d' ' -f1-5)" \
   "would link x.txt/s.txt -> nowhere/m6:sub/s.txt"
-quiet git filesync add a.txt file:///nowhere/m6.git
+addc a.txt file:///nowhere/m6.git
 check "mv outside refused" "$(rc git filesync mv a.txt ../moved.txt)" "2"
 check "mv outside: file stays" "$(ls a.txt ../moved.txt 2>/dev/null)" "a.txt"
 check "map --unset without URL" "$(rc git filesync map --unset)" "2"
@@ -760,7 +764,7 @@ URL7=file://$T/m7.git
 rec() { git config -f .git-filesync file.f.txt.commit; }
 
 new_slave s8
-quiet git filesync add f.txt "$URL7"
+addc f.txt "$URL7"
 check "add (new file): commit that changed the file" "$(rec)" "$(git -C ../co7 rev-parse HEAD~1)"
 quiet git filesync add --force f.txt "$URL7"
 check "relink unchanged file: registry unchanged" "$(git status --porcelain)" ""
@@ -818,7 +822,7 @@ if git lfs version >/dev/null 2>&1; then
         [ $slfs = yes ] && git lfs track d.txt >/dev/null && git add .gitattributes
         git commit -q --allow-empty -m i
         [ $via = map ] && git filesync map "file://$T/ml.git" "$T/ml" >/dev/null
-        quiet git filesync add d.txt "file://$T/ml.git"
+        addc d.txt "file://$T/ml.git"
         check "$tag: content after add" "$(head -1 d.txt)" "l1"
         check "$tag: slave storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
         check "$tag: clean" "$(st)" ""
@@ -877,7 +881,7 @@ git clone -q m9.git co9 2>/dev/null
 URL9=file://$T/m9.git
 
 new_slave s9
-quiet git filesync add --tag v1 t.c "$URL9"
+addc --tag v1 t.c "$URL9"
 SRC9=$(git config -f .git-filesync --get-regexp '^source\..*\.url' | sed 's/^source\.\(.*\)\.url .*/\1/')
 check "add --tag: source with tag, no branch" \
   "$(git config -f .git-filesync --get-regexp '^source\.' | cut -d' ' -f1 | sed 's/.*\.//' | sort | oneline)" "tag url "
@@ -953,7 +957,7 @@ check "set-url: status works" "$(st)" ""
 
 # a second source for the same URL, pinned to v1; making it follow main too
 # would duplicate lib9
-quiet git filesync add --tag v1 u.c "$URL9" -p t.c
+addc --tag v1 u.c "$URL9" -p t.c
 SRC9B=$(git config -f .git-filesync file.u.c.source)
 check "same URL, other ref: own source" "$([ "$SRC9B" != lib9 ] && echo own)" "own"
 quiet git filesync source set-branch "$SRC9B" main
@@ -967,42 +971,54 @@ check "rename: existing name refused" "$(rc git filesync source rename "$SRC9B" 
 # only repeat it. Relinking its only file keeps the source.
 quiet git filesync add --force u.c "$SRC9B" -p t.c
 check "relink only file by name: source kept" "$(git config -f .git-filesync source.$SRC9B.tag)" "v1"
-quiet git filesync add --no-commit w.c "$SRC9B" -p t.c
+quiet git filesync add w.c "$SRC9B" -p t.c
 check "add by name: pinned source joined" "$(git config -f .git-filesync file.w.c.source)" "$SRC9B"
 check "add by name: content at the tag" "$(oneline < w.c)" "1 2 3 "
-check "add by name, other ref: refused" "$(rc git filesync add --no-commit -b main x.c "$SRC9B" -p t.c)" "2"
-check "add by name, same ref repeated" "$(rc git filesync add --no-commit --tag v1 y.c "$SRC9B" -p t.c)" "0"
+check "add by name, other ref: refused" "$(rc git filesync add -b main x.c "$SRC9B" -p t.c)" "2"
+check "add by name, same ref repeated" "$(rc git filesync add --tag v1 y.c "$SRC9B" -p t.c)" "0"
 check "add by name, other branch for the tag: refused" \
-  "$(rc git filesync add --no-commit --tag v1 -b main y2.c "$SRC9B" -p t.c)" "2"
+  "$(rc git filesync add --tag v1 -b main y2.c "$SRC9B" -p t.c)" "2"
 printf '[source "dup"]\n\turl = %s\n\ttag = v1\n' "$URL9" >> .git-filesync
-quiet git filesync add --no-commit v.c dup -p t.c
+quiet git filesync add v.c dup -p t.c
 check "add by name: that source, not an equal one" "$(git config -f .git-filesync file.v.c.source)" "dup"
 
 # add by URL: a source is reused only if URL and branch/tag both match;
 # with --tag but no -b, one pinned to the tag whatever its branch
-quiet git filesync add --no-commit a.c "$URL9" -p t.c
+quiet git filesync add a.c "$URL9" -p t.c
 check "add by URL, default branch: branch source reused" "$(git config -f .git-filesync file.a.c.source)" "lib9"
-quiet git filesync add --no-commit b.c "$URL9" -p t.c --tag v1
+quiet git filesync add b.c "$URL9" -p t.c --tag v1
 check "add by URL + tag: first source with that tag" "$(git config -f .git-filesync file.b.c.source)" "$SRC9B"
-check "--no-commit twice: both messages prepared" \
+check "two adds: both messages prepared" \
   "$(grep -cE '^Add (a|b)\.c from' "$(git rev-parse --git-dir)/SQUASH_MSG")" "2"
-quiet git filesync add --no-commit c.c "$URL9" -p t.c --tag v2 -b main
+quiet git filesync add c.c "$URL9" -p t.c --tag v2 -b main
 SRC9C=$(git config -f .git-filesync file.c.c.source)
 check "add by URL, other tag: new source" "$(echo "$SRC9C" | grep -cvE "^(lib9|$SRC9B|dup)$")" "1"
 check "add --tag -b: both recorded" \
   "$(git config -f .git-filesync source.$SRC9C.tag) $(git config -f .git-filesync source.$SRC9C.branch)" "v2 main"
-quiet git filesync add --no-commit d.c "$URL9" -p t.c --tag v2
+quiet git filesync add d.c "$URL9" -p t.c --tag v2
 check "add by URL + tag, no -b: source with a branch reused" "$(git config -f .git-filesync file.d.c.source)" "$SRC9C"
 check "add --tag -b: tag not on the branch" \
-  "$(git filesync add --no-commit e.c "$URL9" -p t.c --tag v2 -b nope 2>&1 | grep -c "branch 'nope' not found")" "1"
+  "$(git filesync add e.c "$URL9" -p t.c --tag v2 -b nope 2>&1 | grep -c "branch 'nope' not found")" "1"
 git reset -q --hard
 
 # a SQUASH_MSG of git's own (e.g. merge --squash) is left alone
 echo "squashed" > "$(git rev-parse --git-dir)/SQUASH_MSG"
 check "foreign SQUASH_MSG: said so" \
-  "$(git filesync add --no-commit f.c "$URL9" -p t.c | grep -c "SQUASH_MSG is in use")" "1"
+  "$(git filesync add f.c "$URL9" -p t.c | grep -c "SQUASH_MSG is in use")" "1"
 check "foreign SQUASH_MSG: kept" "$(cat "$(git rev-parse --git-dir)/SQUASH_MSG")" "squashed"
 git reset -q --hard
+
+# adds and a pull --no-commit go into one commit, with all their proposals
+cd "$T"
+new_slave s9c
+addc t.c "$URL9" --commit v1
+check "linked at v1: pending" "$(st)" "P"
+quiet git filesync add u.c "$URL9" -p t.c
+check "plain pull refused while another entry is uncommitted" "$(rc git filesync pull --no-edit t.c)" "2"
+check "pull --no-commit despite another uncommitted entry" "$(rc git filesync pull --no-commit t.c)" "0"
+git commit -q
+check "one commit: files of add and pull" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync t.c u.c "
+check "one commit: both proposals" "$(git log -1 --format=%B | grep -cE '^(Add u\.c|Sync t\.c) from')" "2"
 
 
 # =============================================================================
@@ -1020,8 +1036,8 @@ git clone -q m10.git co10 2>/dev/null
 URL10=file://$T/m10.git
 
 new_slave s10
-quiet git filesync add r.c "$URL10" -p lib/r.c
-quiet git filesync add gone.c "$URL10" -p lib/gone.c
+addc r.c "$URL10" -p lib/r.c
+addc gone.c "$URL10" -p lib/gone.c
 SRC10=$(git config -f .git-filesync file.r.c.source)
 
 # r.c: renamed with a change, then changed again; gone.c: deleted
@@ -1104,7 +1120,7 @@ git filesync map file:///nowhere/m11.git "$T/m11" >/dev/null
 
 # PROTO - the options linking the .proto files of api/ as proto/
 PROTO=(-p api --include '*.proto' --exclude '*_test.proto' --exclude test/)
-quiet git filesync add proto file:///nowhere/m11.git "${PROTO[@]}"
+addc proto file:///nowhere/m11.git "${PROTO[@]}"
 check "add DIR: files linked" \
   "$(git config -f .git-filesync --get-regexp '^file\..*\.path' | LC_ALL=C sort | oneline)" \
   "file.proto/a.proto.path api/a.proto file.proto/v1/b.proto.path api/v1/b.proto "
@@ -1118,6 +1134,7 @@ check "add DIR: status clean" "$(st)" ""
 # a new master file: the same add links only that one
 (cd ../m11 && echo c > api/c.proto && git add . && git commit -qm c)
 OUT=$(git filesync add proto nowhere/m11 "${PROTO[@]}" 2>&1)
+git commit -q --no-edit
 check "add DIR again: linked ones skipped" "$(echo "$OUT" | grep -c '^2 files already linked, skipped')" "1"
 check "add DIR again: new file committed" "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" \
   ".git-filesync proto/c.proto "
@@ -1127,7 +1144,7 @@ check "add DIR: nothing new" "$(git filesync add proto nowhere/m11 "${PROTO[@]}"
 
 # an existing file is linked as it is; '/x.md' is anchored at the directory
 mkdir docs && echo mine > docs/x.md
-quiet git filesync add docs nowhere/m11 --include /x.md
+addc docs nowhere/m11 --include /x.md
 check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
 check "add DIR: existing file adapted" "$(st docs)" " A"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "Link docs/x.md to nowhere/m11"
@@ -1164,7 +1181,7 @@ git clone -q m12.git co12 2>/dev/null
 URL12=file://$T/m12.git
 
 new_slave s12
-for f in a b c; do quiet git filesync add --tag v1.0 $f.c "$URL12"; done
+for f in a b c; do addc --tag v1.0 $f.c "$URL12"; done
 SRC12=$(git config -f .git-filesync file.a.c.source)
 
 # newer tags by their place in the commit graph - names are opaque, so a

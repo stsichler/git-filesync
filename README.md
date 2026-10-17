@@ -117,9 +117,11 @@ everyone has the same version – see
 ```sh
 cd slave-repo
 
-# 1. Link a file (once) and commit it with the proposed message. Without -b
-#    the master's default branch is used, without -p the same path as here.
+# 1. Link a file (once): staged like git add, then committed - git commit
+#    offers the proposed message. Without -b the master's default branch is
+#    used, without -p the same path as here.
 git filesync add src/foo.c https://github.com/owner/lib.git -p lib/foo.c
+git commit
 
 # 2. See what needs syncing
 git filesync status
