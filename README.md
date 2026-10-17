@@ -30,6 +30,11 @@ copy is current and the history of the changes is lost. git-filesync links
 **single files**, tells you when a copy is behind, and syncs it with a
 meaningful commit.
 
+For files another project publishes as **release assets** – a tool binary,
+a firmware image, a generated header – there is its sibling
+[git-assetsync](https://github.com/stsichler/git-assetsync), built the same
+way.
+
 ### Compared to Git submodules
 
 | | Git submodules | git-filesync |
