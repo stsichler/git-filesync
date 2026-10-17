@@ -110,6 +110,21 @@ follow the command.
         --force                 relink an already linked file
         -n, --dry-run           only show what would be linked
 
+    set PATH... OPTIONS         change the link of linked files, like `source`
+                                for sources; only .git-filesync is changed
+                                (and staged), the synced version is kept
+                                where it still applies
+        --source URL|SOURCE     another master (fork, moved repository) or
+                                [source]; a source whose files are all given
+                                is changed itself
+        -b, --branch BRANCH     as for add; without --source: follow BRANCH
+        --tag TAG               as for add; without --source: pin to TAG
+                                (like pull -b/--tag, without syncing)
+        -p, --path PATH         another path in the master (one file); the
+                                synced version is looked up as for add
+        --strict, --no-strict   mark as strict / allow adaptations again
+        -n, --dry-run           only show what would change
+
     unlink PATH...              remove links (the files are kept)
     mv OLD NEW                  move a linked file (git mv), keeping its link
         -n, --dry-run           (both) only show what would be done
@@ -137,7 +152,7 @@ follow the command.
 
     Common options:
         --no-fetch              use the cached state, don't fetch (status,
-                                pull, diff, difftool, add)
+                                pull, diff, difftool, add, set, source -v)
         --remote                ignore local checkout mappings (same commands)
         --color[=WHEN], --no-color  always, never or auto (default)
 
@@ -949,8 +964,14 @@ class Registry:
         git(["config", "-f", self.path] + list(args))
 
     def set_file(self, rel, name, value):
-        self._cfg(f"file.{rel}.{name}", value)
-        self.files.setdefault(rel, {})[name] = value
+        """Set (value None: remove) a key of a [file]."""
+        if value is None:
+            if name in self.files.get(rel, {}):
+                self._cfg("--unset-all", f"file.{rel}.{name}")
+                del self.files[rel][name]
+        else:
+            self._cfg(f"file.{rel}.{name}", value)
+            self.files.setdefault(rel, {})[name] = value
 
     def find_source(self, url, spec, exclude=None, any_line=False):
         """Key of a [source] with url and exactly the ref keys of spec. With
@@ -1644,7 +1665,7 @@ def pull_one(slave, reg, st, args):
                       f"'git filesync diff {st.rel}'; discard adaptations with "
                       f"'git filesync pull --overwrite {st.rel}', uncommitted changes with "
                       f"'git restore {cmd_arg(st.rel)}'; or allow them with "
-                      f"'git config -f {REGISTRY} file.{st.rel}.strict false'")
+                      f"'git filesync set --no-strict {cmd_arg(st.rel)}'")
     if new_blob == st.old_blob and path == link.path and st.worktree != "missing" \
             and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
@@ -1739,6 +1760,35 @@ def switch_spec(source, args):
     return spec
 
 
+def move_to_source(reg, name, lks, url, spec, named=None):
+    """Point links lks of [source] name at the source with url and spec -
+    or exactly at [source] named. If lks are all files of the source and no
+    such source exists, the source itself is changed; otherwise they move
+    to it (found or created) and the source is split, or removed when left
+    without files. Returns a description of the change."""
+    source = reg.sources[name]
+    old_url, old = source.get("url", ""), source_spec(source)
+    new_repo = norm_url(url) != norm_url(old_url)
+
+    def text(u, sp):
+        return f"{u} ({spec_text(sp)})" if new_repo else spec_text(sp)
+    target = named or reg.find_source(url, spec, exclude=name)
+    if not target and set(source_files(reg, name)) == {lk.rel for lk in lks}:
+        if new_repo:
+            reg.set_source(name, "url", url)
+        reg.set_spec(name, spec)
+        return f"Switch {name} from {text(old_url, old)} to {text(url, spec)}"
+    target = target or reg.add_source(url, spec)
+    for lk in lks:
+        reg.set_file(lk.rel, "source", target)
+    rest = len(source_files(reg, name))
+    if not rest:
+        reg.remove_source(name)
+    desc = (f"Move {', '.join(lk.rel for lk in lks)} from {name} ({text(old_url, old)}) "
+            f"to {target} ({text(url, spec)})")
+    return desc + (f"; {name} keeps {plural(rest, 'other file')}" if rest else "")
+
+
 def retarget(ctx, reg, links, args):
     """Point links at another branch or tag (pull -b/--tag) before they are
     evaluated. A source whose files are all selected is changed itself;
@@ -1763,21 +1813,7 @@ def retarget(ctx, reg, links, args):
             error(f"{ref_missing(ref, src)}; not switching {', '.join(lk.rel for lk in lks)}")
             failed |= {lk.rel for lk in lks}
             continue
-        target = reg.find_source(url, spec, exclude=name)
-        if not target and set(source_files(reg, name)) == {lk.rel for lk in lks}:
-            reg.set_spec(name, spec)
-            desc = f"Switch {name} from {spec_text(old)} to {spec_text(spec)}"
-        else:
-            target = target or reg.add_source(url, spec)
-            for lk in lks:
-                reg.set_file(lk.rel, "source", target)
-            rest = len(source_files(reg, name))
-            if not rest:
-                reg.remove_source(name)
-            desc = (f"Move {', '.join(lk.rel for lk in lks)} from {name} ({spec_text(old)}) "
-                    f"to {target} ({spec_text(spec)})")
-            if rest:
-                desc += f"; {name} keeps {plural(rest, 'other file')}"
+        desc = move_to_source(reg, name, lks, url, spec)
         repinned.update({lk.rel: spec_text(old) for lk in lks})
         descs.append(desc)
         print(("would: " if args.dry_run else "") + desc)
@@ -2296,6 +2332,97 @@ def cmd_mv(ctx, slave, args):
     return EXIT_OK
 
 
+def commit_in(src, link):
+    """The commit of a link's synced version in another master (a fork, a
+    moved repository): the recorded one if it is there, else the newest
+    commit on the branch that has the synced blob at the path; None if the
+    version isn't there."""
+    if link.commit and src.resolve(link.commit) == link.commit:
+        return link.commit
+    for rev, oid in src.path_history(link.path, 5000):
+        if oid == link.blob:
+            return rev
+    return None
+
+
+def cmd_set(ctx, slave, args):
+    """Change the link of linked files - their source, master path or strict
+    flag - like 'source' does for sources. Only .git-filesync is changed
+    (and staged); the synced version (the base) is kept where it still
+    applies: for another branch or tag of the same master, and for another
+    master that has it (a fork, a moved repository); with another path it
+    is looked up like for add."""
+    if not (args.source or args.branch or args.tag or args.path or args.strict is not None):
+        raise FsError("nothing to change: give --source, -b/--tag, -p or --strict/--no-strict")
+    reg = Registry(slave)
+    reg.dry_run = args.dry_run
+    links = select_links(slave, reg, args.files)
+    if args.path and len(links) != 1:
+        raise FsError("-p requires exactly one file")
+    would = "would: " if args.dry_run else ""
+    changed = False
+    given = add_ref(ctx, reg, args) if args.source else None    # (url, spec, named)
+    groups = {}
+    for lk in links:
+        groups.setdefault(lk.name, []).append(lk)
+    for name, lks in groups.items():
+        source = reg.sources.get(name)
+        if not source or not source_ref(source):
+            raise FsError(f"{lks[0].rel}: its [source \"{name}\"] in {REGISTRY} needs a url "
+                          "and a branch or tag")
+        if given:
+            url, spec, named = given
+        elif args.branch or args.tag:
+            url, spec, named = source.get("url", ""), switch_spec(source, args), None
+        else:
+            continue
+        if named == name or not named and norm_url(url) == norm_url(source.get("url", "")) \
+                and spec == source_spec(source):
+            continue
+        ref = source_ref(spec)
+        src = ctx.source(url, ref, named or name)
+        if not src.resolve():
+            raise FsError(ref_missing(ref, src))
+        new_repo = norm_url(url) != norm_url(source.get("url", ""))
+        print(would + move_to_source(reg, name, lks, url, spec, named))
+        changed = True
+        if new_repo and not args.path:
+            for lk in lks:      # same synced version, possibly another commit
+                commit = commit_in(src, lk)
+                if not commit:
+                    warn(f"{lk.rel}: synced version {lk.blob[:12]} not found in {src.label}; "
+                         "its previous sync point counts as unknown")
+                elif commit != lk.commit:
+                    lk.set("commit", commit)
+    if args.path:
+        lk = links[0]
+        src = ctx.source(lk.url, lk.ref, lk.name)
+        head = src.resolve()
+        if not head:
+            raise FsError(ref_missing(lk.ref, src))
+        path = args.path.strip("/")
+        commit, blob, _, modified = find_base(slave, src, head, None, lk.rel, path, lk.target)
+        if (path, commit, blob) != (lk.path, lk.commit, lk.blob):
+            print(f"{would}{lk.rel}: path {lk.path} -> {path}, based on {src.short(commit)}"
+                  + (", with local modifications" if modified else ""))
+            for k, v in (("path", path), ("commit", commit), ("blob", blob)):
+                lk.set(k, v)
+            changed = True
+    if args.strict is not None:
+        for lk in links:
+            if lk.strict != args.strict:
+                lk.set("strict", "true" if args.strict else None)
+                print(f"{would}{lk.rel}: {'strict' if args.strict else 'not strict'}")
+                changed = True
+    if not changed:
+        print("nothing to change")
+    elif not args.dry_run:
+        reg.finish()
+        print(f'{REGISTRY} staged (use "git filesync status" to see what changes, '
+              '"git filesync pull <file>..." to sync)')
+    return EXIT_OK
+
+
 def source_files(reg, name):
     return sorted(rel for rel, f in reg.files.items() if f.get("source") == name)
 
@@ -2600,6 +2727,24 @@ def main(argv=None):
     p.add_argument("--strict", action="store_true",
                    help="file must stay an exact copy (no local modifications)")
 
+    p = sub.add_parser("set", parents=[common], help="change the link of linked files: source, "
+                                                     "master path, strict")
+    p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
+    p.add_argument("--source", metavar="URL|SOURCE",
+                   help="link to another master (URL) or [source]; the synced version is kept")
+    p.add_argument("-b", "--branch", help="branch of the master (as for add); without --source: "
+                                          "switch to following it, without syncing")
+    p.add_argument("--tag", help="pin to this tag of the master (as for add); without --source: "
+                                 "switch to it, without syncing")
+    p.add_argument("-p", "--path", help="another path in the master (one file); the synced "
+                                        "version is looked up as for add")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--strict", action="store_const", const=True,
+                   help="the files must stay exact copies")
+    g.add_argument("--no-strict", dest="strict", action="store_const", const=False,
+                   help="allow local adaptations again")
+    p.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
+
     p = sub.add_parser("unlink", parents=[colorp], help="remove links (the files are kept)")
     p.add_argument("files", nargs="+", help="files or directories")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be unlinked")
@@ -2670,7 +2815,7 @@ def main(argv=None):
         if args.cmd == "uninstall-hooks":
             return cmd_uninstall_hooks(slave, args)
         ctx = Context(args, slave)
-        return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add,
+        return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
                 "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
                 "diff": cmd_diff, "difftool": cmd_difftool}[args.cmd](ctx, slave, args)
     except FsError as e:

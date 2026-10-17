@@ -108,20 +108,22 @@ adaptations by merging them with the new master version, and – like
 
 ### Strict files
 
-Some files should stay exact copies. Mark them with `add --strict` or
+Some files should stay exact copies. Mark them with `add --strict`, or
+later with [`set --strict`](#set):
 
 ```sh
-git config -f .git-filesync file.src/foo.c.strict true
+git filesync set src/foo.c --strict
 ```
 
-(As everywhere in git config, a bare `strict` without a value means true.)
+In `.git-filesync` this is `strict = true` in the `[file]` (as everywhere in
+git config, a bare `strict` without a value means true).
 
 For a strict file, adaptations as well as uncommitted changes are reported
 as a violation: `status` marks them `NOT ALLOWED: strict` (`-s`: `(strict!)`,
 `--exit-code`: 1), the hooks report it, and `pull` refuses to merge (other
 files of `pull --all` are still synced). Inspect with `diff`, then discard
 adaptations with `pull --overwrite`, uncommitted changes with `git restore`,
-or lift the restriction (`strict = false`).
+or lift the restriction (`git filesync set --no-strict FILE`).
 
 ## Commands
 
@@ -132,6 +134,7 @@ or lift the restriction (`strict = false`).
 | [`diff [PATH…] [-- OPTS]`](#diff) | local changes against the synced master version |
 | [`difftool [PATH…] [-- OPTS]`](#difftool) | the same in your difftool |
 | [`add FILE\|DIR URL\|SOURCE`](#add) | link a file – or all files of a directory – to the master repository |
+| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, master path, strict |
 | [`unlink PATH…`](#unlink) | remove links, keep the files |
 | [`mv OLD NEW`](#mv) | move a linked file and its link |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
@@ -141,7 +144,7 @@ or lift the restriction (`strict = false`).
 Commands named like a Git command behave like it (`status`, `pull`, `diff`,
 `difftool`, `add`, `mv`; `source` like `git remote`): same kind of output,
 same exit codes, same caution with uncommitted changes. Like in Git, only
-`pull` commits; `add`, `mv`, `unlink` and `source` stage their changes, and
+`pull` commits; `add`, `set`, `mv`, `unlink` and `source` stage their changes, and
 `add` prepares a proposed commit message that a plain `git commit` offers
 (see [Proposed commit messages](#proposed-commit-messages)). `git filesync`
 without a command runs `status`.
@@ -154,7 +157,7 @@ directory stands for all linked files below it. Options follow the command
 
 | Option | Commands | Effect |
 |---|---|---|
-| `--no-fetch` | `status`, `pull`, `diff`, `difftool`, `add` | don't fetch, use the cached state (offline) |
+| `--no-fetch` | `status`, `pull`, `diff`, `difftool`, `add`, `set`, `source -v` | don't fetch, use the cached state (offline) |
 | `--remote` | same | ignore local checkout mappings (see [`map`](#map)) |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
@@ -475,6 +478,43 @@ Patterns work like `.gitignore` lines, relative to the master directory:
 ```sh
 git filesync add proto https://github.com/owner/backend.git -p api \
     --include '*.proto' --exclude '*_test.proto' --exclude test/
+```
+
+### `set`
+
+`set PATH… OPTIONS` – change the link of linked files: their source, their
+path in the master, whether they are strict. It does for files what
+[`source`](#source) does for sources: only `.git-filesync` is changed (and
+staged); `status` then shows what changes, and `pull` syncs.
+
+| Option | Effect |
+|---|---|
+| `--source URL\|SOURCE` | link to another master – a fork, a moved repository – or to another `[source]`. URL, name and `-b` / `--tag` are taken as for [`add`](#add). If the files are all files of their source and there is no source with that URL and branch or tag yet, the source itself is changed; otherwise they move to that source (created if necessary), and a source left without files is removed |
+| `-b`, `--branch BRANCH` | with `--source`: as for `add`; without: the files follow BRANCH, like `pull -b`, but without syncing |
+| `--tag TAG` | with `--source`: as for `add`; without: [pin](#pinning-to-a-tag) the files to TAG, like `pull --tag`, but without syncing |
+| `-p`, `--path PATH` | another path in the master (exactly one file) |
+| `--strict`, `--no-strict` | mark the files as [strict](#strict-files), or allow adaptations again |
+| `-n`, `--dry-run` | only show what would change |
+
+The synced version the files are based on (`commit` / `blob`) is kept where
+it still applies, so adaptations stay adaptations:
+
+- **another branch or tag** of the same master: kept as it is;
+- **another master** (`--source` with another URL): kept if that master has
+  it – the recorded commit, or else the newest commit on its branch with the
+  same version of the file (e.g. a copy with a history of its own).
+  Otherwise there is a warning, and the previous sync point counts as
+  unknown;
+- **another path** (`-p`): looked up as for `add` – the master version the
+  file matches; if none matches, the branch head, with a warning, and the
+  differences count as adaptations. (A file renamed in the master doesn't
+  need this: [`pull`](#pull) follows renames.)
+
+```sh
+git filesync set src/foo.c --strict
+git filesync set src/ --source https://github.com/me/lib-fork.git    # all files below src/
+git filesync set src/foo.c -p lib/foo_v2.c
+git filesync set cfg/ --tag v1.3.0      # like pull --tag, without syncing
 ```
 
 ### `unlink`

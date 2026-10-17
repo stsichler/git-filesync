@@ -152,6 +152,7 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `pull PATH…`, `pull --all` | sync files from the master, keeping local adaptations |
 | `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced master version |
 | `add FILE\|DIR URL\|SOURCE` | link a file (or all files of a master directory) to the master |
+| `set PATH… OPTIONS` | change source, master path or strict of linked files |
 | `unlink PATH…`, `mv OLD NEW` | remove or move links |
 | `source [ACTION …]` | list sources; rename, change URL, branch or tag |
 | `map [URL [DIR]]` | use a local checkout of the master instead of fetching |

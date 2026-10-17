@@ -44,6 +44,7 @@
 #   16. Dry runs: pull --dry-run, add / unlink / mv -n
 #   17. add DIR: all files of a master directory, --include / --exclude
 #   18. pull -b / --tag: switching branch or tag; newer tags
+#   19. set: change source, master path or strict of linked files
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -1320,6 +1321,87 @@ git filesync source rename "$SRC12-2" lib12 >/dev/null
 (cd ../co12 && sedi 's/^3$/3-up/' a.c && git commit -qam "change 3" && git push -q origin main)
 check "pull after uncommitted source rename" "$(rc git filesync pull --no-edit a.c)" "0"
 check "rename went into the sync commit" "$(git status --porcelain) $(git show HEAD:.git-filesync | grep -c 'source = lib12')" " 3"
+
+
+# =============================================================================
+section "19. set: change source, master path or strict of linked files"
+# =============================================================================
+cd "$T"
+
+# m13.git (bare, the server) with a.c and b.c, tag v1; m13fork.git: a clone
+# with one more commit (c.txt only); m13copy.git: the same a.c and b.c with
+# a history of its own
+git init -q m13
+(cd m13 && printf '1\n2\n3\n' > a.c && printf 'x\ny\n' > b.c && git add . && git commit -qm i \
+  && git tag v1)
+git clone -q --bare m13 m13.git
+git clone -q --bare m13 m13fork.git
+(git clone -q m13fork.git cofork && cd cofork && echo c > c.txt && git add . && git commit -qm c \
+  && git push -q origin main) 2>/dev/null
+git init -q m13copy
+(cd m13copy && cp ../m13/a.c ../m13/b.c . && git add . && git commit -qm "own history")
+git clone -q --bare m13copy m13copy.git
+URL13=$TURL/m13.git
+for r in m13 m13fork m13copy; do git -C $r.git config uploadpack.allowFilter true; done
+
+new_slave s13
+addc a.c "$URL13"
+addc b.c "$URL13"
+SRC13=$(git config -f .git-filesync file.a.c.source)
+COMMIT13=$(git config -f .git-filesync file.a.c.commit)
+
+check "set: nothing to change" "$(rc git filesync set a.c)" "2"
+check "set --strict" "$(git filesync set a.c --strict | head -1)" "a.c: strict"
+check "set --strict: entry" "$(git config -f .git-filesync file.a.c.strict)" "true"
+check "set: only staged" "$(git status --porcelain | oneline) $(git log -1 --format=%s | cut -c1-5)" "M  .git-filesync  Add b"
+check "set --strict again: nothing" "$(git filesync set a.c --strict)" "nothing to change"
+check "set --no-strict" "$(git filesync set a.c --no-strict | head -1) $(git config -f .git-filesync file.a.c.strict)" "a.c: not strict "
+quiet git filesync set a.c --strict
+echo z >> a.c
+git commit -qam "adapt strict file"
+check "strict refusal names set --no-strict" \
+  "$(git filesync pull --no-edit a.c 2>&1 | grep -c "'git filesync set --no-strict a.c'")" "1"
+git reset -q --hard HEAD~1
+
+# another master path: the synced version is looked up as for add
+check "set -p: one file only" "$(rc git filesync set a.c b.c -p a.c)" "2"
+check "set -p" "$(git filesync set b.c -p a.c 2>/dev/null | grep -c '^b.c: path b.c -> a.c, based on .*, with local modifications$')" "1"
+check "set -p: entry" "$(git config -f .git-filesync file.b.c.path)" "a.c"
+check "set -p: content differs from the new base" "$(st b.c)" " A"
+quiet git filesync set b.c -p b.c
+check "set -p back: matching version found" "$(st b.c) $(git config -f .git-filesync file.b.c.path)" " b.c"
+check "set -p back: entry as committed" "$(git status --porcelain)" ""
+
+# a fork with the same history: all files of the source -> the source
+# itself gets the new URL; the recorded commit is kept
+check "set --source fork" "$(git filesync set a.c b.c --source "$TURL/m13fork.git" 2>/dev/null | head -1 | cut -d' ' -f1-2)" "Switch $SRC13"
+check "set --source fork: URL changed in place" \
+  "$(git config -f .git-filesync source.$SRC13.url) $(git config -f .git-filesync file.a.c.source)" "$TURL/m13fork.git $SRC13"
+check "set --source fork: commit kept" "$(git config -f .git-filesync file.a.c.commit)" "$COMMIT13"
+check "set --source fork: up to date" "$(git filesync status -s)" ""
+git commit -qm fork
+
+# a copy with a history of its own: a.c alone moves to a new source; its
+# commit is the copy's commit with the same version of a.c
+quiet git filesync set a.c --source "$TURL/m13copy.git"
+check "set --source copy: new source" \
+  "$(git config -f .git-filesync file.a.c.source | grep -c m13copy) $(git config -f .git-filesync file.b.c.source)" "1 $SRC13"
+check "set --source copy: commit of the copy" "$(git config -f .git-filesync file.a.c.commit)" "$(git -C ../m13copy rev-parse HEAD)"
+check "set --source copy: up to date" "$(git filesync status -s)" ""
+git commit -qm copy
+
+# -b / --tag without --source: switch like pull -b/--tag, without syncing
+quiet git filesync set b.c --tag v1
+check "set --tag: pinned, branch kept" \
+  "$(git config -f .git-filesync source.$SRC13.tag) $(git config -f .git-filesync source.$SRC13.branch)" "v1 main"
+check "set --tag: file unchanged" "$(oneline < b.c)$(git status --porcelain b.c)" "x y "
+check "set --source NAME with another branch: refused" \
+  "$(rc git filesync set b.c --source "$SRC13" -b other)" "2"
+
+# dry run changes nothing
+git commit -qm tag
+check "set -n" "$(git filesync set a.c --strict -n)" "would: a.c: strict"
+check "set -n: nothing changed" "$(git status --porcelain)" ""
 
 
 # =============================================================================
