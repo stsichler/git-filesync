@@ -13,7 +13,7 @@ For motivation and installation see the [README](README.md).
 - [Commands](#commands)
   - [Common options](#common-options)
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool)
-  - [`add`](#add) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map)
+  - [`add`](#add) · [`set`](#set) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map)
   - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted in the master](#files-renamed-or-deleted-in-the-master)
