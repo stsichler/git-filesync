@@ -82,7 +82,7 @@ afterwards.
 
 ## Installation
 
-Requirements: Python ≥ 3.7, Git ≥ 2.26, and `git-lfs` if you sync files
+Requirements: Python ≥ 3.7, Git ≥ 2.28, and `git-lfs` if you sync files
 stored in Git LFS. Linux, macOS and Windows (Git for Windows).
 
 Download `git-filesync.py` from the

@@ -148,7 +148,7 @@ Files stored in Git LFS (in the master, the slave, both or neither) are
 handled transparently, as are differing line-ending conventions. Output is
 colored like git's (color.filesync / color.ui, --color, NO_COLOR).
 
-Requires Python >= 3.7 and Git >= 2.26 (git-lfs for LFS files).
+Requires Python >= 3.7 and Git >= 2.28 (git-lfs for LFS files).
 Works on Linux, macOS and Windows.
 Manual: https://github.com/stsichler/git-filesync/blob/main/MANUAL.md
 """
@@ -243,6 +243,14 @@ def clean_env():
                   "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"}
         _clean_env = {k: v for k, v in os.environ.items() if k not in names}
     return _clean_env
+
+
+# For commands that may contact a master's server: the blobless cache fetches
+# missing file contents lazily, which only protocol v2 allows (v0 refuses
+# "wants" of objects not advertised). The default of Git 2.27/2.28, or a
+# configured protocol.version=0, would break it; servers without v2 answer
+# in v0 anyway. Passed on to the lazy fetch git starts itself.
+PROTOCOL_V2 = ["-c", "protocol.version=2"]
 
 
 def git(args, cwd=None, data=None, check=True, env=None):
@@ -361,7 +369,7 @@ class Source:
 
     def git(self, args, **kw):
         kw.setdefault("env", clean_env())
-        return git(["-C", self.repo] + list(args), **kw)
+        return git(PROTOCOL_V2 + ["-C", self.repo] + list(args), **kw)
 
     def head_ref(self):
         """Full ref name checked out in a local checkout, None if detached."""
@@ -654,7 +662,8 @@ class Context:
                          f"using its checked-out branch '{b}' - use --branch to choose")
                 return b
         if self.fetch:
-            p = git(["ls-remote", "--symref", "--", url, "HEAD"], env=clean_env(), check=False)
+            p = git(PROTOCOL_V2 + ["ls-remote", "--symref", "--", url, "HEAD"], env=clean_env(),
+                    check=False)
             m = re.search(r"^ref: refs/heads/(\S+)\s+HEAD", out(p), re.M)
             if m:
                 return m.group(1)
@@ -698,14 +707,15 @@ class Context:
         if d in self._ready:
             return d
         env = clean_env()
-        fetch = ["fetch", "--quiet", "--prune", "origin",
+        fetch = PROTOCOL_V2 + ["fetch", "--quiet", "--prune", "origin",
                  "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"]
         if not d.exists():
             d.parent.mkdir(parents=True, exist_ok=True)
             tmp = d.with_name(f"{d.name}.tmp{os.getpid()}")
             print(paint(f"Cloning {url} (blobless) ...", "dim", "err"), file=sys.stderr)
             try:
-                git(["clone", "--bare", "--quiet", "--filter=blob:none", "--", url, tmp], env=env)
+                git(PROTOCOL_V2 + ["clone", "--bare", "--quiet", "--filter=blob:none", "--", url, tmp],
+                    env=env)
                 git(["-C", tmp, "config", "remote.origin.fetch",
                      "+refs/heads/*:refs/remotes/origin/*"], env=env)
                 git(["-C", tmp] + fetch, env=env)

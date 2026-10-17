@@ -576,8 +576,11 @@ the server. It is cached as a blobless partial clone in `~/.cache/git-filesync`
 (Windows: `%LOCALAPPDATA%\git-filesync`, override with `FILESYNC_CACHE`) and
 fetched (branches and tags) on each run – except when all that is needed is
 a tag already in the cache. Credentials are whatever your Git uses for that
-URL. The cache only holds what can be fetched again: deleting it is safe,
-the next run clones anew.
+URL. File contents are fetched only when needed, which requires Git's wire
+protocol v2: git-filesync asks for it, whatever `protocol.version` says (Git
+2.27 and 2.28 default to v0); GitHub, GitLab and other current servers
+support it. The cache only holds what can be fetched again: deleting it is
+safe, the next run clones anew.
 
 ### `install-hooks`, `uninstall-hooks`
 

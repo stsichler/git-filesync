@@ -7,6 +7,7 @@ on:
 
 jobs:
   regress:
+    name: Linux, current versions
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,4 +20,16 @@ jobs:
       - name: Regression tests
         run: |
           test/regress.sh </dev/null | tee regress.log
+          ! grep -q '^FAIL' regress.log
+
+  minimum-versions:
+    name: Linux, oldest supported versions (Python 3.7, Git 2.28)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t filesync-minver -f test/minver.Containerfile test
+      - name: Regression tests
+        run: |
+          docker run --rm -v "$PWD":/src:ro -w /src filesync-minver test/regress.sh </dev/null | tee regress.log
           ! grep -q '^FAIL' regress.log

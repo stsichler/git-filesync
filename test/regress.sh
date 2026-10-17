@@ -11,6 +11,10 @@
 # the exit code is 1 if any check failed. The Git LFS section is skipped
 # when git-lfs is not installed.
 #
+# With the oldest supported Python and Git (see test/minver.Containerfile):
+#   podman build -t filesync-minver -f test/minver.Containerfile test
+#   podman run --rm -v "$PWD":/src:ro,Z -w /src filesync-minver test/regress.sh </dev/null
+#
 # Naming in the scenarios:
 #   master, m, m3 ...    upstream repositories (where "upstream" commits are made)
 #   *.git                bare copies of them, standing in for the server
@@ -131,6 +135,13 @@ check "add + commit: status clean" "$(st)" ""
 check "add + commit: file and entry" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync src/lib.c "
 check "add: proposed commit message" "$(git log -1 --format=%B | sed '/^$/d' | sed 's/@[0-9a-f]*$/@X/' | oneline)" \
   "Add src/lib.c from $(basename "$T")/master@X Upstream: $URL (main:lib.c) "
+
+# the blobless cache fetches missing file contents lazily, which needs
+# protocol v2 - git-filesync asks for it even if v0 is configured
+git config --global protocol.version 0
+check "protocol.version=0 configured: add works" \
+  "$( (new_slave "$T/sv0" && XDG_CACHE_HOME=$T/cache-v0 git filesync add x.c "$URL" -p lib.c >/dev/null 2>&1; echo $?) )" "0"
+git config --global --unset protocol.version
 
 # two upstream commits -> pending; pull lists them in the commit message
 up 's/^b$/B/' "Change B"
