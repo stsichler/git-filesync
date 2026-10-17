@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# Regression test for git-filesync (Linux/macOS/Git Bash)
+# Regression test for git-filesync (Linux, macOS, Git Bash on Windows)
 # =============================================================================
 #
 # Usage:  test/regress.sh [path/to/git-filesync.py] </dev/null
@@ -58,7 +58,7 @@ command -v cygpath >/dev/null && S=$(cygpath -m "$S")    # Git Bash: C:/... for 
 
 # Scratch directory for all repositories; removed on exit. In Git Bash on
 # Windows as a Windows path (C:/...), which native git and Python understand.
-T=$(mktemp -d)
+T=$(cd "$(mktemp -d)" && pwd -P)       # physical path (macOS: /var -> /private/var)
 trap 'rm -rf "$T"' EXIT
 command -v cygpath >/dev/null && T=$(cygpath -m "$T")
 cd "$T" || exit 2
@@ -121,6 +121,17 @@ addc() { git filesync add "$@" >/dev/null 2>&1 && git commit -q --no-edit >/dev/
 # passes the arguments to it). No effect elsewhere.
 fsd() { MSYS_NO_PATHCONV=1 "$PYTHON" "$S" "$@"; }
 
+# sedi SCRIPT FILE... - edit each FILE in place with sed; works with GNU and
+# BSD sed and keeps CRLF (GNU sed in Git Bash only does with -b)
+SED_B=; sed --version >/dev/null 2>&1 && SED_B=-b
+sedi() {
+  local script=$1 f; shift
+  for f; do sed $SED_B "$script" "$f" > "$f.sedi" && cat "$f.sedi" > "$f" && rm -f "$f.sedi" || return; done
+}
+
+# lines - number of lines on stdin, without the blanks BSD wc puts in front
+lines() { wc -l | tr -d ' '; }
+
 # oneline - join the lines of stdin with blanks ("a\nb\n" -> "a b ")
 oneline() { tr '\n' ' '; }
 
@@ -145,7 +156,7 @@ git -C master fetch -q
 URL=$TURL/master.git
 
 # up SED-EXPR MESSAGE - change lib.c in master, commit and push
-up() { (cd "$T/master" && sed -i "$1" lib.c && git commit -qam "$2" && git push -q origin main); }
+up() { (cd "$T/master" && sedi "$1" lib.c && git commit -qam "$2" && git push -q origin main); }
 
 # slave: links master's lib.c as src/lib.c
 new_slave slave
@@ -175,7 +186,7 @@ check "commit msg lists commits" "$(git log -1 --format=%B | grep -c '^- Change'
 check "after pull" "$(st)" ""
 
 # a committed local adaptation is kept by the next pull (3-way merge)
-sed -i 's/^g$/G-local/' src/lib.c
+sedi 's/^g$/G-local/' src/lib.c
 git commit -qam tweak
 up 's/^a$/A/' "Change A"
 check "pending + adapted" "$(st)" "PA"
@@ -183,7 +194,7 @@ git filesync pull --no-edit src/lib.c >/dev/null
 check "clean merge result" "$(oneline < src/lib.c)" "A B C d e f G-local "
 
 # local and upstream change of the same line -> conflict
-sed -i 's/^e$/E-local/' src/lib.c
+sedi 's/^e$/E-local/' src/lib.c
 git commit -qam "local e"
 up 's/^e$/E-up/' "Change E"
 check "conflict rc" "$(rc git filesync pull src/lib.c)" "1"
@@ -196,7 +207,7 @@ check "git reset drops the prepared message" "$(ls "$(git rev-parse --git-dir)/S
 
 # mapped to the local checkout, unpushed master commits are seen and warned
 git filesync map "$URL" "$T/master" >/dev/null
-(cd "$T/master" && sed -i 's/^f$/F/' lib.c && git commit -qam "unpushed F")
+(cd "$T/master" && sedi 's/^f$/F/' lib.c && git commit -qam "unpushed F")
 check "local checkout warns unpushed" "$(git filesync status 2>/dev/null | grep -c 'not pushed')" "1"
 git filesync map "$URL" --unset >/dev/null
 check "--remote / unmapped ignores unpushed" "$(git filesync status 2>/dev/null | grep -c 'not pushed')" "0"
@@ -219,9 +230,9 @@ git restore src/lib.c
 
 # hooks: install and remove our own hook files
 git filesync install-hooks >/dev/null
-check "hooks installed" "$(ls .git/hooks/pre-push .git/hooks/post-merge 2>/dev/null | wc -l)" "2"
+check "hooks installed" "$(ls .git/hooks/pre-push .git/hooks/post-merge 2>/dev/null | lines)" "2"
 git filesync uninstall-hooks >/dev/null
-check "own hooks removed" "$(ls .git/hooks/pre-push .git/hooks/post-merge 2>/dev/null | wc -l)" "0"
+check "own hooks removed" "$(ls .git/hooks/pre-push .git/hooks/post-merge 2>/dev/null | lines)" "0"
 
 # foreign hooks: install-hooks leaves them alone and prints the lines to add.
 # pre-push gets these lines added by hand, post-merge stays without them;
@@ -273,7 +284,7 @@ for mode in autocrlf textauto plain; do
   check "$mode: clean after pull" "$(st)" ""
 
   # local adaptation + upstream change -> merge
-  sed -b -i 's/^d/D-local/' w.c        # -b: keep CRLF (Git Bash)
+  sedi 's/^d/D-local/' w.c
   git commit -qam loc
   (cd ../m && printf 'A\r\nB\r\nc\r\nd\r\n' > w.c && git commit -qam A && git push -q origin main)
   check "$mode: merge rc" "$(rc git filesync pull --no-edit w.c)" "0"
@@ -324,8 +335,8 @@ done
 # sA -> coA (given as relative path from a subdirectory), sB -> coB
 (cd sA && mkdir -p sub && cd sub && git filesync map "$URL3" ../../coA >/dev/null)
 (cd sB && git filesync map "$URL3" "$T/coB" >/dev/null)
-check "map default scope is repo-local" "$(git -C sA config --local --get-regexp '^filesync\.' | wc -l)" "1"
-check "nothing written globally" "$(git config --global --get-regexp '^filesync\.' | wc -l)" "0"
+check "map default scope is repo-local" "$(git -C sA config --local --get-regexp '^filesync\.' | lines)" "1"
+check "nothing written globally" "$(git config --global --get-regexp '^filesync\.' | lines)" "0"
 check "slave A uses checkout A" "$(cd sA && st)" "P"
 check "slave B uses checkout B" "$(cd sB && st)" ""
 (cd sA && quiet git filesync pull --no-edit x.c)
@@ -456,7 +467,7 @@ addc src/bar.h file:///nowhere/m4.git -p lib/bar.h --strict
 
 # diff: synced version <-> local file
 check "diff: nothing when clean" "$(git filesync diff)" ""
-sed -i 's/^b$/B-local/' src/foo.c
+sedi 's/^b$/B-local/' src/foo.c
 git commit -qm 'adapt foo' src/foo.c
 check "diff: shows local change" "$(git filesync diff | changes)" "-b +B-local "
 check "diff: labels" "$(git filesync diff | grep -E '^(---|\+\+\+)' | oneline)" "--- synced/src/foo.c +++ local/src/foo.c "
@@ -465,7 +476,7 @@ check "diff: options after --" "$(git filesync diff -- --stat | head -1 | tr -s 
 # --master-paths: a patch that applies in the master, also after it moved on
 git filesync diff --master-paths > ../p4.patch
 check "diff --master-paths applies in master" "$(cd ../m4 && git apply --check ../p4.patch && echo ok)" "ok"
-(cd ../m4 && sed -i 's/^e$/E-up/' lib/foo.c && git commit -qam "Change E")
+(cd ../m4 && sedi 's/^e$/E-up/' lib/foo.c && git commit -qam "Change E")
 check "diff --upstream" "$(git filesync diff --upstream | changes)" "-e +E-up "
 check "apply -3 after master moved" \
   "$(cd ../m4 && git apply -3 ../p4.patch >/dev/null 2>&1 && sed -n 2p lib/foo.c; git reset -q --hard)" "B-local"
@@ -512,7 +523,7 @@ check "pull --overwrite restores" "$(cat src/bar.h)" "x"
 check "overwrite commit message" "$(git log -1 --format=%s)" \
   "Restore src/bar.h from nowhere/m4@$(git -C ../m4 log -1 --format=%h -- lib/bar.h)"
 check "after overwrite clean" "$(st src/bar.h)" ""
-sed -i 's/^a$/A-local/' src/foo.c
+sedi 's/^a$/A-local/' src/foo.c
 git commit -qm 'adapt a' src/foo.c
 quiet git filesync pull --no-edit --overwrite src/foo.c
 check "--overwrite discards in non-strict file" "$(git filesync diff)" ""
@@ -525,9 +536,9 @@ section "7. .git-filesync registry: sources, unlink, mv, commit consistency"
 
 # files from one master share one [source]; add accepts the source name
 check "one [source] for files of one master" \
-  "$(git config -f .git-filesync --get-regexp '^source\..*\.url' | wc -l)" "1"
+  "$(git config -f .git-filesync --get-regexp '^source\..*\.url' | lines)" "1"
 SRC=$(git config -f .git-filesync --get-regexp '^source\..*\.url' | sed 's/^source\.\(.*\)\.url .*/\1/')
-(cd ../m4 && printf 'n\n' > lib/new.h && sed -i 's/^d$/D-up/' lib/foo.c && git add . && git commit -qm "add new.h")
+(cd ../m4 && printf 'n\n' > lib/new.h && sedi 's/^d$/D-up/' lib/foo.c && git add . && git commit -qm "add new.h")
 # add only stages; the proposed message is prepared for a plain git commit
 OUT=$(git filesync add include/new.h "$SRC" -p lib/new.h 2>&1)
 check "add by source name" "$?" "0"
@@ -549,14 +560,14 @@ check "registry committed with link" "$(git show --name-only --format= HEAD | so
 check "mv rc" "$(rc git filesync mv include/new.h include/renamed.h)" "0"
 check "mv: file moved" "$(ls include)" "renamed.h"
 check "mv: link moved (staged, not yet committed)" "$(git filesync status -s include/renamed.h)" "  ? include/renamed.h"
-check "mv: old entry gone" "$(git config -f .git-filesync --get-regexp '^file\.include/new\.h\.' | wc -l)" "0"
+check "mv: old entry gone" "$(git config -f .git-filesync --get-regexp '^file\.include/new\.h\.' | lines)" "0"
 git commit -qm mv
 
 # unlink: removes the entry, keeps the file; the last unlink removes the registry
 check "unlink rc" "$(rc git filesync unlink include/renamed.h)" "0"
 check "unlink: file kept" "$(cat include/renamed.h)" "n"
 check "unlink: entry removed" "$(git filesync status include/renamed.h 2>&1 | grep -c 'not linked')" "1"
-check "unlink: source kept while used" "$(git config -f .git-filesync --get-regexp '^source\.' | wc -l)" "2"
+check "unlink: source kept while used" "$(git config -f .git-filesync --get-regexp '^source\.' | lines)" "2"
 git commit -qm unlink
 git filesync unlink src/foo.c src/bar.h >/dev/null
 check "unlink all: registry removed" "$([ -e .git-filesync ] && echo exists || echo gone)" "gone"
@@ -591,7 +602,7 @@ check "pull: source key in commit message" \
 addc include/x.h file:///nowhere/m4.git -p lib/bar.h
 check "add finds the source by URL, not by key" \
   "$(git config -f .git-filesync file.include/x.h.source)" "mylib"
-check "add by URL: no new source" "$(git config -f .git-filesync --get-regexp '^source\..*\.url' | wc -l)" "1"
+check "add by URL: no new source" "$(git config -f .git-filesync --get-regexp '^source\..*\.url' | lines)" "1"
 
 # add over an existing, different file: message notes modifications and strict
 echo mine > include/y.h
@@ -602,7 +613,7 @@ check "add existing file: notes" \
 check "add existing file: committed as is" "$(git show HEAD:include/y.h)" "mine"
 
 # a commit aborted in the editor leaves the changes staged (pull: rc 1)
-(cd ../m4 && sed -i 's/^D-up$/D-up2/' lib/foo.c && git commit -qam "foo up2")
+(cd ../m4 && sedi 's/^D-up$/D-up2/' lib/foo.c && git commit -qam "foo up2")
 check "pull: commit aborted" "$(GIT_EDITOR=false rc git filesync pull src/foo.c)" "1"
 check "pull: aborted commit leaves it staged" "$(git status --porcelain | oneline)" "M  .git-filesync M  src/foo.c "
 git reset -q --hard "$BASE"
@@ -646,9 +657,9 @@ check "status -s: nothing when clean" "$(git filesync status -s)" ""
 #   a.c  pending                 d.c  pending + uncommitted change
 #   b.c  pending + adapted       e.c  adapted (strict -> violation)
 #   c.c  adapted + uncommitted change
-(cd ../m5 && sed -i 's/^5$/5-up/' a.c b.c d.c && git commit -qam up)
-sed -i 's/^1$/1-adapt/' b.c c.c e.c; git commit -qam adapt          # committed adaptations
-sed -i 's/^3$/3-wip/' c.c d.c                                          # uncommitted changes
+(cd ../m5 && sedi 's/^5$/5-up/' a.c b.c d.c && git commit -qam up)
+sedi 's/^1$/1-adapt/' b.c c.c e.c; git commit -qam adapt          # committed adaptations
+sedi 's/^3$/3-wip/' c.c d.c                                          # uncommitted changes
 check "status -s: three columns" "$(git filesync status -s | tr '\n' '|')" \
   "P   a.c|PA  b.c| AM c.c|P M d.c| A  e.c  (strict!)|"
 
@@ -716,7 +727,7 @@ done
 git add .git-filesync
 git commit -qm "unsafe entries"
 check "unsafe paths: pull fails" "$(rc git filesync pull --all --no-edit)" "2"
-check "unsafe paths: nothing written" "$(ls ../outside.txt "$T/abs.txt" .git/hooks/post-commit 2>/dev/null | wc -l)" "0"
+check "unsafe paths: nothing written" "$(ls ../outside.txt "$T/abs.txt" .git/hooks/post-commit 2>/dev/null | lines)" "0"
 check "unsafe paths: status errors" "$(git filesync status -s 2>/dev/null | grep -c '^E')" "3"
 check "unsafe paths: removal hint" "$(git filesync status 2>&1 | grep -c 'remove-section')" "3"
 git rm -q .git-filesync
@@ -756,7 +767,8 @@ git checkout -q -- f1.txt
 # 'strict' without a value is true, as everywhere in git config
 echo local >> a.txt
 git commit -qam adapt
-sed -i '/^\[file "a.txt"\]/a\	strict' .git-filesync
+sedi '/^\[file "a.txt"\]/a\
+strict' .git-filesync
 check "bare 'strict' means true" "$(git filesync status -s a.txt)" " A  a.txt  (strict!)"
 git checkout -q -- .git-filesync
 
@@ -861,8 +873,8 @@ if git lfs version >/dev/null 2>&1; then
         check "$tag: clean" "$(st)" ""
 
         # upstream change of l5, local change of l1 -> diff and merge
-        (cd "$T/ml" && sed -i 's/^l5$/L5-up/' d.txt && git commit -qam l5 && git push -q origin main 2>/dev/null)
-        sed -i 's/^l1$/L1-local/' d.txt
+        (cd "$T/ml" && sedi 's/^l5$/L5-up/' d.txt && git commit -qam l5 && git push -q origin main 2>/dev/null)
+        sedi 's/^l1$/L1-local/' d.txt
         git commit -qam loc
         check "$tag: diff" "$(git filesync diff | changes)" "-l1 +L1-local "
         check "$tag: diff --upstream" "$(git filesync diff --upstream | changes)" "-l5 +L5-up "
@@ -922,7 +934,7 @@ check "add --tag: message names the tag" "$(git log -1 --format=%B | grep -c "^U
 check "status -v shows the tag" "$(git filesync status -v | grep -c '(tag v1)')" "1"
 
 # a newer commit on the branch doesn't concern the pinned file
-(cd ../co9 && sed -i 's/^3$/3b/' t.c && git commit -qam "on main" && git push -q origin main)
+(cd ../co9 && sedi 's/^3$/3b/' t.c && git commit -qam "on main" && git push -q origin main)
 check "tag: branch commits ignored" "$(st)" ""
 
 # the tag is in the cache: nothing is fetched, works without the server
@@ -942,7 +954,7 @@ check "pull to the new tag" "$(oneline < t.c)" "1 2 3b "
 
 # with a mapped checkout the tag is taken from there, its branch ignored
 git filesync map "$URL9" "$T/co9" >/dev/null
-(cd ../co9 && sed -i 's/^1$/1c/' t.c && git commit -qam "after v2")
+(cd ../co9 && sedi 's/^1$/1c/' t.c && git commit -qam "after v2")
 check "mapped: branch ignored" "$(st)" ""
 check "mapped: no checked-out warning for a tag" "$(git filesync status 2>&1 | grep -c 'checked out')" "0"
 (cd ../co9 && git tag v3)
@@ -980,7 +992,7 @@ check "source: unknown name" "$(rc git filesync source set-url nope file:///x)" 
 git filesync source rename "$SRC9" lib9 >/dev/null
 check "rename: section renamed" "$(git config -f .git-filesync source.lib9.url)" "$URL9"
 check "rename: files follow" "$(git config -f .git-filesync file.t.c.source)" "lib9"
-check "rename: old section gone" "$(git config -f .git-filesync --get-regexp "^source\.$SRC9\." | wc -l)" "0"
+check "rename: old section gone" "$(git config -f .git-filesync --get-regexp "^source\.$SRC9\." | lines)" "0"
 check "rename: status works" "$(st)" ""
 git commit -qm "rename source"
 
@@ -1074,8 +1086,8 @@ addc gone.c "$URL10" -p lib/gone.c
 SRC10=$(git config -f .git-filesync file.r.c.source)
 
 # r.c: renamed with a change, then changed again; gone.c: deleted
-(cd ../co10 && git mv lib/r.c lib/renamed.c && sed -i 's/^b$/B/' lib/renamed.c \
-  && git commit -qm "rename r" && sed -i 's/^i$/I/' lib/renamed.c && git commit -qam "change I" \
+(cd ../co10 && git mv lib/r.c lib/renamed.c && sedi 's/^b$/B/' lib/renamed.c \
+  && git commit -qm "rename r" && sedi 's/^i$/I/' lib/renamed.c && git commit -qam "change I" \
   && git rm -q lib/gone.c && git commit -qm "drop gone" && git push -q origin main)
 check "renamed upstream: short code" "$(st r.c)" "R"
 check "renamed upstream: long format" \
@@ -1087,7 +1099,7 @@ check "deleted upstream: --exit-code" "$(rc git filesync status --exit-code gone
 check "deleted upstream: hook" "$(git filesync status --hook 2>&1 | grep -c 'gone.c: upstream deleted')" "1"
 
 # pull follows the rename; a committed adaptation is merged across it
-sed -i 's/^e$/e-local/' r.c
+sedi 's/^e$/e-local/' r.c
 git commit -qam adapt
 quiet git filesync pull --no-edit r.c
 check "pull follows rename: path updated" "$(git config -f .git-filesync file.r.c.path)" "lib/renamed.c"
@@ -1118,12 +1130,12 @@ section "16. Dry runs: pull --dry-run, add / unlink / mv -n"
 # =============================================================================
 # (continues in s10)
 
-(cd ../co10 && sed -i 's/^g$/G-up/' lib/final.c && git commit -qam "change G" && git push -q origin main)
+(cd ../co10 && sedi 's/^g$/G-up/' lib/final.c && git commit -qam "change G" && git push -q origin main)
 BEFORE=$(git rev-parse HEAD)
 check "pull --dry-run: reports" "$(git filesync pull --dry-run r.c)" \
   "r.c: would sync to $SRC10@$(git -C ../co10 rev-parse --short HEAD) (adaptations merged cleanly)"
 check "pull --dry-run: nothing changed" "$(git rev-parse HEAD) $(git status --porcelain)" "$BEFORE "
-sed -i 's/^g$/g-local/' r.c
+sedi 's/^g$/g-local/' r.c
 git commit -qam "local g"
 check "pull --dry-run: conflict reported" "$(git filesync pull --dry-run r.c | grep -c '1 merge conflict(s)')" "1"
 check "pull --dry-run: rc" "$(rc git filesync pull --dry-run r.c)" "0"
@@ -1183,9 +1195,9 @@ check "add DIR: existing file adapted" "$(st docs)" " A"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "Link docs/x.md to nowhere/m11"
 
 # pattern forms
-check "pattern '**/v1/*'" "$(git filesync add -n all nowhere/m11 -p api --include '**/v1/*' | wc -l)" "2"
+check "pattern '**/v1/*'" "$(git filesync add -n all nowhere/m11 -p api --include '**/v1/*' | lines)" "2"
 check "pattern 'test/' (directory)" "$(git filesync add -n all nowhere/m11 -p api --include 'test/' | cut -d' ' -f3)" "all/test/t.proto"
-check "pattern 'v?/b*.proto'" "$(git filesync add -n all nowhere/m11 -p api --include 'v?/b[_.]*' | wc -l)" "2"
+check "pattern 'v?/b*.proto'" "$(git filesync add -n all nowhere/m11 -p api --include 'v?/b[_.]*' | lines)" "2"
 check "patterns need a master directory" "$(rc git filesync add x nowhere/m11 -p api/a.proto --include '*')" "2"
 check "whole master repository (docs/x.md already linked)" \
   "$(fsd add -n . nowhere/m11 -p / --exclude '*.proto' | grep '^would' | cut -d' ' -f3 | oneline)" "api/README.md "
@@ -1208,8 +1220,8 @@ git -C m12.git config uploadpack.allowFilter true
 git clone -q m12.git co12 2>/dev/null
 (cd co12 && printf '1\n2\n3\n4\n5\n' > a.c && cp a.c b.c && cp a.c c.c && git add . \
   && git commit -qm v1 && git tag v1.0 \
-  && sed -i 's/^5$/5-v11/' a.c b.c && git commit -qam "v1.1 change" && git tag v1.1 \
-  && sed -i 's/^5-v11$/5-rc/' a.c && git commit -qam "rc change" && git tag v2.0-rc1 \
+  && sedi 's/^5$/5-v11/' a.c b.c && git commit -qam "v1.1 change" && git tag v1.1 \
+  && sedi 's/^5-v11$/5-rc/' a.c && git commit -qam "rc change" && git tag v2.0-rc1 \
   && git push -q origin main --tags)
 URL12=$TURL/m12.git
 
@@ -1261,7 +1273,7 @@ git filesync map "$URL12" --unset >/dev/null
 (cd ../co12 && git tag -d local-3 >/dev/null)
 
 # switching only some files of a source splits it; the adaptation is merged
-sed -i 's/^1$/1-local/' a.c
+sedi 's/^1$/1-local/' a.c
 git commit -qam adapt
 quiet git filesync pull --no-edit --tag v1.1 a.c
 check "partial switch: file moved to a new source" "$(git config -f .git-filesync file.a.c.source)" "$SRC12-2"
@@ -1279,7 +1291,7 @@ check "partial switch: all committed" "$(git status --porcelain)" ""
 quiet git filesync pull --no-edit --tag v1.1 b.c c.c
 check "switch rest: files joined the existing source" \
   "$(git config -f .git-filesync file.b.c.source) $(git config -f .git-filesync file.c.c.source)" "$SRC12-2 $SRC12-2"
-check "switch rest: emptied source removed" "$(git config -f .git-filesync --get-regexp "^source\.$SRC12\." | wc -l)" "0"
+check "switch rest: emptied source removed" "$(git config -f .git-filesync --get-regexp "^source\.$SRC12\." | lines)" "0"
 check "switch rest: all committed" "$(git status --porcelain)" ""
 
 # all files of a source: the source itself is changed; nothing to sync -> own commit
@@ -1305,7 +1317,7 @@ check "pull --dry-run --tag: nothing changed" "$(git status --porcelain)" ""
 
 # an uncommitted source rename doesn't block pull; it goes into the sync commit
 git filesync source rename "$SRC12-2" lib12 >/dev/null
-(cd ../co12 && sed -i 's/^3$/3-up/' a.c && git commit -qam "change 3" && git push -q origin main)
+(cd ../co12 && sedi 's/^3$/3-up/' a.c && git commit -qam "change 3" && git push -q origin main)
 check "pull after uncommitted source rename" "$(rc git filesync pull --no-edit a.c)" "0"
 check "rename went into the sync commit" "$(git status --porcelain) $(git show HEAD:.git-filesync | grep -c 'source = lib12')" " 3"
 

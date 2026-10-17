@@ -52,3 +52,18 @@ jobs:
         run: |
           test/regress.sh </dev/null | tee regress.log
           ! grep -q '^FAIL' regress.log
+
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare git
+        run: |
+          command -v git-lfs >/dev/null || brew install git-lfs
+          git lfs install --skip-repo
+          git --version; git lfs version; python3 --version; bash --version | head -1
+      - name: Regression tests
+        run: |
+          test/regress.sh </dev/null | tee regress.log
+          ! grep -q '^FAIL' regress.log
