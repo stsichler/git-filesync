@@ -33,3 +33,22 @@ jobs:
         run: |
           docker run --rm -v "$PWD":/src:ro -w /src filesync-minver test/regress.sh </dev/null | tee regress.log
           ! grep -q '^FAIL' regress.log
+
+  windows:
+    name: Windows, Git for Windows (Git Bash)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHON: python
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare git
+        run: |
+          git lfs install --skip-repo
+          git --version; git lfs version; python --version
+      - name: Regression tests
+        run: |
+          test/regress.sh </dev/null | tee regress.log
+          ! grep -q '^FAIL' regress.log

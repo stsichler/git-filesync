@@ -4,6 +4,8 @@
 # =============================================================================
 #
 # Usage:  test/regress.sh [path/to/git-filesync.py] </dev/null
+#         (PYTHON=python test/regress.sh … to use another interpreter, e.g.
+#         in Git Bash on Windows)
 #
 # The script builds throwaway "master" and "slave" repositories in a temp
 # directory ($T, removed on exit) and runs git-filesync against them. Each
@@ -52,23 +54,34 @@
 # directory above this test.
 S=${1:-$(dirname "$0")/../git-filesync.py}
 S=$(cd "$(dirname "$S")" && pwd)/$(basename "$S")
+command -v cygpath >/dev/null && S=$(cygpath -m "$S")    # Git Bash: C:/... for Python
 
-# Scratch directory for all repositories; removed on exit.
+# Scratch directory for all repositories; removed on exit. In Git Bash on
+# Windows as a Windows path (C:/...), which native git and Python understand.
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
+command -v cygpath >/dev/null && T=$(cygpath -m "$T")
 cd "$T" || exit 2
+
+# TURL - file:// URL of $T (file:///C:/... on Windows)
+case $T in ?:*) TURL=file:///$T ;; *) TURL=file://$T ;; esac
+
+PYTHON=${PYTHON:-python3}
 
 # Isolate from the user's setup: own HOME (global git config) and own
 # cache directory (git-filesync keeps its clones of master repos there).
-export HOME=$T/home XDG_CACHE_HOME=$T/cache
+export HOME=$T/home FILESYNC_CACHE=$T/cache
 mkdir -p "$HOME"
 export GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@x GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@x
 export GIT_EDITOR=true                 # accept commit messages unchanged
 export GIT_PAGER=cat                   # never start a pager
 git config --global init.defaultBranch main
-git config --global alias.filesync "!python3 $S"
+git config --global core.autocrlf false    # Git for Windows: true by default
+git config --global alias.filesync "!$PYTHON $S"
 
 # --- helpers -----------------------------------------------------------------
+
+TAB=$(printf '\t')     # for grep -E patterns (portable, unlike Perl regexes)
 
 PASSED=0 FAILED=0
 
@@ -99,6 +112,15 @@ rc() { "$@" >/dev/null 2>&1; echo $?; }
 # commit with the proposed message, as 'git commit --no-edit' offers it
 addc() { git filesync add "$@" >/dev/null 2>&1 && git commit -q --no-edit >/dev/null 2>&1; }
 
+# fsd ARGS... - git-filesync run directly, not through the git alias. On
+# Windows git runs aliases through its MSYS shell, which expands wildcard
+# characters in arguments if a file matches ('f[1].txt' -> f1.txt) and
+# turns arguments starting with '/' into Windows paths ('/x.md' ->
+# 'C:/Program Files/Git/x.md'); the latter is avoided here with
+# MSYS_NO_PATHCONV (which can't be set for the alias: it breaks how git
+# passes the arguments to it). No effect elsewhere.
+fsd() { MSYS_NO_PATHCONV=1 "$PYTHON" "$S" "$@"; }
+
 # oneline - join the lines of stdin with blanks ("a\nb\n" -> "a b ")
 oneline() { tr '\n' ' '; }
 
@@ -120,7 +142,7 @@ git clone -q --bare master master.git
 git -C master.git config uploadpack.allowFilter true    # allow blobless clones
 git -C master remote add origin "$T/master.git"
 git -C master fetch -q
-URL=file://$T/master.git
+URL=$TURL/master.git
 
 # up SED-EXPR MESSAGE - change lib.c in master, commit and push
 up() { (cd "$T/master" && sed -i "$1" lib.c && git commit -qam "$2" && git push -q origin main); }
@@ -140,14 +162,14 @@ check "add: proposed commit message" "$(git log -1 --format=%B | sed '/^$/d' | s
 # protocol v2 - git-filesync asks for it even if v0 is configured
 git config --global protocol.version 0
 check "protocol.version=0 configured: add works" \
-  "$( (new_slave "$T/sv0" && XDG_CACHE_HOME=$T/cache-v0 git filesync add x.c "$URL" -p lib.c >/dev/null 2>&1; echo $?) )" "0"
+  "$( (new_slave "$T/sv0" && FILESYNC_CACHE=$T/cache-v0 git filesync add x.c "$URL" -p lib.c >/dev/null 2>&1; echo $?) )" "0"
 git config --global --unset protocol.version
 
 # two upstream commits -> pending; pull lists them in the commit message
 up 's/^b$/B/' "Change B"
 up 's/^c$/C/' "Change C"
 check "pending count, relative path (from subdir)" \
-  "$(cd src && git filesync status | grep -cP '^\tpending:\s+lib\.c  \(2 commits\)')" "1"
+  "$(cd src && git filesync status | grep -cE "^${TAB}pending:[[:space:]]+lib\.c  \(2 commits\)")" "1"
 git filesync pull --no-edit src/lib.c >/dev/null
 check "commit msg lists commits" "$(git log -1 --format=%B | grep -c '^- Change')" "2"
 check "after pull" "$(st)" ""
@@ -229,7 +251,7 @@ git init -q m
 git clone -q --bare m m.git
 git -C m remote add origin "$T/m.git"
 git -C m fetch -q
-URL2=file://$T/m.git
+URL2=$TURL/m.git
 
 # The same scenario for a slave with core.autocrlf=true, one with
 # '* text=auto' and one without any normalization: neither add nor pull
@@ -251,7 +273,7 @@ for mode in autocrlf textauto plain; do
   check "$mode: clean after pull" "$(st)" ""
 
   # local adaptation + upstream change -> merge
-  sed -i 's/^d/D-local/' w.c
+  sed -b -i 's/^d/D-local/' w.c        # -b: keep CRLF (Git Bash)
   git commit -qam loc
   (cd ../m && printf 'A\r\nB\r\nc\r\nd\r\n' > w.c && git commit -qam A && git push -q origin main)
   check "$mode: merge rc" "$(rc git filesync pull --no-edit w.c)" "0"
@@ -289,7 +311,7 @@ cd "$T"
 git init -q m3
 (cd m3 && echo v1 > x.c && git add . && git commit -qm v1)
 git clone -q --bare m3 m3.git
-URL3=file://$T/m3.git
+URL3=$TURL/m3.git
 git clone -q m3.git coA
 (cd coA && echo v2 > x.c && git commit -qam v2)
 git clone -q m3.git coB
@@ -312,7 +334,7 @@ check "slave A synced from checkout A" "$(cat sA/x.c)" "v2"
 # global mapping (set from sC) -> coA; local mappings take precedence
 (cd sC && git filesync map --global "$URL3" "$T/coA" >/dev/null)
 check "global mapping used without local one" \
-  "$(cd sC && git filesync status -v | grep -c "via local checkout $T/coA")" "1"
+  "$(cd sC && git filesync status -v | grep -c "via local checkout .*coA)")" "1"
 check "local mapping overrides global" "$(cd sB && st)" ""
 check "list marks overridden global" \
   "$(cd sB && git filesync map | grep '^\[global\]' | grep -c overridden)" "1"
@@ -449,8 +471,8 @@ check "apply -3 after master moved" \
   "$(cd ../m4 && git apply -3 ../p4.patch >/dev/null 2>&1 && sed -n 2p lib/foo.c; git reset -q --hard)" "B-local"
 
 # difftool: the working file itself is passed, --upstream uses temp copies
-check "difftool: real working file" "$(git filesync difftool src/foo.c)" \
-  "TOOL synced-$(git -C ../m4 rev-parse --short HEAD~1) $T/s4/src/foo.c"
+check "difftool: real working file" "$(git filesync difftool src/foo.c | tr '\\' / \
+  | grep -cE "^TOOL synced-$(git -C ../m4 rev-parse --short HEAD~1) .*/s4/src/foo\.c$")" "1"
 check "difftool --upstream: temp copy" "$(git filesync difftool -y --upstream | grep -c "upstream-")" "1"
 
 # difftool asks per file like 'git difftool' (bar.h comes before foo.c)
@@ -475,7 +497,7 @@ check "strict file clean: no violation" "$(st src/bar.h)" ""
 echo y >> src/bar.h
 check "strict violation reported (uncommitted)" "$(git filesync status -s src/bar.h)" "  M src/bar.h  (strict!)"
 check "strict violation in long format" \
-  "$(git filesync status src/bar.h | grep -cP '^\tmodified:\s+src/bar\.h  \(NOT ALLOWED: strict\)')" "1"
+  "$(git filesync status src/bar.h | grep -cE "^${TAB}modified:[[:space:]]+src/bar\.h  \(NOT ALLOWED: strict\)")" "1"
 check "strict violation exit code" "$(rc git filesync status --exit-code src/bar.h)" "1"
 check "strict violation in hook output" "$(git filesync status --hook 2>&1 | grep -c 'NOT ALLOWED')" "1"
 check "pull refuses strict merge" "$(rc git filesync pull --no-edit src/bar.h)" "2"
@@ -632,17 +654,17 @@ check "status -s: three columns" "$(git filesync status -s | tr '\n' '|')" \
 
 # long format: sections like git status
 OUT=$(git filesync status)
-check "status: upstream section" "$(echo "$OUT" | grep -A4 '^Upstream changes to sync:' | grep -cP '^\tpending:')" "3"
-check "status: commit count" "$(echo "$OUT" | grep -cP '^\tpending:\s+b\.c  \(1 commit\)')" "1"
-check "status: adapted section" "$(echo "$OUT" | grep -A6 '^Locally adapted files:' | grep -cP '^\tadapted:')" "3"
-check "status: strict note on adapted" "$(echo "$OUT" | grep -cP '^\tadapted:\s+e\.c  \(NOT ALLOWED: strict\)')" "1"
-check "status: uncommitted section" "$(echo "$OUT" | grep -A5 '^Uncommitted changes:' | grep -cP '^\tmodified:')" "2"
+check "status: upstream section" "$(echo "$OUT" | grep -A4 '^Upstream changes to sync:' | grep -cE "^${TAB}pending:")" "3"
+check "status: commit count" "$(echo "$OUT" | grep -cE "^${TAB}pending:[[:space:]]+b\.c  \(1 commit\)")" "1"
+check "status: adapted section" "$(echo "$OUT" | grep -A6 '^Locally adapted files:' | grep -cE "^${TAB}adapted:")" "3"
+check "status: strict note on adapted" "$(echo "$OUT" | grep -cE "^${TAB}adapted:[[:space:]]+e\.c  \(NOT ALLOWED: strict\)")" "1"
+check "status: uncommitted section" "$(echo "$OUT" | grep -A5 '^Uncommitted changes:' | grep -cE "^${TAB}modified:")" "2"
 check "status: no 'nothing to sync' when pending" "$(echo "$OUT" | grep -c 'nothing to sync')" "0"
 check "status: exit code 0 like git" "$(rc git filesync status)" "0"
 check "status --exit-code" "$(rc git filesync status --exit-code)" "1"
 check "status: advice.statusHints=false" "$(git -c advice.statusHints=false filesync status | grep -c '(use ')" "0"
 check "status -v: all files listed" \
-  "$(git filesync status -v | grep -A6 '^Linked files:' | grep -cP '^\t(unmodified|adapted):')" "5"
+  "$(git filesync status -v | grep -A6 '^Linked files:' | grep -cE "^${TAB}(unmodified|adapted):")" "5"
 check "status --hook: adapted alone is quiet" "$(git filesync status --hook 2>&1 | grep -c 'c\.c')" "0"
 
 # pull refuses to overwrite uncommitted changes, unless --autostash
@@ -720,12 +742,12 @@ check "map --unset without URL" "$(rc git filesync map --unset)" "2"
 # not match the unrelated file f1.txt
 echo other > f1.txt
 git add f1.txt
-quiet git filesync add 'f[1].txt' file:///nowhere/m6.git
+quiet fsd add 'f[1].txt' file:///nowhere/m6.git
 git commit -qm link
 echo changed > f1.txt
-check "glob chars: other file's change not attributed" "$(st 'f[1].txt')" ""
+check "glob chars: other file's change not attributed" "$(fsd status -s 'f[1].txt' | cut -c1-3)" ""
 (cd ../m6 && echo f2 > 'f[1].txt' && git commit -qam f2)
-quiet git filesync pull --no-edit 'f[1].txt'
+quiet fsd pull --no-edit 'f[1].txt'
 check "glob chars: pull commits only the file" \
   "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" ".git-filesync f[1].txt "
 check "glob chars: other file stays uncommitted" "$(git status --porcelain f1.txt)" " M f1.txt"
@@ -742,8 +764,8 @@ git checkout -q -- .git-filesync
 git config -f .git-filesync 'file.f[1].txt.blob' 0123456789abcdef0123456789abcdef01234567
 check "base unavailable: warned" \
   "$(git filesync status 2>&1 | grep -c 'synced version 0123456789ab not available')" "1"
-quiet git filesync pull --no-edit --overwrite 'f[1].txt'
-check "base unavailable: --overwrite recovers" "$(st 'f[1].txt')" ""
+quiet fsd pull --no-edit --overwrite 'f[1].txt'
+check "base unavailable: --overwrite recovers" "$(fsd status -s 'f[1].txt' | cut -c1-3)" ""
 
 # mapped checkout with a remote but no origin/HEAD: the default branch is a
 # guess (the checked-out branch), and add says so
@@ -769,7 +791,7 @@ git -C m7.git config uploadpack.allowFilter true
 git clone -q m7.git co7 2>/dev/null
 (cd co7 && echo v1 > f.txt && echo o1 > o.txt && git add . && git commit -qm "f v1" \
   && echo o2 > o.txt && git commit -qam "other 1" && git push -q origin main)
-URL7=file://$T/m7.git
+URL7=$TURL/m7.git
 
 # rec - the commit recorded for f.txt
 rec() { git config -f .git-filesync file.f.txt.commit; }
@@ -832,8 +854,8 @@ if git lfs version >/dev/null 2>&1; then
         rm -rf sl "$T/cache"; git init -q sl; cd sl
         [ $slfs = yes ] && git lfs track d.txt >/dev/null && git add .gitattributes
         git commit -q --allow-empty -m i
-        [ $via = map ] && git filesync map "file://$T/ml.git" "$T/ml" >/dev/null
-        addc d.txt "file://$T/ml.git"
+        [ $via = map ] && git filesync map "$TURL/ml.git" "$T/ml" >/dev/null
+        addc d.txt "$TURL/ml.git"
         check "$tag: content after add" "$(head -1 d.txt)" "l1"
         check "$tag: slave storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
         check "$tag: clean" "$(st)" ""
@@ -855,9 +877,9 @@ if git lfs version >/dev/null 2>&1; then
         printf 'l1\nl2\nl3\nl4\nl5\n' > d.txt
         git add .
         git commit -qm i
-        [ $via = map ] && git filesync map "file://$T/ml.git" "$T/ml" >/dev/null
+        [ $via = map ] && git filesync map "$TURL/ml.git" "$T/ml" >/dev/null
         check "$tag: add detects older version" \
-          "$(git filesync add d.txt "file://$T/ml.git" 2>&1 | grep -c 'matches upstream')" "1"
+          "$(git filesync add d.txt "$TURL/ml.git" 2>&1 | grep -c 'matches upstream')" "1"
         cd ..
 
         # reset the master for the next combination
@@ -870,7 +892,7 @@ if git lfs version >/dev/null 2>&1; then
   rm -rf sl "$T/cache"
   new_slave sl
   (cd ../ml && git lfs track d.txt >/dev/null && git add . && git commit -qm lfs && git push -q origin main 2>/dev/null)
-  ERR=$(GIT_LFS_SKIP_SMUDGE=1 git filesync add d.txt "file://$T/ml.git" 2>&1)
+  ERR=$(GIT_LFS_SKIP_SMUDGE=1 git filesync add d.txt "$TURL/ml.git" 2>&1)
   check "lfs unavailable: add fails" "$(echo "$ERR" | grep -c 'stored in Git LFS')" "1"
   check "lfs unavailable: no pointer file written" "$([ -e d.txt ] && echo written || echo none)" "none"
 else
@@ -889,7 +911,7 @@ git -C m9.git config uploadpack.allowFilter true
 git clone -q m9.git co9 2>/dev/null
 (cd co9 && printf '1\n2\n3\n' > t.c && git add . && git commit -qm v1 && git tag v1 \
   && git push -q origin main v1)
-URL9=file://$T/m9.git
+URL9=$TURL/m9.git
 
 new_slave s9
 addc --tag v1 t.c "$URL9"
@@ -1044,7 +1066,7 @@ git -C m10.git config uploadpack.allowFilter true
 git clone -q m10.git co10 2>/dev/null
 (cd co10 && mkdir lib && printf 'a\nb\nc\nd\ne\nf\ng\nh\ni\n' > lib/r.c && echo x > lib/gone.c \
   && git add . && git commit -qm init && git push -q origin main)
-URL10=file://$T/m10.git
+URL10=$TURL/m10.git
 
 new_slave s10
 addc r.c "$URL10" -p lib/r.c
@@ -1057,7 +1079,7 @@ SRC10=$(git config -f .git-filesync file.r.c.source)
   && git rm -q lib/gone.c && git commit -qm "drop gone" && git push -q origin main)
 check "renamed upstream: short code" "$(st r.c)" "R"
 check "renamed upstream: long format" \
-  "$(git filesync status r.c | grep -cP '^\trenamed:\s+r\.c  \(lib/r\.c -> lib/renamed\.c, 2 commits\)')" "1"
+  "$(git filesync status r.c | grep -cE "^${TAB}renamed:[[:space:]]+r\.c  \(lib/r\.c -> lib/renamed\.c, 2 commits\)")" "1"
 check "deleted upstream: short code" "$(st gone.c)" "X"
 check "deleted upstream: unlink hint" "$(git filesync status | grep -c 'git filesync unlink <file>')" "1"
 check "deleted upstream: status rc 0" "$(rc git filesync status)" "0"
@@ -1155,7 +1177,7 @@ check "add DIR: nothing new" "$(git filesync add proto nowhere/m11 "${PROTO[@]}"
 
 # an existing file is linked as it is; '/x.md' is anchored at the directory
 mkdir docs && echo mine > docs/x.md
-addc docs nowhere/m11 --include /x.md
+quiet fsd add docs nowhere/m11 --include /x.md && git commit -q --no-edit
 check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
 check "add DIR: existing file adapted" "$(st docs)" " A"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "Link docs/x.md to nowhere/m11"
@@ -1166,11 +1188,11 @@ check "pattern 'test/' (directory)" "$(git filesync add -n all nowhere/m11 -p ap
 check "pattern 'v?/b*.proto'" "$(git filesync add -n all nowhere/m11 -p api --include 'v?/b[_.]*' | wc -l)" "2"
 check "patterns need a master directory" "$(rc git filesync add x nowhere/m11 -p api/a.proto --include '*')" "2"
 check "whole master repository (docs/x.md already linked)" \
-  "$(git filesync add -n . nowhere/m11 -p / --exclude '*.proto' | grep '^would' | cut -d' ' -f3 | oneline)" "api/README.md "
+  "$(fsd add -n . nowhere/m11 -p / --exclude '*.proto' | grep '^would' | cut -d' ' -f3 | oneline)" "api/README.md "
 
 # the script itself, synced into the repository and run via a repo alias
 mkdir tools && cp "$S" tools/git-filesync.py
-git config alias.fs '!python3 tools/git-filesync.py'
+git config alias.fs "!$PYTHON tools/git-filesync.py"
 check "repo alias to a copy of the script, from a subdirectory" "$(cd proto && git fs status -s v1/b.proto; echo $?)" "0"
 
 
@@ -1189,7 +1211,7 @@ git clone -q m12.git co12 2>/dev/null
   && sed -i 's/^5$/5-v11/' a.c b.c && git commit -qam "v1.1 change" && git tag v1.1 \
   && sed -i 's/^5-v11$/5-rc/' a.c && git commit -qam "rc change" && git tag v2.0-rc1 \
   && git push -q origin main --tags)
-URL12=file://$T/m12.git
+URL12=$TURL/m12.git
 
 new_slave s12
 for f in a b c; do addc --tag v1.0 $f.c "$URL12"; done
