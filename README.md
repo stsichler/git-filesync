@@ -1,3 +1,5 @@
+<img src="doc/logo.svg" alt="" width="128" align="right">
+
 # git-filesync
 
 [![Tests](https://github.com/stsichler/git-filesync/actions/workflows/test.yml/badge.svg)](https://github.com/stsichler/git-filesync/actions/workflows/test.yml)
