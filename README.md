@@ -32,6 +32,12 @@ copy is current and the history of the changes is lost. git-filesync links
 **single files**, tells you when a copy is behind, and syncs it with a
 meaningful commit.
 
+Because each linked file is a real copy committed in your repository, the
+repository stays **self-contained**: after a plain clone or checkout every
+file is there – unlike with Git submodules, nothing has to be fetched from
+other repositories, and neither git-filesync nor access to the master is
+needed to build.
+
 For files another project publishes as **release assets** – a tool binary,
 a firmware image, a generated header – there is its sibling
 [git-assetsync](https://github.com/stsichler/git-assetsync), built the same
@@ -72,6 +78,8 @@ afterwards.
 - Links single files between repositories – one by one or all files of a
   master directory at once; all links of a slave live in one file,
   `.git-filesync`, at its root (git-config format, like `.gitmodules`)
+- Self-contained slaves: linked files are committed copies, so a clone is
+  complete without fetching anything from other repositories
 - Follows a branch of the master, or is pinned to a tag (e.g. a release) –
   with a hint at newer tags; `pull --tag` switches and syncs in one step
 - Proposed commit message lists all master commits touching the file since
