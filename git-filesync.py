@@ -47,7 +47,6 @@ follow the command.
                                 the tag unless the source names one)
         --exit-code             exit 1 if something is to sync or a strict
                                 file is modified
-        --hook                  terse output on stderr (for git hooks)
 
     pull PATH... | --all        sync to the upstream version of the file and
                                 commit with a message listing the upstream
@@ -151,8 +150,15 @@ follow the command.
         --global                global git config (default: this repository)
         --unset                 remove the mapping for URL
 
-    install-hooks               install pre-push/post-merge reminder hooks
+    install-hooks               install pre-push/post-merge hooks (or update
+                                them): reminders about pending syncs, strict
+                                violations, errors; pre-push also warns if a
+                                pushed file is synced to an upstream commit
+                                that isn't on the upstream server
+                                (filesync.pushCheck = warn | error, which
+                                refuses the push | off)
     uninstall-hooks             remove them again
+    hook pre-push|post-merge    what the installed hooks run
 
     Common options:
         --no-fetch              use the cached state, don't fetch (status,
@@ -188,10 +194,13 @@ from types import SimpleNamespace
 __version__ = "0.6.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
+EXIT_REFUSED = 3          # hook pre-push: refuse the push (filesync.pushCheck = error)
 HOOK_MARKER = "git-filesync"
+# What the installed hooks run. Only EXIT_REFUSED blocks a push - any other
+# failure (e.g. git-filesync not installed) never does.
 HOOKS = {
-    "pre-push": "git filesync status --hook",
-    "post-merge": "git filesync status --hook --no-fetch",
+    "pre-push": f'git filesync hook pre-push "$@" || [ $? -ne {EXIT_REFUSED} ] || exit 1',
+    "post-merge": 'git filesync hook post-merge "$@" </dev/null || true',
 }
 REGISTRY_HEADER = ("# git-filesync: files of this repository that are kept in sync with\n"
                    "# files in other repositories. Maintained by 'git filesync'; [file]\n"
@@ -633,6 +642,7 @@ class Context:
         self.want_tags = getattr(args, "verbose", False) or args.cmd in ("pull", "source")
         self._sources = {}
         self._ready = set()
+        self._fetch_failed = set()
         self._mappings = None
 
     def source(self, url, ref, name=None):
@@ -750,9 +760,23 @@ class Context:
             p = git(["-C", d] + fetch, env=env, check=False)
             if p.returncode:
                 warn(f"fetching {url} failed, using cached state")
+                self._fetch_failed.add(d)
             self._drop_heads(d)
         self._ready.add(d)
         return d
+
+    def on_server(self, url, commit):
+        """Is commit on url's server - reachable from a branch or tag there,
+        whatever is mapped? Fetches the cache clone; None if that fails."""
+        try:
+            d = self._cache(url)
+        except FsError:
+            return None
+        if d in self._fetch_failed:
+            return None
+        p = git(["-C", d, "for-each-ref", "--count=1", "--contains", commit,
+                 "refs/remotes/origin/", "refs/tags/"], env=clean_env(), check=False)
+        return p.returncode == 0 and bool(out(p))
 
     @staticmethod
     def _drop_heads(d):
@@ -1385,6 +1409,15 @@ def short_code(st):
     return x + y + z
 
 
+def shown_path(repo, path):
+    """A path outside the working tree (e.g. in .git) as shown to the user:
+    relative to the current directory if possible."""
+    try:
+        return Path(os.path.relpath(path, repo.base)).as_posix()
+    except ValueError:            # Windows: another drive
+        return Path(path).as_posix()
+
+
 def shown(repo, rel):
     """Path relative to the current directory, like git status shows it."""
     return Path(os.path.relpath(repo.top / rel, repo.base)).as_posix()
@@ -1482,23 +1515,13 @@ def cmd_status(ctx, repo, args):
     reg = Registry(repo)
     links = select_links(repo, reg, args.paths)
     if not links:
-        if not (args.hook or args.short):
+        if not args.short:
             print(f"no linked files ({REGISTRY} not found or empty)")
         return EXIT_OK
     sts = [evaluate(ctx, repo, link) for link in links]
     attention = [st for st in sts if st.error or st.pending or st.violation]
     rc = EXIT_ERROR if any(st.error for st in sts) else \
         EXIT_PENDING if args.exit_code and attention else EXIT_OK
-    if args.hook:
-        for st in attention:
-            print(f"filesync: {paint(st.rel, 'yellow', 'err')}: {render(describe(st), 'err')}",
-                  file=sys.stderr)
-        if any(st.pending for st in attention):
-            print("filesync: run 'git filesync pull <file>' to sync", file=sys.stderr)
-        if any(st.violation for st in attention):
-            print("filesync: see 'git filesync status' and 'git filesync diff <file>' "
-                  "for strict violations", file=sys.stderr)
-        return rc
     for st in sts:
         if st.error:
             report_error(st)
@@ -1607,7 +1630,10 @@ def commit_hint(repo, name, msg, rels=None):
     message: a plain `git commit` if the message could be prepared for it
     (see propose_message), otherwise one with a message file."""
     if propose_message(repo, msg):
-        return "git commit", "it offers the proposed commit message"
+        # git drops SQUASH_MSG after any commit (also one that didn't use
+        # it) and on reset; our copy stays until the next proposal
+        copy = shown_path(repo, repo.state_file("FILESYNC_", "SQUASH_MSG"))
+        return "git commit", f"it offers the proposed commit message; a copy stays in {copy}"
     _, cmd = message_file(repo, name, msg, rels)
     return cmd, "a plain 'git commit' won't offer the proposed message: .git/SQUASH_MSG is in use"
 
@@ -2612,6 +2638,90 @@ def cmd_map(args, repo):
     return EXIT_OK
 
 
+def hook_reminders(ctx, repo):
+    """Terse notes on stderr about linked files needing attention: something
+    to sync, a strict violation, an error."""
+    sts = [evaluate(ctx, repo, link) for link in Registry(repo).links()]
+    attention = [st for st in sts if st.error or st.pending or st.violation]
+    for st in attention:
+        print(f"filesync: {paint(st.rel, 'yellow', 'err')}: {render(describe(st), 'err')}",
+              file=sys.stderr)
+    if any(st.pending for st in attention):
+        print("filesync: run 'git filesync pull <file>' to sync", file=sys.stderr)
+    if any(st.violation for st in attention):
+        print("filesync: see 'git filesync status' and 'git filesync diff <file>' "
+              "for strict violations", file=sys.stderr)
+
+
+def pushed_revs():
+    """Commits a push sends: from the pre-push hook's stdin ('<local ref>
+    <local sha> <remote ref> <remote sha>' per ref; deletions skipped).
+    Run by hand from a terminal: HEAD."""
+    if sys.stdin is None or sys.stdin.isatty():
+        return ["HEAD"]
+    revs = []
+    for line in sys.stdin:
+        parts = line.split()
+        if len(parts) == 4 and parts[1].strip("0"):
+            revs.append(parts[1])
+    return revs
+
+
+def push_check(ctx, repo):
+    """pre-push: links in the pushed commits whose synced upstream commit is
+    not on the upstream server (e.g. pulled from an unpushed commit of a
+    mapped checkout) - others couldn't find their base. Warns on stderr;
+    True if such a link was found."""
+    found = {}       # (url, commit) -> [rels]
+    for rev in pushed_revs():
+        p = repo.git(["config", "--blob", f"{rev}:{REGISTRY}", "--list", "-z"], check=False)
+        if p.returncode:
+            continue          # no (readable) registry in that commit
+        sources, files = parse_registry(p.stdout)
+        for rel, v in sorted(files.items()):
+            url = sources.get(v.get("source", ""), {}).get("url")
+            if url and v.get("commit"):
+                rels = found.setdefault((url, v["commit"]), [])
+                if rel not in rels:
+                    rels.append(rel)
+    unpushed = False
+    for (url, commit), rels in found.items():
+        on = ctx.on_server(url, commit)
+        if on:
+            continue
+        what = paint(", ".join(rels), "yellow", "err")
+        if on is None:
+            print(f"filesync: {what}: cannot check whether upstream commit {commit[:12]} "
+                  f"is on the server ({url} not reachable)", file=sys.stderr)
+        else:
+            print(f"filesync: {what}: synced from upstream commit {commit[:12]}, which is "
+                  f"not on the server ({url}) - push it there first", file=sys.stderr)
+            unpushed = True
+    return unpushed
+
+
+def cmd_hook(ctx, repo, args):
+    """Run by the installed hooks (HOOKS). Reminders on stderr; pre-push also
+    checks the pushed commits (filesync.pushCheck = warn | error | off).
+    Exit code EXIT_REFUSED only to refuse a push."""
+    hook_reminders(ctx, repo)
+    if args.name != "pre-push":
+        return EXIT_OK
+    mode = out(repo.git(["config", "filesync.pushCheck"], check=False)).lower() or "warn"
+    if mode not in ("warn", "error", "off"):
+        warn(f"filesync.pushCheck: unknown value '{mode}', using 'warn'")
+        mode = "warn"
+    if mode == "off" or not push_check(ctx, repo):
+        return EXIT_OK
+    if mode == "error":
+        print(paint("filesync: push refused (filesync.pushCheck = error)", "boldred", "err"),
+              file=sys.stderr)
+        return EXIT_REFUSED
+    print("filesync: pushing anyway (refuse such pushes: git config filesync.pushCheck error)",
+          file=sys.stderr)
+    return EXIT_OK
+
+
 def hook_dir(repo, action):
     hp = out(repo.git(["config", "core.hooksPath"], check=False))
     if hp:
@@ -2628,13 +2738,15 @@ def hook_dir(repo, action):
 
 
 def hook_snippet(cmd):
-    return (f"# {HOOK_MARKER}: remind about pending file syncs (never blocks)\n"
-            f"{cmd} </dev/null || true\n")
+    return (f"# {HOOK_MARKER}: reminders about linked files; blocks a push only "
+            "with filesync.pushCheck = error\n"
+            f"{cmd}\n")
 
 
 def is_our_hook_line(line):
     s = line.strip()
-    return s.startswith(f"# {HOOK_MARKER}:") or s.startswith("git filesync status --hook")
+    return s.startswith((f"# {HOOK_MARKER}:", "git filesync hook ",
+                         "git filesync status --hook"))     # the latter: before 0.7
 
 
 def cmd_install_hooks(repo, args):
@@ -2644,10 +2756,20 @@ def cmd_install_hooks(repo, args):
         f = hookdir / name
         snippet = hook_snippet(cmd)
         if f.exists():
-            if HOOK_MARKER in f.read_text(encoding="utf-8", errors="replace"):
+            text = f.read_bytes().decode("utf-8", "replace")
+            lines = text.splitlines(keepends=True)
+            at = next((i for i, ln in enumerate(lines) if is_our_hook_line(ln)), None)
+            if at is None:
+                print(f"{name}: {paint('hook exists', 'yellow')}, add these lines to {f}:\n{snippet}")
+                continue
+            # ours: replace our lines with the current ones, in the same place
+            rest = [ln for ln in lines if not is_our_hook_line(ln)]
+            new = "".join(rest[:at] + [snippet] + rest[at:])
+            if new == text:
                 print(f"{name}: already installed")
             else:
-                print(f"{name}: {paint('hook exists', 'yellow')}, add these lines to {f}:\n{snippet}")
+                f.write_bytes(new.encode("utf-8"))
+                print(f"{name}: {paint('updated', 'green')}")
             continue
         f.write_bytes(("#!/bin/sh\n" + snippet + "exit 0\n").encode())
         f.chmod(0o755)
@@ -2714,7 +2836,6 @@ def main(argv=None):
                    help="also list all linked files with their sources")
     p.add_argument("--exit-code", action="store_true",
                    help="exit with 1 if something is to sync or a strict file is modified")
-    p.add_argument("--hook", action="store_true", help="terse output for git hooks")
 
     p = sub.add_parser("pull", parents=[common], help="sync file(s) from upstream")
     p.add_argument("files", nargs="*", help="files or directories")
@@ -2839,8 +2960,11 @@ def main(argv=None):
     p.add_argument("--global", dest="glob", action="store_true",
                    help="use the global git config instead of this repository's")
 
-    sub.add_parser("install-hooks", parents=[colorp], help="install pre-push/post-merge reminder hooks")
-    sub.add_parser("uninstall-hooks", parents=[colorp], help="remove the reminder hooks again")
+    sub.add_parser("install-hooks", parents=[colorp], help="install the pre-push/post-merge hooks")
+    sub.add_parser("uninstall-hooks", parents=[colorp], help="remove the hooks again")
+    p = sub.add_parser("hook", parents=[colorp], help="what the installed hooks run")
+    p.add_argument("name", choices=list(HOOKS))
+    p.add_argument("hook_args", nargs=argparse.REMAINDER, help="the hook's arguments")
 
     argv = list(sys.argv[1:] if argv is None else argv)
     extra = []
@@ -2866,10 +2990,13 @@ def main(argv=None):
             return cmd_install_hooks(repo, args)
         if args.cmd == "uninstall-hooks":
             return cmd_uninstall_hooks(repo, args)
+        if args.cmd == "hook":
+            args.no_fetch = args.name == "post-merge"    # pre-push: online anyway
         ctx = Context(args, repo)
         return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
                 "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
-                "diff": cmd_diff, "difftool": cmd_difftool}[args.cmd](ctx, repo, args)
+                "diff": cmd_diff, "difftool": cmd_difftool,
+                "hook": cmd_hook}[args.cmd](ctx, repo, args)
     except FsError as e:
         error(str(e))
         return EXIT_ERROR

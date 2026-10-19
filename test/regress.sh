@@ -163,7 +163,8 @@ up() { (cd "$T/upstream" && sedi "$1" lib.c && git commit -qam "$2" && git push 
 new_repo downstream
 OUT=$(git filesync add src/lib.c "$URL" -p lib.c 2>&1)
 check "add stages, like git add" "$(git status --porcelain | oneline)" "A  .git-filesync A  src/lib.c "
-check "add: says how to commit" "$(echo "$OUT" | grep -cxE '    git commit|\(it offers the proposed commit message\)')" "2"
+check "add: says how to commit" "$(echo "$OUT" | grep -cxE '    git commit|\(it offers the proposed commit message; a copy stays in \.git/FILESYNC_SQUASH_MSG\)')" "2"
+check "add: copy of the proposed message" "$(head -1 .git/FILESYNC_SQUASH_MSG)" "$(head -1 .git/SQUASH_MSG)"
 git commit -q --no-edit
 check "add + commit: status clean" "$(st)" ""
 check "add + commit: file and entry" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync src/lib.c "
@@ -205,6 +206,7 @@ check "conflict: message prepared for git commit" \
 git checkout -q src/lib.c 2>/dev/null
 git reset -q --hard
 check "git reset drops the prepared message" "$(ls "$(git rev-parse --git-dir)/SQUASH_MSG" 2>/dev/null)" ""
+check "... but the copy stays" "$(head -1 .git/FILESYNC_SQUASH_MSG | cut -d' ' -f1-2)" "Sync src/lib.c"
 
 # mapped to the local checkout, unpushed upstream commits are seen and warned
 git filesync map "$URL" "$T/upstream" >/dev/null
@@ -240,13 +242,56 @@ check "own hooks removed" "$(ls .git/hooks/pre-push .git/hooks/post-merge 2>/dev
 # uninstall-hooks must remove only our lines.
 printf '#!/bin/sh\necho mine\n' > .git/hooks/pre-push
 chmod +x .git/hooks/pre-push
-git filesync install-hooks 2>/dev/null | sed -n '/^# git-filesync/,/|| true$/p' >> .git/hooks/pre-push
+git filesync install-hooks 2>/dev/null | sed -n '/^# git-filesync/,/^git filesync hook/p' >> .git/hooks/pre-push
 printf '#!/bin/sh\necho other\n' > .git/hooks/post-merge
 git filesync uninstall-hooks >/dev/null
 check "foreign hook: own lines removed" "$(cat .git/hooks/pre-push)" "$(printf '#!/bin/sh\necho mine')"
 check "foreign hook: still executable" "$([ -x .git/hooks/pre-push ] && echo yes)" "yes"
 check "foreign hook without snippet untouched" "$(cat .git/hooks/post-merge)" "$(printf '#!/bin/sh\necho other')"
 rm -f .git/hooks/pre-push .git/hooks/post-merge
+
+# hooks of an older version are updated in place, other lines kept
+printf '#!/bin/sh\necho mine\n# git-filesync: old\ngit filesync status --hook </dev/null || true\nexit 0\n' \
+  > .git/hooks/post-merge
+check "install-hooks: old hook updated" "$(git filesync install-hooks 2>/dev/null | grep -c '^post-merge: updated')" "1"
+check "updated hook: new command, rest kept" "$(sed -n '2p;4,5p' .git/hooks/post-merge | oneline)" \
+  "echo mine git filesync hook post-merge \"\$@\" </dev/null || true exit 0 "
+check "install-hooks again: nothing to do" "$(git filesync install-hooks 2>/dev/null | grep -c 'already installed')" "2"
+git filesync uninstall-hooks >/dev/null
+
+# pre-push: a pushed file synced to an upstream commit that isn't on the
+# server (pulled from an unpushed commit of the mapped checkout)
+git filesync map "$URL" "$T/upstream" >/dev/null
+(cd "$T/upstream" && echo unpushed >> lib.c && git commit -qam "unpushed line")
+check "pull from an unpushed upstream commit" "$(rc git filesync pull --no-edit --overwrite src/lib.c)" "0"
+UNPUSHED=$(git -C "$T/upstream" rev-parse --short=12 HEAD)
+PUSH="refs/heads/main $(git rev-parse HEAD) refs/heads/main 0000000000000000000000000000000000000000"
+check "pre-push: unpushed upstream commit reported" "$(echo "$PUSH" | git filesync hook pre-push origin x 2>&1 \
+  | grep -c "^filesync: src/lib.c: synced from upstream commit $UNPUSHED, which is not on the server")" "1"
+check "pre-push: only a warning by default" "$(echo "$PUSH" | rc git filesync hook pre-push origin x)" "0"
+check "pre-push: nothing pushed, nothing checked" \
+  "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'not on the server')" "0"
+git config filesync.pushCheck off
+check "pushCheck=off: no check" "$(echo "$PUSH" | git filesync hook pre-push origin x 2>&1 | grep -c 'not on the server')" "0"
+git config filesync.pushCheck error
+check "pushCheck=error: refused" "$(echo "$PUSH" | rc git filesync hook pre-push origin x)" "3"
+
+# the installed hook: refuses with pushCheck=error, otherwise never blocks
+git init -q --bare "$T/downstream-remote.git"
+git remote add origin "$T/downstream-remote.git"
+git filesync install-hooks >/dev/null
+check "installed hook refuses the push" "$(rc git push -q origin HEAD:main)" "1"
+check "push --no-verify skips the hook" "$(rc git push -q --no-verify origin HEAD:main)" "0"
+git commit -q --allow-empty -m "after no-verify"
+check "failing git-filesync doesn't block a push" "$(rc git -c alias.filesync='!exit 1' push -q origin HEAD:main)" "0"
+git commit -q --allow-empty -m "once more"
+(cd "$T/upstream" && git push -q origin main)
+check "upstream pushed: not reported" "$(echo "$PUSH" | git filesync hook pre-push origin x 2>&1 | grep -c 'not on the server')" "0"
+check "upstream pushed: push goes through" "$(rc git push -q origin HEAD:main)" "0"
+git config --unset filesync.pushCheck
+git filesync uninstall-hooks >/dev/null
+git remote remove origin
+git filesync map "$URL" --unset >/dev/null
 
 # output into a pipe that is closed early
 check "broken pipe no traceback" "$(git filesync status 2>&1 | head -1 | grep -c Traceback)" "0"
@@ -414,7 +459,8 @@ git commit -q --no-edit
 # All commands, including the pre-push hook, with network access forbidden
 # (GIT_ALLOW_PROTOCOL=file: any http/https/ssh access fails loudly). Allowed
 # on stderr are only the 'not pushed' warning and the hook's 'filesync: ...'
-# lines.
+# lines - the push check asks the upstream server, which fails here and is
+# reported ("Cloning" its cache first).
 (cd "$T/coA" && echo v3 > x.c && git commit -qam v3)
 git init -q --bare "$T/sOff-remote.git"
 git remote add origin "$T/sOff-remote.git"
@@ -430,7 +476,7 @@ ERR=$(
     git commit -q --allow-empty -m p
     git push -q origin HEAD:main
     git filesync map
-  } 2>&1 >/dev/null | grep -vE 'not pushed|^filesync: '
+  } 2>&1 >/dev/null | grep -vE 'not pushed|^filesync: |^Cloning '
 )
 check "offline: no errors/warnings in any command" "$ERR" ""
 check "offline: pull got v3 from checkout" "$(cat x.c)" "v3"
@@ -514,7 +560,7 @@ check "strict violation reported (uncommitted)" "$(git filesync status -s src/ba
 check "strict violation in long format" \
   "$(git filesync status src/bar.h | grep -cE "^${TAB}modified:[[:space:]]+src/bar\.h  \(NOT ALLOWED: strict\)")" "1"
 check "strict violation exit code" "$(rc git filesync status --exit-code src/bar.h)" "1"
-check "strict violation in hook output" "$(git filesync status --hook 2>&1 | grep -c 'NOT ALLOWED')" "1"
+check "strict violation in hook output" "$(git filesync hook pre-push </dev/null 2>&1 | grep -c 'NOT ALLOWED')" "1"
 check "pull refuses strict merge" "$(rc git filesync pull --no-edit src/bar.h)" "2"
 check "pull --all continues after strict error" "$(git filesync pull --all --no-edit 2>&1 | grep -c '^error:')" "0"
 check "non-strict file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
@@ -682,7 +728,7 @@ check "status --exit-code" "$(rc git filesync status --exit-code)" "1"
 check "status: advice.statusHints=false" "$(git -c advice.statusHints=false filesync status | grep -c '(use ')" "0"
 check "status -v: all files listed" \
   "$(git filesync status -v | grep -A6 '^Linked files:' | grep -cE "^${TAB}(unmodified|adapted):")" "5"
-check "status --hook: adapted alone is quiet" "$(git filesync status --hook 2>&1 | grep -c 'c\.c')" "0"
+check "hook: adapted alone is quiet" "$(git filesync hook pre-push </dev/null 2>&1 | grep -c 'c\.c')" "0"
 
 # pull refuses to overwrite uncommitted changes, unless --autostash
 check "pull refuses uncommitted changes" "$(rc git filesync pull --no-edit d.c)" "2"
@@ -1102,7 +1148,7 @@ check "deleted upstream: short code" "$(st gone.c)" "X"
 check "deleted upstream: unlink hint" "$(git filesync status | grep -c 'git filesync unlink <file>')" "1"
 check "deleted upstream: status rc 0" "$(rc git filesync status)" "0"
 check "deleted upstream: --exit-code" "$(rc git filesync status --exit-code gone.c)" "1"
-check "deleted upstream: hook" "$(git filesync status --hook 2>&1 | grep -c 'gone.c: upstream deleted')" "1"
+check "deleted upstream: hook" "$(git filesync hook pre-push </dev/null 2>&1 | grep -c 'gone.c: upstream deleted')" "1"
 
 # pull follows the rename; a committed adaptation is merged across it
 sedi 's/^e$/e-local/' r.c

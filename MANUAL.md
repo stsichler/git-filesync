@@ -139,7 +139,7 @@ or lift the restriction (`git filesync set --no-strict FILE`).
 | [`mv OLD NEW`](#mv) | move a linked file and its link |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
 | [`map [URL [DIR]]`](#map) | use a local checkout of upstream |
-| [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks) | reminder hooks |
+| [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks) | hooks: reminders, push check |
 
 Commands named like a Git command behave like it (`status`, `pull`, `diff`,
 `difftool`, `add`, `mv`; `source` like `git remote`): same kind of output,
@@ -170,7 +170,6 @@ directory stands for all linked files below it. Options follow the command
 | `-s`, `--short` | short format, three columns |
 | `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one also the [newer tags](#newer-tags) of upstream |
 | `--exit-code` | exit with 1 if something is to sync or a strict file is modified |
-| `--hook` | terse output on stderr, used by the [reminder hooks](#install-hooks-uninstall-hooks) |
 
 `status` looks at each linked file in three independent respects:
 
@@ -639,11 +638,45 @@ safe, the next run clones anew.
 
 ### `install-hooks`, `uninstall-hooks`
 
-`install-hooks` adds a `pre-push` hook (fetches and warns) and a
-`post-merge` hook (cached state only). They report pending syncs, errors and
-strict violations, and never block. If a hook already exists, the lines to
-add are printed instead. With `core.hooksPath` set, the hooks go there (with
-a warning, as other repositories may share that directory).
+`install-hooks` adds a `pre-push` hook (fetches) and a `post-merge` hook
+(cached state only). Both report pending syncs, errors and strict
+violations on stderr. If a hook already exists, the lines to add are
+printed instead; hooks installed by an older version are updated. With
+`core.hooksPath` set, the hooks go there (with a warning, as other
+repositories may share that directory).
+
+**Push check:** the `pre-push` hook also looks at the commits being pushed:
+a linked file synced to an upstream commit that isn't on the upstream
+server – typically pulled from an unpushed commit of a [mapped
+checkout](#map) – is reported:
+
+```
+filesync: src/foo.c: synced from upstream commit 1a2b3c4d5e6f, which is not on the server (https://github.com/owner/lib.git) - push it there first
+```
+
+Others couldn't find that version as the base for their next `pull`. The
+check asks the server itself (via the cache clone, whatever is mapped): the
+commit must be on one of its branches or tags. Like Git with submodules, it
+only warns by default; `filesync.pushCheck` sets what happens:
+
+| `filesync.pushCheck` | Effect |
+|---|---|
+| `warn` (default) | report, push anyway |
+| `error` | report and refuse the push (`git push --no-verify` skips it) |
+| `off` | no check |
+
+```sh
+git config filesync.pushCheck error            # this repository
+git config --global filesync.pushCheck error   # all repositories
+```
+
+A server that can't be reached is reported, but never refuses the push.
+Apart from `error`, the hooks never block – not even if git-filesync itself
+fails or is missing.
+
+The hooks run `git filesync hook pre-push` / `hook post-merge`, which are
+not meant to be run by hand (from a terminal, `hook pre-push` checks
+`HEAD`).
 
 `uninstall-hooks` deletes hook files that only contain the git-filesync
 lines; from other hooks it removes just those lines.
@@ -731,6 +764,12 @@ whatever its message, and on `git reset`.
 - Several commands in a row (e.g. `add` for some files and `pull
   --no-commit` for others, then one commit for all of them) collect their
   messages there.
+- A copy stays in `.git/FILESYNC_SQUASH_MSG` until the next proposal (the
+  path is printed along with the hint to commit). It brings the message
+  back if `SQUASH_MSG` is gone – after a commit that was aborted with an
+  empty message and then made with another one, after `git reset`, or
+  after `git commit -m`:
+  `git commit -e -F .git/FILESYNC_SQUASH_MSG`.
 - A `SQUASH_MSG` that git-filesync didn't write (e.g. from `git merge
   --squash`) is left alone. The tool then keeps the message in
   `.git/FILESYNC_MSG_*` and prints a `git commit -e -F …` command that uses

@@ -93,7 +93,8 @@ afterwards.
 - Optional local checkout of the upstream repository instead of fetching – works offline
 - Git LFS upstream, downstream, both or neither
 - Correct with differing line-ending conventions (`core.autocrlf`, `text=auto`)
-- Colored output, reminder hooks, CI-friendly exit codes
+- Colored output, CI-friendly exit codes, hooks: reminders, and a warning
+  when a push refers to upstream commits that aren't pushed yet
 - One self-contained Python script, standard library only
 
 ## Installation
@@ -172,7 +173,7 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `unlink PATH…`, `mv OLD NEW` | remove or move links |
 | `source [ACTION …]` | list sources; rename, change URL, branch or tag |
 | `map [URL [DIR]]` | use a local checkout of the upstream repository instead of fetching |
-| `install-hooks`, `uninstall-hooks` | reminder hooks for `push` and `merge` |
+| `install-hooks`, `uninstall-hooks` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |
 
 `git filesync <command> -h` lists the options of a command. The
 **[manual](MANUAL.md)** describes all commands and options in detail,
