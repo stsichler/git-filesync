@@ -2682,37 +2682,60 @@ def hook_reminders(ctx, repo):
 
 
 def pushed_revs(hook_args):
-    """Commits a push sends: from the pre-push hook's stdin ('<local ref>
-    <local sha> <remote ref> <remote sha>' per ref; deletions skipped).
-    Run by hand - git always passes the remote's name and URL: HEAD. (Not
-    stdin.isatty(): on Windows that's also true for NUL, i.e. </dev/null.)"""
+    """(commits a push sends, commits the remote has there): from the
+    pre-push hook's stdin ('<local ref> <local sha> <remote ref> <remote
+    sha>' per ref; deletions skipped). Run by hand - git always passes the
+    remote's name and URL: (HEAD, nothing). (Not stdin.isatty(): on Windows
+    that's also true for NUL, i.e. </dev/null.)"""
     if not hook_args or sys.stdin is None:
-        return ["HEAD"]
-    revs = []
+        return ["HEAD"], []
+    revs, remote = [], []
     for line in sys.stdin:
         parts = line.split()
         if len(parts) == 4 and parts[1].strip("0"):
             revs.append(parts[1])
-    return revs
+            if parts[3].strip("0"):
+                remote.append(parts[3])
+    return revs, remote
+
+
+def registry_entries(repo, rev):
+    """[(url, synced commit, rel)] of the links in .git-filesync at rev
+    (none if it has no readable one, or rev isn't here)."""
+    p = repo.git(["config", "--blob", f"{rev}:{REGISTRY}", "--list", "-z"], check=False)
+    if p.returncode:
+        return []
+    sources, files = parse_registry(p.stdout)
+    entries = []
+    for rel, v in sorted(files.items()):
+        url = sources.get(v.get("source", ""), {}).get("url")
+        if url and v.get("commit"):
+            entries.append((url, v["commit"], rel))
+    return entries
 
 
 def push_check(ctx, repo, hook_args):
     """pre-push: links in the pushed commits whose synced upstream commit is
     not on the upstream server (e.g. pulled from an unpushed commit of a
-    mapped checkout) - others couldn't find their base. Warns on stderr;
-    True if such a link was found."""
+    mapped checkout) - others couldn't find their base. Entries the remote
+    already has (in the commits the push replaces, or on its remote-tracking
+    branches) were checked when they were pushed and are skipped, so a push
+    usually needs no request upstream. Warns on stderr; True if such a link
+    was found."""
+    revs, remote = pushed_revs(hook_args)
+    if hook_args:
+        remote += out(repo.git(["for-each-ref", "--format=%(objectname)",
+                                f"refs/remotes/{hook_args[0]}/"], check=False)).split()
+    known = {(norm_url(url), commit) for rev in dict.fromkeys(remote)
+             for url, commit, _ in registry_entries(repo, rev)}
     found = {}       # (url, commit) -> [rels]
-    for rev in pushed_revs(hook_args):
-        p = repo.git(["config", "--blob", f"{rev}:{REGISTRY}", "--list", "-z"], check=False)
-        if p.returncode:
-            continue          # no (readable) registry in that commit
-        sources, files = parse_registry(p.stdout)
-        for rel, v in sorted(files.items()):
-            url = sources.get(v.get("source", ""), {}).get("url")
-            if url and v.get("commit"):
-                rels = found.setdefault((url, v["commit"]), [])
-                if rel not in rels:
-                    rels.append(rel)
+    for rev in revs:
+        for url, commit, rel in registry_entries(repo, rev):
+            if (norm_url(url), commit) in known:
+                continue
+            rels = found.setdefault((url, commit), [])
+            if rel not in rels:
+                rels.append(rel)
     unpushed = False
     for (url, commit), rels in found.items():
         on = ctx.on_server(url, commit)

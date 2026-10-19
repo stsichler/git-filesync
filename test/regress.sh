@@ -278,17 +278,27 @@ check "pushCheck=off: no check" "$(echo "$PUSH" | git filesync hook pre-push ori
 git config filesync.pushCheck error
 check "pushCheck=error: refused" "$(echo "$PUSH" | rc git filesync hook pre-push origin x)" "3"
 
+# entries the remote already has are not checked again: those in the
+# commit the push replaces ...
+KNOWN=$(git rev-parse HEAD)
+git commit -q --allow-empty -m "on top"
+check "pre-push: entries of the replaced commit skipped" \
+  "$(echo "refs/heads/main $(git rev-parse HEAD) refs/heads/main $KNOWN" | rc git filesync hook pre-push origin x)" "0"
+
 # the installed hook: refuses with pushCheck=error, otherwise never blocks
 git init -q --bare "$T/downstream-remote.git"
 git remote add origin "$T/downstream-remote.git"
 git filesync install-hooks >/dev/null
 check "installed hook refuses the push" "$(rc git push -q origin HEAD:main)" "1"
 check "push --no-verify skips the hook" "$(rc git push -q --no-verify origin HEAD:main)" "0"
+# ... and those on the remote's remote-tracking branches (origin/main now)
+check "pre-push: entries on the remote's branches skipped" "$(echo "$PUSH" | rc git filesync hook pre-push origin x)" "0"
+check "pre-push: ... but checked for another remote" "$(echo "$PUSH" | rc git filesync hook pre-push other x)" "3"
 git commit -q --allow-empty -m "after no-verify"
 check "failing git-filesync doesn't block a push" "$(rc git -c alias.filesync='!exit 1' push -q origin HEAD:main)" "0"
 git commit -q --allow-empty -m "once more"
 (cd "$T/upstream" && git push -q origin main)
-check "upstream pushed: not reported" "$(echo "$PUSH" | git filesync hook pre-push origin x 2>&1 | grep -c 'not on the server')" "0"
+check "upstream pushed: not reported" "$(echo "$PUSH" | git filesync hook pre-push other x 2>&1 | grep -c 'not on the server')" "0"
 check "upstream pushed: push goes through" "$(rc git push -q origin HEAD:main)" "0"
 git config --unset filesync.pushCheck
 git filesync uninstall-hooks >/dev/null

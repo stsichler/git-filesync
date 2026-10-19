@@ -665,7 +665,10 @@ filesync: src/foo.c: synced from upstream commit 1a2b3c4d5e6f, which is not on t
 
 Others couldn't find that version as the base for their next `pull`. The
 check asks the server itself (via the cache clone, whatever is mapped): the
-commit must be on one of its branches or tags. Like Git with submodules, it
+commit must be on one of its branches or tags. Entries the remote already
+has – in the commits the push replaces, or on its remote-tracking branches
+(`origin/*`) – were checked when they were pushed and are skipped, so a
+push usually doesn't contact the upstream server at all. Like Git with submodules, it
 only warns by default; `filesync.pushCheck` sets what happens:
 
 | `filesync.pushCheck` | Effect |
