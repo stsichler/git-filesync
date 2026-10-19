@@ -16,6 +16,7 @@ last sync.
 ```console
 $ git filesync status
 Upstream changes to sync:
+  (use "git filesync diff --upstream <file>..." to see what pull would bring)
   (use "git filesync pull <file>..." to sync)
 	pending:    src/foo.c  (2 commits)
 

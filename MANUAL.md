@@ -184,6 +184,7 @@ and reports them in sections like `git status`:
 
 ```
 Upstream changes to sync:
+  (use "git filesync diff --upstream <file>..." to see what pull would bring)
   (use "git filesync pull <file>..." to sync)
 	pending:    src/foo.c  (2 commits)
 
@@ -340,12 +341,14 @@ behind).
 |---|---|
 | `--committed` | only the committed adaptations (synced → `HEAD`) |
 | `--upstream` | what `pull` would bring (synced → current master) |
+| `--commit REV`, `-b BRANCH`, `--tag TAG` | with `--upstream`: what `pull` with the same option would bring (synced → that revision, branch or tag); nothing is switched |
 | `--master-paths` | name files by their master path, for `git apply` in the master |
 
 ```sh
 git filesync diff                    # all local changes: synced master version -> working file
 git filesync diff --committed        # adaptations only: synced master version -> HEAD
 git filesync diff --upstream         # what `pull` would bring: synced -> current master
+git filesync diff --upstream --tag v1.3.0 src/foo.c   # what `pull --tag v1.3.0` would bring
 git filesync diff -- --stat          # anything after `--` goes to `git diff`
 ```
 
@@ -353,6 +356,14 @@ Without file arguments all linked files are covered. `diff` runs a single
 `git diff` in the slave repository, so pager, colors and diff options work as
 usual. With `--exit-code` or `--quiet` after `--`, exit code 1 means
 differences, like `git diff`.
+
+`--commit`, `-b` and `--tag` select the master version exactly like the
+same options of [`pull`](#pull) (`--commit` for one file only, files
+renamed in the master are followed), so replacing `pull` with
+`diff --upstream` in a command line previews its changes. They only work
+with `--upstream`; `.git-filesync` stays untouched. `pull --dry-run` tells
+whether the adaptations would merge cleanly; on conflicts it points to
+both diffs.
 
 **Upstreaming local changes:** `--master-paths` names the files by their
 path in the master, giving a patch that can be applied there:
@@ -372,7 +383,7 @@ your difftool (`diff.tool`); `OPTS` go to `git difftool` (e.g. `-t meld`).
 
 | Option | Effect |
 |---|---|
-| `--committed`, `--upstream` | as for `diff` |
+| `--committed`, `--upstream`, `--commit`, `-b`, `--tag` | as for `diff` |
 | `-y`, `--no-prompt` | don't ask before each file |
 | `--prompt` | ask even for explicitly given files |
 

@@ -666,7 +666,9 @@ check "status -s: three columns" "$(git filesync status -s | tr '\n' '|')" \
 
 # long format: sections like git status
 OUT=$(git filesync status)
-check "status: upstream section" "$(echo "$OUT" | grep -A4 '^Upstream changes to sync:' | grep -cE "^${TAB}pending:")" "3"
+check "status: upstream section" "$(echo "$OUT" | grep -A5 '^Upstream changes to sync:' | grep -cE "^${TAB}pending:")" "3"
+check "status: upstream hints, diff first" "$(echo "$OUT" | grep -A2 '^Upstream changes to sync:' | sed 1d | oneline)" \
+  '  (use "git filesync diff --upstream <file>..." to see what pull would bring)   (use "git filesync pull <file>..." to sync) '
 check "status: commit count" "$(echo "$OUT" | grep -cE "^${TAB}pending:[[:space:]]+b\.c  \(1 commit\)")" "1"
 check "status: adapted section" "$(echo "$OUT" | grep -A6 '^Locally adapted files:' | grep -cE "^${TAB}adapted:")" "3"
 check "status: strict note on adapted" "$(echo "$OUT" | grep -cE "^${TAB}adapted:[[:space:]]+e\.c  \(NOT ALLOWED: strict\)")" "1"
@@ -1315,6 +1317,28 @@ check "pull --dry-run --tag" "$(git filesync pull --dry-run --tag v1.0 a.c | gre
 check "pull --dry-run --tag -b" \
   "$(git filesync pull --dry-run --tag v1.0 -b maint a.c | grep -c '^would: Move a.c from .* (tag v1.0 on maint)')" "1"
 check "pull --dry-run --tag: nothing changed" "$(git status --porcelain)" ""
+
+# diff/difftool --upstream with --commit / -b / --tag: what that pull would
+# bring (synced: main = 5-rc); nothing is switched
+check "diff --upstream --tag" "$(git filesync diff --upstream --tag v1.0 a.c | changes)" "-5-rc +5 "
+check "diff --upstream --tag: only differing files" \
+  "$(git filesync diff --upstream --tag v1.1 -- --name-only)" "a.c"
+check "diff --upstream -b" "$(git filesync diff --upstream -b maint a.c | changes)" "-5-rc +5 "
+check "diff --upstream --commit" "$(git filesync diff --upstream --commit v1.1 a.c | changes)" "-5-rc +5-v11 "
+check "difftool --upstream --tag: temp copy of the tag's version" \
+  "$(git filesync difftool -y --upstream --tag v1.0 a.c | grep -c "upstream-$(git -C ../co12 rev-parse --short v1.0)")" "1"
+check "diff --upstream --tag: nothing changed" "$(git status --porcelain)" ""
+check "diff --tag without --upstream" "$(rc git filesync diff --tag v1.0 a.c)" "2"
+check "diff --upstream --commit: one file only" "$(rc git filesync diff --upstream --commit v1.0)" "2"
+check "diff --upstream: missing tag" "$(rc git filesync diff --upstream --tag v9 a.c)" "2"
+
+# pull --dry-run with a conflict points to both diffs, with the same options
+sedi 's/^5-rc$/5-local/' a.c
+git commit -qam "adapt 5"
+check "pull --dry-run: conflict hint" "$(git filesync pull --dry-run --tag v1.1 a.c | grep -c \
+  "^hint: compare the adaptations ('git filesync diff a.c') with the upstream changes \
+('git filesync diff --upstream --tag v1.1 a.c')$")" "1"
+git reset -q --hard HEAD^
 
 # an uncommitted source rename doesn't block pull; it goes into the sync commit
 git filesync source rename "$SRC12-2" lib12 >/dev/null

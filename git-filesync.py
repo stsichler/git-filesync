@@ -77,10 +77,13 @@ follow the command.
                                 (one `git diff`, OPTS passed to it)
         --committed             only committed adaptations (synced -> HEAD)
         --upstream              what pull would bring (synced -> master)
+        --commit REV, -b BRANCH, --tag TAG
+                                with --upstream: what pull with these
+                                options would bring (nothing is switched)
         --master-paths          master paths, for `git apply -3` in the master
 
     difftool [PATH...] [-- OPTS]  the same in the configured difftool
-        --committed, --upstream as for diff
+        --committed, --upstream, --commit, -b, --tag  as for diff
         -y, --no-prompt         don't ask before each file (default: ask if
                                 no files are given)
         --prompt                ask even for explicitly given files
@@ -1429,7 +1432,9 @@ def print_long(slave, sts, verbose):
         up = upstream_state(st)
         if up:
             up_rows.append((up[0], st.rel, up[1], "dim"))
-    section("Upstream changes to sync:", ['use "git filesync pull <file>..." to sync']
+    section("Upstream changes to sync:",
+            ['use "git filesync diff --upstream <file>..." to see what pull would bring',
+             'use "git filesync pull <file>..." to sync']
             + (['use "git filesync unlink <file>..." to keep files deleted in the master']
                if any(r[0] == "deleted" for r in up_rows) else []),
             up_rows, "yellow")
@@ -1631,19 +1636,38 @@ def commit_staged(slave, name, msg, args, done, rels=None):
     return EXIT_OK
 
 
+def commit_target(st, rev):
+    """(commit, blob, path) a sync to master revision rev records (--commit):
+    the file at its synced path or, if renamed upstream, at the new one."""
+    link, src = st.link, st.src
+    new = src.require(rev)
+    for path in dict.fromkeys((link.path, st.new_path)):
+        blob = src.blob_at(new, path)
+        if blob:
+            return src.last_change(new, path), blob, path
+    raise FsError(f"'{link.path}' does not exist at {rev}")
+
+
+def check_target_args(args, links):
+    """--commit / -b / --tag (pull, diff --upstream): the master version to sync to."""
+    if args.commit and (args.branch or args.tag):
+        raise FsError("--commit cannot be combined with -b or --tag")
+    if args.commit and len(links) != 1:
+        raise FsError("--commit requires exactly one file")
+
+
+def target_opts(args):
+    """The --commit / -b / --tag options given, for hints."""
+    return "".join(f" {opt} {cmd_arg(val)}" for opt, val in (
+        ("--commit", args.commit), ("-b", args.branch), ("--tag", args.tag)) if val)
+
+
 def pull_one(slave, reg, st, args):
     link, src = st.link, st.src
     path = st.new_path                   # differs from link.path if renamed upstream
     new, new_blob = st.new, st.new_blob
     if args.commit:
-        new = src.require(args.commit)
-        for path in dict.fromkeys((link.path, st.new_path)):
-            new_blob = src.blob_at(new, path)
-            if new_blob:
-                break
-        else:
-            raise FsError(f"'{link.path}' does not exist at {args.commit}")
-        new = src.last_change(new, path)
+        new, new_blob, path = commit_target(st, args.commit)
     elif st.moved and st.moved[0] == "deleted":
         rel = cmd_arg(st.rel)
         raise FsError(f"{st.rel}: '{st.moved[1]}' was deleted in {src.label} "
@@ -1709,6 +1733,10 @@ def pull_one(slave, reg, st, args):
         verb = "restore" if new_blob == st.old_blob and discard else "sync"
         print(f"{st.rel}: would {verb} to {link.name}@{src.short(new)}"
               + (f" ({'; '.join(notes)})" if notes else ""))
+        if conflicts:
+            rel = cmd_arg(st.rel)
+            print(f"hint: compare the adaptations ('git filesync diff {rel}') with the "
+                  f"upstream changes ('git filesync diff --upstream{target_opts(args)} {rel}')")
         return EXIT_OK
 
     old_path = link.path
@@ -1789,13 +1817,14 @@ def move_to_source(reg, name, lks, url, spec, named=None):
     return desc + (f"; {name} keeps {plural(rest, 'other file')}" if rest else "")
 
 
-def retarget(ctx, reg, links, args):
-    """Point links at another branch or tag (pull -b/--tag) before they are
-    evaluated. A source whose files are all selected is changed itself;
-    otherwise the selected files move to the source with the same URL and
-    ref keys (found or created) - the source is split. Returns ({rel:
-    previous ref as text}, descriptions of the changes, rels left out);
-    files whose master lacks the branch or tag are reported and left out."""
+def retarget(ctx, reg, links, args, report=True):
+    """Point links at another branch or tag (pull -b/--tag; diff --upstream
+    -b/--tag with a dry-run registry) before they are evaluated. A source
+    whose files are all selected is changed itself; otherwise the selected
+    files move to the source with the same URL and ref keys (found or
+    created) - the source is split. Returns ({rel: previous ref as text},
+    descriptions of the changes, rels left out); files whose master lacks
+    the branch or tag are reported and left out."""
     groups = {}
     for lk in links:
         groups.setdefault(lk.name, []).append(lk)
@@ -1816,8 +1845,9 @@ def retarget(ctx, reg, links, args):
         desc = move_to_source(reg, name, lks, url, spec)
         repinned.update({lk.rel: spec_text(old) for lk in lks})
         descs.append(desc)
-        print(("would: " if args.dry_run else "") + desc)
-    if repinned and not args.dry_run:
+        if report:
+            print(("would: " if reg.dry_run else "") + desc)
+    if repinned and not reg.dry_run:
         reg.finish()
     return repinned, descs, failed
 
@@ -1843,10 +1873,7 @@ def cmd_pull(ctx, slave, args):
         links = select_links(slave, reg, args.files)
     else:
         raise FsError("specify file(s) or --all")
-    if args.commit and (args.branch or args.tag):
-        raise FsError("--commit cannot be combined with -b or --tag")
-    if args.commit and len(links) != 1:
-        raise FsError("--commit requires exactly one file")
+    check_target_args(args, links)
     rc, done = EXIT_OK, 0
     switch = args.tag or args.branch
     repinned, descs, failed = retarget(ctx, reg, links, args) if switch else ({}, [], set())
@@ -1888,20 +1915,37 @@ def cmd_pull(ctx, slave, args):
 def diff_pairs(ctx, slave, args):
     """(st, name, base, other) blob ids for every linked file with a difference.
     base = last synced master version; other = local file (None if missing),
-    or with --upstream the current master version. All as actual content in
-    this repo's normalized form (LFS resolved), so eol conventions and LFS
-    pointers don't show up."""
+    or with --upstream the master version pull would sync to (with the same
+    --commit / -b / --tag). All as actual content in this repo's normalized
+    form (LFS resolved), so eol conventions and LFS pointers don't show up."""
+    if (args.commit or args.branch or args.tag) and not args.upstream:
+        raise FsError("--commit, -b and --tag require --upstream")
     rc = EXIT_OK
     pairs = []
     reg = Registry(slave)
-    for link in select_links(slave, reg, args.files):
+    reg.dry_run = True                   # -b/--tag: switch the sources in memory only
+    links = select_links(slave, reg, args.files)
+    check_target_args(args, links)
+    if args.branch or args.tag:
+        _, _, failed = retarget(ctx, reg, links, args, report=False)
+        if failed:
+            rc = EXIT_ERROR
+            links = [lk for lk in links if lk.rel not in failed]
+    for link in links:
         st = evaluate(ctx, slave, link)
         if st.error:
             report_error(st)
             rc = EXIT_ERROR
             continue
         if args.upstream:
-            if not st.changed:
+            if args.commit:
+                try:
+                    st.new, st.new_blob, st.new_path = commit_target(st, args.commit)
+                except FsError as e:
+                    error(f"{st.rel}: {e}")
+                    rc = EXIT_ERROR
+                    continue
+            if not st.new_blob or st.new_blob == st.old_blob:   # unchanged or deleted
                 continue
         elif args.committed:
             if st.committed != "adapted":
@@ -1914,8 +1958,8 @@ def diff_pairs(ctx, slave, args):
                 raise FsError(f"synced version {st.old_blob[:12]} unavailable")
             base = slave.content_id(base, st.rel)
             if args.upstream:
-                other = slave.store(slave.normalize(st.src.read_content(st.new_blob, link.path),
-                                                    st.rel))
+                other = slave.store(slave.normalize(st.src.read_content(st.new_blob,
+                                                                        st.new_path), st.rel))
             elif args.committed:
                 other = slave.content_id(st.head_blob, st.rel)
             elif st.local == "missing":
@@ -2696,6 +2740,10 @@ def main(argv=None):
                        help="show what 'pull' would bring instead (synced -> current master)")
         g.add_argument("--committed", action="store_true",
                        help="only the committed adaptations (synced -> HEAD)")
+        p.add_argument("--commit", metavar="REV",
+                       help="with --upstream: as for pull, synced -> REV (exactly one file)")
+        p.add_argument("-b", "--branch", help="with --upstream: as for pull, synced -> BRANCH")
+        p.add_argument("--tag", help="with --upstream: as for pull, synced -> TAG")
         if name == "diff":
             p.add_argument("--master-paths", action="store_true",
                            help="name files by their master path, for 'git apply' in the master")
