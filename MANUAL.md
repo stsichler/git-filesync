@@ -13,7 +13,7 @@ For motivation and installation see the [README](README.md).
 - [Commands](#commands)
   - [Common options](#common-options)
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool)
-  - [`add`](#add) · [`set`](#set) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map)
+  - [`add`](#add) · [`set`](#set) · [`edit`](#edit) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map)
   - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted upstream](#files-renamed-or-deleted-upstream)
@@ -77,7 +77,7 @@ file. Git-config format:
   it (not the branch tip at sync time). One file version thus always gives
   the same entry, and commits that don't touch the file – unpushed, rebased
   or not – don't matter.
-- Everything else may be edited by hand, e.g. the upstream path:
+- Everything else may be edited by hand – with [`edit`](#edit), or e.g.
   `git config -f .git-filesync file.src/foo.c.path lib/new_name.c` (a file
   renamed upstream is [followed by `pull`](#files-renamed-or-deleted-upstream)
   anyway). [`source`](#source) changes URL, branch and tag of a source.
@@ -135,6 +135,7 @@ or lift the restriction (`git filesync set --no-strict FILE`).
 | [`difftool [PATH…] [-- OPTS]`](#difftool) | the same in your difftool |
 | [`add FILE\|DIR URL\|SOURCE`](#add) | link a file – or all files of a directory – to the upstream repository |
 | [`set PATH… OPTIONS`](#set) | change the link of linked files: source, upstream path, strict |
+| [`edit`](#edit) | edit `.git-filesync` in the editor |
 | [`unlink PATH…`](#unlink) | remove links, keep the files |
 | [`mv OLD NEW`](#mv) | move a linked file and its link |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
@@ -530,6 +531,25 @@ git filesync set src/ --source https://github.com/me/lib-fork.git    # all files
 git filesync set src/foo.c -p lib/foo_v2.c
 git filesync set cfg/ --tag v1.3.0      # like pull --tag, without syncing
 ```
+
+### `edit`
+
+`edit` – open `.git-filesync` in your editor, like `git config --edit`
+(`GIT_EDITOR`, `core.editor`, `VISUAL`, `EDITOR`). Afterwards the file is
+checked and staged, like after [`set`](#set):
+
+- If it can no longer be read, `edit` fails and stages nothing; run it
+  again to fix the file.
+- Gaps that `status` would report – a file whose `[source]` doesn't exist,
+  a source without `url` or without branch and tag, a file without `path`,
+  `commit` or `blob`, a source no file uses – are shown as warnings.
+- Without changes, nothing happens.
+
+For the usual changes, the commands that know what they mean are safer:
+[`set`](#set) (source, path, strict of files), [`source`](#source) (URL,
+branch, tag, name of a source), [`unlink`](#unlink), [`mv`](#mv). `edit`
+keeps whatever you write: a changed `commit` or `blob` changes what counts
+as an adaptation.
 
 ### `unlink`
 

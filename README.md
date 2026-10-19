@@ -170,6 +170,7 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced upstream version |
 | `add FILE\|DIR URL\|SOURCE` | link a file (or all files of an upstream directory) to upstream |
 | `set PATH… OPTIONS` | change source, upstream path or strict of linked files |
+| `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
 | `unlink PATH…`, `mv OLD NEW` | remove or move links |
 | `source [ACTION …]` | list sources; rename, change URL, branch or tag |
 | `map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |

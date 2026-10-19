@@ -128,6 +128,10 @@ follow the command.
         --strict, --no-strict   mark as strict / allow adaptations again
         -n, --dry-run           only show what would change
 
+    edit                        open .git-filesync in the editor (like `git
+                                config --edit`); afterwards it is checked
+                                and staged
+
     unlink PATH...              remove links (the files are kept)
     mv OLD NEW                  move a linked file (git mv), keeping its link
         -n, --dry-run           (both) only show what would be done
@@ -2497,6 +2501,56 @@ def cmd_set(ctx, repo, args):
     return EXIT_OK
 
 
+def registry_problems(reg):
+    """What a hand-edited .git-filesync lacks: messages for entries that
+    status would report as broken (and unused sources)."""
+    problems = []
+    for name, s in sorted(reg.sources.items()):
+        if not s.get("url"):
+            problems.append(f'[source "{name}"] has no url')
+        if not source_ref(s):
+            problems.append(f'[source "{name}"] has neither branch nor tag')
+        if not source_files(reg, name):
+            problems.append(f'[source "{name}"] is not used by any file')
+    for rel, v in sorted(reg.files.items()):
+        what = f'[file "{rel}"]'
+        problem = path_problem(rel)
+        if problem:
+            problems.append(f"{what}: {problem}")
+        if v.get("source", "") not in reg.sources:
+            problems.append(f"{what}: no [source \"{v.get('source', '')}\"]")
+        if not v.get("path"):
+            problems.append(f"{what} has no path")
+        if not (v.get("commit") and v.get("blob")):
+            problems.append(f"{what} lacks commit or blob (the synced version)")
+    return problems
+
+
+def cmd_edit(ctx, repo, args):
+    """Open .git-filesync in the editor (like `git config --edit`), then
+    check and stage it."""
+    path = repo.top / REGISTRY
+    if not path.exists():
+        raise FsError(f"no {REGISTRY} yet - link files with 'git filesync add'")
+    before = path.read_bytes()
+    # git's own editor logic: GIT_EDITOR, core.editor, VISUAL, EDITOR
+    if subprocess.run(["git", "config", "-f", REGISTRY, "--edit"], cwd=repo.top).returncode:
+        raise FsError("the editor failed; nothing staged")
+    if path.exists() and path.read_bytes() == before:
+        print(f"{REGISTRY}: no changes")
+        return EXIT_OK
+    try:
+        reg = Registry(repo)
+    except FsError as e:
+        raise FsError(f"{e} - not staged; fix it with 'git filesync edit'")
+    for problem in registry_problems(reg):
+        warn(f"{REGISTRY}: {problem}")
+    reg.finish()
+    print(f'{REGISTRY} staged (use "git filesync status" to see what changes, '
+          '"git filesync pull <file>..." to sync)')
+    return EXIT_OK
+
+
 def source_files(reg, name):
     return sorted(rel for rel, f in reg.files.items() if f.get("source") == name)
 
@@ -2970,6 +3024,9 @@ def main(argv=None):
                    help="allow local adaptations again")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
 
+    sub.add_parser("edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then check "
+                                                  "and stage it")
+
     p = sub.add_parser("unlink", parents=[colorp], help="remove links (the files are kept)")
     p.add_argument("files", nargs="+", help="files or directories")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be unlinked")
@@ -3048,6 +3105,7 @@ def main(argv=None):
             args.no_fetch = args.name == "post-merge"    # pre-push: online anyway
         ctx = Context(args, repo)
         return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
+                "edit": cmd_edit,
                 "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
                 "diff": cmd_diff, "difftool": cmd_difftool,
                 "hook": cmd_hook}[args.cmd](ctx, repo, args)

@@ -1499,6 +1499,25 @@ git commit -qm tag
 check "set -n" "$(git filesync set a.c --strict -n)" "would: a.c: strict"
 check "set -n: nothing changed" "$(git status --porcelain)" ""
 
+# edit: .git-filesync in the editor (here: scripts as GIT_EDITOR), then
+# checked and staged
+check "edit without changes" "$(git filesync edit)" ".git-filesync: no changes"
+printf 'git config -f "$1" file.a.c.strict true\n' > "$T/ed-strict.sh"
+OUT=$(GIT_EDITOR="sh $T/ed-strict.sh" git filesync edit 2>&1)
+check "edit: change staged" "$(git diff --cached --name-only) $(git config -f .git-filesync file.a.c.strict)" \
+  ".git-filesync true"
+check "edit: says so" "$(echo "$OUT" | grep -c '^.git-filesync staged')" "1"
+git commit -qm "strict by edit"
+printf 'git config -f "$1" --unset source.%s.url\n' "$SRC13" > "$T/ed-nourl.sh"
+check "edit: gaps are warned about" \
+  "$(GIT_EDITOR="sh $T/ed-nourl.sh" git filesync edit 2>&1 | grep -c "warning: .git-filesync: \[source \"$SRC13\"\] has no url")" "1"
+git reset -q --hard
+printf 'echo "[file" >> "$1"\n' > "$T/ed-broken.sh"
+check "edit: unreadable result fails" "$(GIT_EDITOR="sh $T/ed-broken.sh" rc git filesync edit)" "2"
+check "edit: ... and stages nothing" "$(git diff --cached --name-only)" ""
+git checkout -q .git-filesync
+check "edit without .git-filesync" "$( (new_repo "$T/s13e" && rc git filesync edit) )" "2"
+
 
 # =============================================================================
 # summary
