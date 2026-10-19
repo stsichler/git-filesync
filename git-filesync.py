@@ -10,9 +10,9 @@
 """
 git-filesync - keep individual files in sync between Git repositories.
 
-The "slave" repository lists its synced files in .git-filesync at its root
-(git-config format, like .gitmodules), each linked to a file in a "master"
-repository:
+A repository lists its synced files in .git-filesync at its root
+(git-config format, like .gitmodules), each linked to a file in an
+upstream repository:
 
     [source "owner/lib"]
         url = https://github.com/owner/lib.git
@@ -20,16 +20,16 @@ repository:
         tag = v1.2             ; are looked for; optional: pinned to the tag
     [file "src/foo.c"]
         source = owner/lib
-        path = lib/foo.c       ; path in the master
+        path = lib/foo.c       ; path in the upstream repository
         strict = true          ; optional: no local modifications allowed
-        commit = <master commit of the last sync>
-        blob = <blob id of the master's file at that commit>
+        commit = <upstream commit of the last sync>
+        blob = <blob id of the upstream file at that commit>
 
-A link records the master version the file is based on (commit/blob);
+A link records the upstream version the file is based on (commit/blob);
 local adaptations on top of it are allowed and kept by a 3-way merge on
 pull, unless the file is marked strict.
 
-Commands (run inside the slave repository; without a command: status).
+Commands (run inside the repository; without a command: status).
 PATH may be a file or a directory (= all linked files below it); options
 follow the command.
 
@@ -38,8 +38,8 @@ follow the command.
                                 adaptations, uncommitted changes
         -s, --short             short format: upstream/committed/worktree
                                 columns (upstream: P pending, O older,
-                                D diverged, R renamed, X deleted in the
-                                master, N new; E error)
+                                D diverged, R renamed, X deleted
+                                upstream, N new; E error)
         -v, --verbose           also list all linked files with their sources
                                 (pinned ones with the newest tag: the first
                                 tagged commit after theirs on the branch's
@@ -49,14 +49,14 @@ follow the command.
                                 file is modified
         --hook                  terse output on stderr (for git hooks)
 
-    pull PATH... | --all        sync to the master's version of the file and
-                                commit with a message listing the master
+    pull PATH... | --all        sync to the upstream version of the file and
+                                commit with a message listing the upstream
                                 commits since the last sync; adaptations are
                                 merged, uncommitted changes refused; a file
-                                renamed in the master is followed, one
+                                renamed upstream is followed, one
                                 deleted there is reported
         --all                   all files with something to sync
-        --commit REV            sync to this master revision (one file;
+        --commit REV            sync to this upstream revision (one file;
                                 also backwards)
         -b, --branch BRANCH     switch the files to following BRANCH, and sync
         --tag TAG               switch the files to (pin them to) TAG, and
@@ -73,14 +73,15 @@ follow the command.
         --dry-run               only report what would happen (incl.
                                 merge conflicts); change nothing
 
-    diff [PATH...] [-- OPTS]    local changes vs. the synced master version
+    diff [PATH...] [-- OPTS]    local changes vs. the synced upstream version
                                 (one `git diff`, OPTS passed to it)
         --committed             only committed adaptations (synced -> HEAD)
-        --upstream              what pull would bring (synced -> master)
+        --upstream              what pull would bring (synced -> upstream)
         --commit REV, -b BRANCH, --tag TAG
                                 with --upstream: what pull with these
                                 options would bring (nothing is switched)
-        --master-paths          master paths, for `git apply -3` in the master
+        --for-upstream          a patch for `git apply -3` in the upstream
+                                repository (upstream paths)
 
     difftool [PATH...] [-- OPTS]  the same in the configured difftool
         --committed, --upstream, --commit, -b, --tag  as for diff
@@ -88,27 +89,27 @@ follow the command.
                                 no files are given)
         --prompt                ask even for explicitly given files
 
-    add FILE URL|SOURCE         link FILE to a file in a master repository
+    add FILE URL|SOURCE         link FILE to a file in an upstream repository
                                 (SOURCE: exactly that [source]; URL: the
                                 source with that URL and branch/tag, else a
                                 new one named 'owner/repo' after the URL, with
                                 a number appended if taken); an existing FILE's
-                                master version is detected, a missing FILE
+                                upstream version is detected, a missing FILE
                                 is fetched; FILE and .git-filesync are
                                 staged like `git add` - a plain `git commit`
                                 offers the proposed message
-    add DIR URL|SOURCE          link every file below a master directory
+    add DIR URL|SOURCE          link every file below an upstream directory
                                 (-p, default: same as DIR) as DIR/...; files
                                 already linked are skipped
-        -b, --branch BRANCH     master branch (default: master's default
+        -b, --branch BRANCH     upstream branch (default: its default
                                 branch or that of SOURCE); with --tag: the
                                 branch to look for newer tags on
-        --tag TAG               pin to a master tag instead of a branch
-        -p, --path PATH         path in the master (default: same as FILE)
+        --tag TAG               pin to an upstream tag instead of a branch
+        -p, --path PATH         upstream path (default: same as FILE)
         --include PATTERN       DIR: only files matching (gitignore-like,
-                                relative to the master directory; repeatable)
+                                relative to the upstream directory; repeatable)
         --exclude PATTERN       DIR: skip files matching (repeatable)
-        --commit REV            master revision FILE corresponds to
+        --commit REV            upstream revision FILE corresponds to
         --strict                FILE must stay an exact copy
         --force                 relink an already linked file
         -n, --dry-run           only show what would be linked
@@ -117,13 +118,13 @@ follow the command.
                                 for sources; only .git-filesync is changed
                                 (and staged), the synced version is kept
                                 where it still applies
-        --source URL|SOURCE     another master (fork, moved repository) or
+        --source URL|SOURCE     another upstream (fork, moved repository) or
                                 [source]; a source whose files are all given
                                 is changed itself
         -b, --branch BRANCH     as for add; without --source: follow BRANCH
         --tag TAG               as for add; without --source: pin to TAG
                                 (like pull -b/--tag, without syncing)
-        -p, --path PATH         another path in the master (one file); the
+        -p, --path PATH         another upstream path (one file); the
                                 synced version is looked up as for add
         --strict, --no-strict   mark as strict / allow adaptations again
         -n, --dry-run           only show what would change
@@ -162,7 +163,7 @@ follow the command.
 Exit codes: 0 ok, 1 unfinished (conflicts, not committed, --exit-code),
 2 error.
 
-Files stored in Git LFS (in the master, the slave, both or neither) are
+Files stored in Git LFS (upstream, in this repository, both or neither) are
 handled transparently, as are differing line-ending conventions. Output is
 colored like git's (color.filesync / color.ui, --color, NO_COLOR).
 
@@ -194,7 +195,7 @@ HOOKS = {
 }
 REGISTRY_HEADER = ("# git-filesync: files of this repository that are kept in sync with\n"
                    "# files in other repositories. Maintained by 'git filesync'; [file]\n"
-                   "# commit/blob record the master version each file is based on.\n")
+                   "# commit/blob record the upstream version each file is based on.\n")
 
 
 class FsError(Exception):
@@ -249,8 +250,8 @@ _clean_env = None
 def clean_env():
     """Environment without repository-local GIT_* variables.
 
-    Hooks may run with GIT_DIR & co. set for the slave repository; commands
-    that operate on a master repository must not inherit them.
+    Hooks may run with GIT_DIR & co. set for this repository; commands
+    that operate on an upstream repository must not inherit them.
     """
     global _clean_env
     if _clean_env is None:
@@ -263,7 +264,7 @@ def clean_env():
     return _clean_env
 
 
-# For commands that may contact a master's server: the blobless cache fetches
+# For commands that may contact an upstream server: the blobless cache fetches
 # missing file contents lazily, which only protocol v2 allows (v0 refuses
 # "wants" of objects not advertised). The default of Git 2.27/2.28, or a
 # configured protocol.version=0, would break it; servers without v2 answer
@@ -373,21 +374,21 @@ def lfs_smudge(run, data, path, where):
 
 
 # --------------------------------------------------------------------------
-# master side
+# upstream side
 # --------------------------------------------------------------------------
 
 class Source:
-    """A Git repository providing the master versions of synced files."""
+    """A Git repository providing the upstream versions of synced files."""
 
-    def __init__(self, repo, ref, label, local=False, note=None):
-        self.repo, self.ref, self.label = Path(repo), ref, label
+    def __init__(self, workdir, ref, label, local=False, note=None):
+        self.dir, self.ref, self.label = Path(workdir), ref, label
         self.local = local   # mapped local checkout: ref is its local branch
         self.note = note     # remark about the ref choice, shown by status
         self._newer = {}     # newer_tags() / is_on_branch() results
 
     def git(self, args, **kw):
         kw.setdefault("env", clean_env())
-        return git(PROTOCOL_V2 + ["-C", self.repo] + list(args), **kw)
+        return git(PROTOCOL_V2 + ["-C", self.dir] + list(args), **kw)
 
     def head_ref(self):
         """Full ref name checked out in a local checkout, None if detached."""
@@ -464,7 +465,7 @@ class Source:
                         check=False).returncode == 0
 
     def branch_refs(self, contains=None):
-        """{branch name: ref} of the master's branches (only those containing
+        """{branch name: ref} of the upstream branches (only those containing
         commit `contains`, if given): the remote-tracking branches, in a local
         checkout overridden by its local branches of the same name."""
         prefixes = ["refs/remotes/origin/"] + (["refs/heads/"] if self.local else [])
@@ -622,10 +623,10 @@ class Source:
 
 
 class Context:
-    """Creates and caches Sources; fetches each master repository at most once."""
+    """Creates and caches Sources; fetches each upstream repository at most once."""
 
-    def __init__(self, args, slave=None):
-        self.slave_top = slave.top if slave else None
+    def __init__(self, args, repo=None):
+        self.repo_top = repo.top if repo else None
         self.fetch = not getattr(args, "no_fetch", False)
         self.force_remote = getattr(args, "remote", False)
         # fetch even for a tag already cached, to learn about newer tags
@@ -649,7 +650,7 @@ class Context:
         if self._mappings is None:
             # repo-local mapping overrides a global one (later entries win)
             self._mappings = {norm_url(u): d for _, _, u, d in
-                              local_mappings(cwd=self.slave_top)}
+                              local_mappings(cwd=self.repo_top)}
             self._local_ok = {}
         key = norm_url(url)
         if key not in self._local_ok:
@@ -663,7 +664,7 @@ class Context:
         return self._local_ok[key]
 
     def default_branch(self, url):
-        """Default branch of the master: from a mapped checkout or the cache
+        """Default branch upstream: from a mapped checkout or the cache
         when possible (works offline), otherwise asked from the server."""
         local = self.local_path(url)
         if local:
@@ -765,10 +766,10 @@ class Context:
 
 
 # --------------------------------------------------------------------------
-# slave side
+# this repository
 # --------------------------------------------------------------------------
 
-class Slave:
+class Repo:
     def __init__(self):
         p = git(["rev-parse", "--show-toplevel"], check=False)
         if p.returncode:
@@ -833,7 +834,7 @@ class Slave:
     def normalize(self, content, rel):
         """Upstream content as this repo stores it, LFS resolved: the form all
         comparisons and merges use, whatever the eol conventions and LFS use
-        of master and slave."""
+        upstream and here."""
         return self.read_content(self.as_local(content, rel), rel)
 
     def state_file(self, prefix, name):
@@ -895,7 +896,7 @@ def source_line(source):
 
 
 def ref_missing(ref, src):
-    """Message for a branch or tag that doesn't exist in the master."""
+    """Message for a branch or tag that doesn't exist upstream."""
     return f"{ref[0]} '{ref[1]}' not found in {src.label}"
 
 
@@ -942,11 +943,11 @@ def path_problem(rel):
 
 
 class Registry:
-    """The slave's .git-filesync: [source] and [file] sections."""
+    """The repository's .git-filesync: [source] and [file] sections."""
 
-    def __init__(self, slave):
-        self.slave = slave
-        self.path = slave.top / REGISTRY
+    def __init__(self, repo):
+        self.repo = repo
+        self.path = repo.top / REGISTRY
         self.sources, self.files = {}, {}
         self.dry_run = False      # only change the in-memory state
         if self.path.exists():
@@ -994,7 +995,7 @@ class Registry:
     def new_source_name(self, url):
         """Unused key for a new [source]: 'owner/repo' derived from the URL,
         with a number appended if that key already belongs to another source."""
-        base = repo_label(url) or "master"
+        base = repo_label(url) or "upstream"
         name, n = base, 2
         while name in self.sources:
             name, n = f"{base}-{n}", n + 1
@@ -1062,14 +1063,14 @@ class Registry:
             if not self.sources and not self.files:
                 self.path.unlink()
             else:
-                self.slave.fix_eol(self.path)
-        self.slave.git(["add", "-A", "--", REGISTRY])
+                self.repo.fix_eol(self.path)
+        self.repo.git(["add", "-A", "--", REGISTRY])
 
     def uncommitted(self):
         """[file] entries that differ from the committed .git-filesync in what
         they record about the file. Which [source] they belong to doesn't
         count: a changed source may go into any commit."""
-        p = self.slave.git(["config", "--blob", f"HEAD:{REGISTRY}", "--list", "-z"], check=False)
+        p = self.repo.git(["config", "--blob", f"HEAD:{REGISTRY}", "--list", "-z"], check=False)
         head = parse_registry(p.stdout)[1] if p.returncode == 0 else {}
 
         def base(entry):
@@ -1079,7 +1080,7 @@ class Registry:
 
 
 class Link:
-    """One [file] entry: a slave file linked to a file in a master repository."""
+    """One [file] entry: a file linked to a file in an upstream repository."""
 
     def __init__(self, reg, rel):
         self.reg, self.rel = reg, rel
@@ -1093,7 +1094,7 @@ class Link:
         problem = path_problem(self.rel)
         if problem:
             raise FsError(f"'{self.rel}' in {REGISTRY}: {problem}")
-        return self.reg.slave.top / self.rel
+        return self.reg.repo.top / self.rel
 
     @property
     def source(self):
@@ -1109,20 +1110,20 @@ class Link:
 
     @property
     def strict(self):
-        """The file must stay an exact copy of the master version."""
+        """The file must stay an exact copy of the upstream version."""
         return self.v.get("strict", "").lower() in ("true", "yes", "on", "1")
 
     def set(self, name, value):
         self.reg.set_file(self.rel, name, value)
 
 
-def select_links(slave, reg, paths):
+def select_links(repo, reg, paths):
     """Links for the given files/directories (all links if none given)."""
     if not paths:
         return reg.links()
     result = []
     for s in paths:
-        rel = slave.rel(slave.user_path(s))
+        rel = repo.rel(repo.user_path(s))
         if rel in reg.files:
             result.append(Link(reg, rel))
             continue
@@ -1142,12 +1143,12 @@ def select_links(slave, reg, paths):
 # evaluation
 # --------------------------------------------------------------------------
 
-def local_equiv(slave, src, blob, rel, path):
-    """Master blob as this repo would store it; None if unavailable."""
+def local_equiv(repo, src, blob, rel, path):
+    """Upstream blob as this repo would store it; None if unavailable."""
     if not blob:
         return None
     try:
-        return slave.as_local(src.read_content(blob, path), rel)
+        return repo.as_local(src.read_content(blob, path), rel)
     except FsError:
         return None
 
@@ -1156,9 +1157,9 @@ class BaseUnavailable(FsError):
     pass
 
 
-def matches_base(slave, src, link, oid, read):
-    """Does a slave blob (id oid; read() returns its raw bytes) equal the
-    synced master version, i.e. the base recorded in .git-filesync?
+def matches_base(repo, src, link, oid, read):
+    """Does a blob of this repo (id oid; read() returns its raw bytes) equal
+    the synced upstream version, i.e. the base recorded in .git-filesync?
     Raises BaseUnavailable if that version can't be read."""
     if oid == link.blob:
         return True
@@ -1166,11 +1167,11 @@ def matches_base(slave, src, link, oid, read):
         return False
     try:
         ptr = lfs_pointer(src.read_blob(link.blob))
-        if ptr:   # master stores it in LFS: compare against the pointer's hash first
+        if ptr:   # upstream stores it in LFS: compare against the pointer's hash first
             data = read()
             if (hashlib.sha256(data).hexdigest(), len(data)) == ptr or lfs_pointer(data) == ptr:
                 return True
-        return oid == slave.as_local(src.read_content(link.blob, link.path), link.rel)
+        return oid == repo.as_local(src.read_content(link.blob, link.path), link.rel)
     except BaseUnavailable:
         raise
     except FsError as e:
@@ -1183,18 +1184,18 @@ class FileState:
     """What evaluate() finds out about a linked file."""
     link: object
     rel: str
-    old: str                  # synced master commit and blob (the base)
+    old: str                  # synced upstream commit and blob (the base)
     old_blob: str
-    new_path: str             # master path, the new one if renamed upstream
+    new_path: str             # upstream path, the new one if renamed there
     strict: bool
     error: str = None
     warnings: list = field(default_factory=list)
-    src: object = None        # Source of the master
-    new: str = None           # master commit and blob a pull would sync to
+    src: object = None        # Source of the upstream repository
+    new: str = None           # upstream commit and blob a pull would sync to
     new_blob: str = None
-    count: int = 0            # master commits touching the file since the sync
+    count: int = 0            # upstream commits touching the file since the sync
     behind: int = 0           # ... or by how many the branch went back
-    has_old: bool = False     # synced commit exists in the master
+    has_old: bool = False     # synced commit exists upstream
     diverged: bool = False
     moved: tuple = None       # ('renamed' | 'deleted', path, commit)
     newest: list = None       # newer tags of a pinned source
@@ -1202,21 +1203,21 @@ class FileState:
     worktree: str = "clean"
     local: str = "clean"
     head_blob: str = None
-    changed: bool = False     # master version differs from the base
+    changed: bool = False     # upstream version differs from the base
     pending: bool = False     # something for pull to do
     violation: bool = False   # strict file modified
     repinned: str = None      # pull -b/--tag: the previous branch or tag
 
 
-def evaluate(ctx, slave, link):
+def evaluate(ctx, repo, link):
     """State of a linked file in three independent respects:
-    upstream  - synced master version vs. current master (changed/behind/
-                moved: renamed or deleted in the master)
-    committed - committed slave version vs. synced master version
+    upstream  - synced upstream version vs. current one (changed/behind/
+                moved: renamed or deleted upstream)
+    committed - committed version vs. synced upstream version
                 ('unmodified' | 'adapted' | None if not committed)
     worktree  - working file vs. committed version
                 ('clean' | 'modified' | 'deleted' | 'added' | 'missing')
-    local     - working file vs. synced master version ('clean' | 'modified'
+    local     - working file vs. synced upstream version ('clean' | 'modified'
                 | 'missing'); what a pull has to merge"""
     st = FileState(link=link, rel=link.rel, old=link.commit, old_blob=link.blob,
                    new_path=link.path, strict=link.strict)
@@ -1238,23 +1239,23 @@ def evaluate(ctx, slave, link):
 
     def base_matches(oid, read):
         try:
-            return matches_base(slave, src, link, oid, read)
+            return matches_base(repo, src, link, oid, read)
         except BaseUnavailable as e:
             if str(e) not in st.warnings:
                 st.warnings.append(str(e))
             return False
     try:
-        cur = slave.worktree_blob(link.target)
-        p = slave.git(["rev-parse", "--verify", "-q", f"HEAD:{link.rel}"], check=False)
+        cur = repo.worktree_blob(link.target)
+        p = repo.git(["rev-parse", "--verify", "-q", f"HEAD:{link.rel}"], check=False)
         head = st.head_blob = out(p) if p.returncode == 0 else None
         if head:
             st.committed = "unmodified" if base_matches(
-                head, lambda: slave.read_blob(head)) else "adapted"
+                head, lambda: repo.read_blob(head)) else "adapted"
         if cur is None:
             st.worktree = "deleted" if head else "missing"
         elif not head:
             st.worktree = "added"
-        elif slave.git(["diff", "--quiet", "HEAD", "--", lit(link.rel)],
+        elif repo.git(["diff", "--quiet", "HEAD", "--", lit(link.rel)],
                        check=False).returncode == 1:
             st.worktree = "modified"
         if cur is None:
@@ -1329,11 +1330,11 @@ def upstream_state(st):
     if st.moved:
         kind, path, commit = st.moved
         if kind == "deleted":
-            return "deleted", f"in the master, by {st.src.short(commit)}"
+            return "deleted", f"upstream, by {st.src.short(commit)}"
         return "renamed", f"{st.link.path} -> {path}" + (f", {plural(st.count, 'commit')}" if st.count else "")
     if st.changed:
         if st.behind:
-            what = "master branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
+            what = "upstream branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
             return "older", f"{what} is {plural(st.behind, 'commit')} older than last sync"
         if st.has_old and not st.diverged:
             return "pending", plural(st.count, "commit")
@@ -1384,24 +1385,24 @@ def short_code(st):
     return x + y + z
 
 
-def shown(slave, rel):
+def shown(repo, rel):
     """Path relative to the current directory, like git status shows it."""
-    return Path(os.path.relpath(slave.top / rel, slave.base)).as_posix()
+    return Path(os.path.relpath(repo.top / rel, repo.base)).as_posix()
 
 
-def print_short(slave, sts):
+def print_short(repo, sts):
     for st in sts:
         code = short_code(st)
         if code.strip() or st.violation:
             line = paint(code[0], "yellow") + paint(code[1], "cyan") + paint(code[2], "red")
             if code[0] == "E":
                 line = paint(code, "boldred")
-            print(f"{line} {shown(slave, st.rel)}" + (paint("  (strict!)", "boldred") if st.violation else ""))
+            print(f"{line} {shown(repo, st.rel)}" + (paint("  (strict!)", "boldred") if st.violation else ""))
 
 
-def print_long(slave, sts, verbose):
+def print_long(repo, sts, verbose):
     """Sections like `git status`."""
-    hints = out(slave.git(["config", "--type=bool", "advice.statusHints"], check=False)) != "false"
+    hints = out(repo.git(["config", "--type=bool", "advice.statusHints"], check=False)) != "false"
 
     def section(title, hint_lines, rows, style):
         if not rows:
@@ -1411,7 +1412,7 @@ def print_long(slave, sts, verbose):
             for h in hint_lines:
                 print(f"  ({h})")
         for label, rel, note, nstyle in rows:
-            line = paint(f"{label + ':':<12}{shown(slave, rel)}", style)
+            line = paint(f"{label + ':':<12}{shown(repo, rel)}", style)
             print(f"\t{line}" + (f"  {paint('(' + note + ')', nstyle)}" if note else ""))
         print()
 
@@ -1435,7 +1436,7 @@ def print_long(slave, sts, verbose):
     section("Upstream changes to sync:",
             ['use "git filesync diff --upstream <file>..." to see what pull would bring',
              'use "git filesync pull <file>..." to sync']
-            + (['use "git filesync unlink <file>..." to keep files deleted in the master']
+            + (['use "git filesync unlink <file>..." to keep files deleted upstream']
                if any(r[0] == "deleted" for r in up_rows) else []),
             up_rows, "yellow")
 
@@ -1461,7 +1462,7 @@ def print_long(slave, sts, verbose):
     if warnings:
         print("Warnings:")
         for rel, w in warnings:
-            print(f"\t{paint('warning:', 'yellow')} {shown(slave, rel)}: {w}")
+            print(f"\t{paint('warning:', 'yellow')} {shown(repo, rel)}: {w}")
         print()
 
     if not up_rows and len(ok) == len(sts):
@@ -1475,16 +1476,16 @@ def print_long(slave, sts, verbose):
 # commands
 # --------------------------------------------------------------------------
 
-def cmd_status(ctx, slave, args):
+def cmd_status(ctx, repo, args):
     """Like `git status`: exit code 0 unless --exit-code (1 = something to
     sync or a strict violation) or an error (2)."""
-    reg = Registry(slave)
-    links = select_links(slave, reg, args.paths)
+    reg = Registry(repo)
+    links = select_links(repo, reg, args.paths)
     if not links:
         if not (args.hook or args.short):
             print(f"no linked files ({REGISTRY} not found or empty)")
         return EXIT_OK
-    sts = [evaluate(ctx, slave, link) for link in links]
+    sts = [evaluate(ctx, repo, link) for link in links]
     attention = [st for st in sts if st.error or st.pending or st.violation]
     rc = EXIT_ERROR if any(st.error for st in sts) else \
         EXIT_PENDING if args.exit_code and attention else EXIT_OK
@@ -1502,9 +1503,9 @@ def cmd_status(ctx, slave, args):
         if st.error:
             report_error(st)
     if args.short:
-        print_short(slave, sts)
+        print_short(repo, sts)
     else:
-        print_long(slave, sts, args.verbose)
+        print_long(repo, sts, args.verbose)
     return rc
 
 
@@ -1527,7 +1528,7 @@ def merge3(ours, base, theirs, labels):
 def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discarded=False):
     link = st.link
     paths = dict.fromkeys((old_path, path))       # old and (if renamed) new path
-    # content goes back to the synced master version -> restore, not a sync
+    # content goes back to the synced upstream version -> restore, not a sync
     verb = "Restore" if new_blob == st.old_blob and discarded else "Sync"
     lines = [f"{verb} {st.rel} from {link.name}@{src.short(new)}", "",
              f"Upstream: {link.url} ({link.ref[1]}:{path})"]
@@ -1572,23 +1573,23 @@ def check_other_entries(reg, rels, args):
                       "and commit together")
 
 
-def message_file(slave, name, msg, rels=None):
+def message_file(repo, name, msg, rels=None):
     """Keep the proposed commit message in .git/FILESYNC_MSG_<name>; returns
     the file and the command that commits the files (default: name) and
     their entries with it."""
-    msgfile = slave.state_file("FILESYNC_MSG_", name)
+    msgfile = repo.state_file("FILESYNC_MSG_", name)
     msgfile.write_bytes(msg.encode("utf-8"))
     paths = " ".join([cmd_arg(r) for r in ([name] if rels is None else rels)] + [REGISTRY])
     return msgfile, f'git commit -e -F "{msgfile}" -- {paths}'
 
 
-def propose_message(slave, msg):
+def propose_message(repo, msg):
     """Also put a proposed commit message into .git/SQUASH_MSG, which a plain
     `git commit` (and IDEs) offer; git removes it after the next commit.
     Proposals of several commands are collected. A SQUASH_MSG of git's own
     (e.g. from merge --squash) is left alone. Returns True if done."""
-    squash = slave.gitdir / "SQUASH_MSG"
-    ours = slave.state_file("FILESYNC_", "SQUASH_MSG")     # copy of what we wrote
+    squash = repo.gitdir / "SQUASH_MSG"
+    ours = repo.state_file("FILESYNC_", "SQUASH_MSG")     # copy of what we wrote
     if squash.exists():
         prev = squash.read_text(encoding="utf-8", errors="replace")
         if not ours.exists() or ours.read_text(encoding="utf-8", errors="replace") != prev:
@@ -1601,35 +1602,35 @@ def propose_message(slave, msg):
     return True
 
 
-def commit_hint(slave, name, msg, rels=None):
+def commit_hint(repo, name, msg, rels=None):
     """(command, note) for committing staged changes with the proposed
     message: a plain `git commit` if the message could be prepared for it
     (see propose_message), otherwise one with a message file."""
-    if propose_message(slave, msg):
+    if propose_message(repo, msg):
         return "git commit", "it offers the proposed commit message"
-    _, cmd = message_file(slave, name, msg, rels)
+    _, cmd = message_file(repo, name, msg, rels)
     return cmd, "a plain 'git commit' won't offer the proposed message: .git/SQUASH_MSG is in use"
 
 
-def report_staged(slave, name, msg, done, rels=None, how="Commit with"):
+def report_staged(repo, name, msg, done, rels=None, how="Commit with"):
     """Tell how to commit what a command staged without committing."""
-    cmd, note = commit_hint(slave, name, msg, rels)
+    cmd, note = commit_hint(repo, name, msg, rels)
     print(f"{name}: {done}. {how}:\n    {cmd}\n({note})")
 
 
-def commit_staged(slave, name, msg, args, done, rels=None):
+def commit_staged(repo, name, msg, args, done, rels=None):
     """Commit the staged files (default: name) and their entries with the
     proposed message (in the editor unless --no-edit). With --no-commit,
     leave them staged and tell how to commit. done: e.g. 'synced and staged'."""
     rels = [name] if rels is None else rels
     if args.no_commit:
-        report_staged(slave, name, msg, paint(done, "green"), rels)
+        report_staged(repo, name, msg, paint(done, "green"), rels)
         return EXIT_OK
-    msgfile, _ = message_file(slave, name, msg, rels)
+    msgfile, _ = message_file(repo, name, msg, rels)
     cmd = ["git", "commit", "-F", str(msgfile)] + ([] if args.no_edit else ["-e"]) + \
         ["--"] + [lit(r) for r in rels] + [REGISTRY]
-    if subprocess.run(cmd, cwd=slave.top).returncode:
-        report_staged(slave, name, msg, paint("commit not done", "yellow")
+    if subprocess.run(cmd, cwd=repo.top).returncode:
+        report_staged(repo, name, msg, paint("commit not done", "yellow")
                       + "; changes stay staged", rels, "Commit later with")
         return EXIT_PENDING
     msgfile.unlink()
@@ -1637,7 +1638,7 @@ def commit_staged(slave, name, msg, args, done, rels=None):
 
 
 def commit_target(st, rev):
-    """(commit, blob, path) a sync to master revision rev records (--commit):
+    """(commit, blob, path) a sync to upstream revision rev records (--commit):
     the file at its synced path or, if renamed upstream, at the new one."""
     link, src = st.link, st.src
     new = src.require(rev)
@@ -1649,7 +1650,7 @@ def commit_target(st, rev):
 
 
 def check_target_args(args, links):
-    """--commit / -b / --tag (pull, diff --upstream): the master version to sync to."""
+    """--commit / -b / --tag (pull, diff --upstream): the upstream version to sync to."""
     if args.commit and (args.branch or args.tag):
         raise FsError("--commit cannot be combined with -b or --tag")
     if args.commit and len(links) != 1:
@@ -1662,7 +1663,7 @@ def target_opts(args):
         ("--commit", args.commit), ("-b", args.branch), ("--tag", args.tag)) if val)
 
 
-def pull_one(slave, reg, st, args):
+def pull_one(repo, reg, st, args):
     link, src = st.link, st.src
     path = st.new_path                   # differs from link.path if renamed upstream
     new, new_blob = st.new, st.new_blob
@@ -1681,7 +1682,7 @@ def pull_one(slave, reg, st, args):
     if dirty and args.autostash:
         if st.worktree != "modified":
             raise FsError(f"{st.rel}: --autostash can't set aside a {st.worktree} file")
-        stash = slave.read_content(slave.worktree_blob(link.target, write=True), st.rel)
+        stash = repo.read_content(repo.worktree_blob(link.target, write=True), st.rel)
     local_mod = st.committed == "adapted" if stash is not None else st.local == "modified"
     discard = args.overwrite and local_mod
     if st.strict and local_mod and not discard:
@@ -1704,17 +1705,17 @@ def pull_one(slave, reg, st, args):
         warn(f"{st.rel}: {w}")
 
     # all versions in this repo's normalized form, so that differing eol
-    # conventions (and LFS) of master and slave don't matter
-    theirs = slave.normalize(src.read_content(new_blob, path), st.rel)
+    # conventions (and LFS) upstream and here don't matter
+    theirs = repo.normalize(src.read_content(new_blob, path), st.rel)
     merged, conflicts = False, 0
     if local_mod and not discard:
-        base = local_equiv(slave, src, st.old_blob, st.rel, link.path)
+        base = local_equiv(repo, src, st.old_blob, st.rel, link.path)
         if not base:
             raise FsError(f"{st.rel}: base version {st.old_blob[:12]} unavailable; "
                           "cannot merge local modifications")
-        base = slave.read_content(base, st.rel)
-        ours = slave.read_content(st.head_blob if stash is not None else
-                                  slave.worktree_blob(link.target, write=True), st.rel)
+        base = repo.read_content(base, st.rel)
+        ours = repo.read_content(st.head_blob if stash is not None else
+                                  repo.worktree_blob(link.target, write=True), st.rel)
         old_label = src.short(st.old) if st.has_old else st.old_blob[:8]
         conflicts, content = merge3(ours, base, theirs,
                                     [f"{st.rel} (local)", f"upstream {old_label}",
@@ -1741,7 +1742,7 @@ def pull_one(slave, reg, st, args):
 
     old_path = link.path
     link.target.parent.mkdir(parents=True, exist_ok=True)
-    link.target.write_bytes(slave.to_worktree(content, st.rel))
+    link.target.write_bytes(repo.to_worktree(content, st.rel))
     if path != old_path:
         link.set("path", path)
     link.set("commit", new)
@@ -1751,21 +1752,21 @@ def pull_one(slave, reg, st, args):
     msg = build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discard)
     if conflicts:
         if stash is not None:
-            stashfile = slave.state_file("FILESYNC_STASH_", st.rel)
-            stashfile.write_bytes(slave.to_worktree(stash, st.rel))
+            stashfile = repo.state_file("FILESYNC_STASH_", st.rel)
+            stashfile.write_bytes(repo.to_worktree(stash, st.rel))
             print(f"{st.rel}: autostash kept in {stashfile} (not re-applied because of the conflicts)")
-        cmd, note = commit_hint(slave, st.rel, msg)
+        cmd, note = commit_hint(repo, st.rel, msg)
         print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}. "
               f"Resolve them, then run:\n    git add {cmd_arg(st.rel)}\n    {cmd}\n({note})")
         return EXIT_PENDING
-    slave.git(["add", "--", lit(st.rel)])
-    rc = commit_staged(slave, st.rel, msg, args, "synced and staged")
+    repo.git(["add", "--", lit(st.rel)])
+    rc = commit_staged(repo, st.rel, msg, args, "synced and staged")
     if stash is not None:
         # re-apply the stashed uncommitted changes on top of the synced version
-        head = slave.read_content(st.head_blob, st.rel)
+        head = repo.read_content(st.head_blob, st.rel)
         c2, data = merge3(content, head, stash, [f"{st.rel} (synced)", f"{st.rel} (HEAD)",
                                                  f"{st.rel} (autostash)"])
-        link.target.write_bytes(slave.to_worktree(data, st.rel))
+        link.target.write_bytes(repo.to_worktree(data, st.rel))
         if c2:
             print(f"{st.rel}: {paint(f'applying autostash resulted in {c2} conflict(s)', 'boldred')}"
                   " - resolve them in the working tree")
@@ -1823,7 +1824,7 @@ def retarget(ctx, reg, links, args, report=True):
     whose files are all selected is changed itself; otherwise the selected
     files move to the source with the same URL and ref keys (found or
     created) - the source is split. Returns ({rel: previous ref as text},
-    descriptions of the changes, rels left out); files whose master lacks
+    descriptions of the changes, rels left out); files whose upstream lacks
     the branch or tag are reported and left out."""
     groups = {}
     for lk in links:
@@ -1864,13 +1865,13 @@ def newest_hint(name, tag, line, newest):
             f"{newest_text(newest, line)} (use {switch.format(newest[0][0][0])})")
 
 
-def cmd_pull(ctx, slave, args):
-    reg = Registry(slave)
+def cmd_pull(ctx, repo, args):
+    reg = Registry(repo)
     reg.dry_run = args.dry_run
     if args.all:
         links = reg.links()
     elif args.files:
-        links = select_links(slave, reg, args.files)
+        links = select_links(repo, reg, args.files)
     else:
         raise FsError("specify file(s) or --all")
     check_target_args(args, links)
@@ -1882,7 +1883,7 @@ def cmd_pull(ctx, slave, args):
         links = [lk for lk in links if lk.rel not in failed]
     newest = {}
     for link in links:
-        st = evaluate(ctx, slave, link)
+        st = evaluate(ctx, repo, link)
         if st.error:
             report_error(st)
             rc = EXIT_ERROR
@@ -1894,17 +1895,17 @@ def cmd_pull(ctx, slave, args):
             continue
         done += 1
         try:
-            rc = max(rc, pull_one(slave, reg, st, args))
+            rc = max(rc, pull_one(repo, reg, st, args))
         except FsError as e:   # report and carry on with the other files
             error(str(e))
             rc = EXIT_ERROR
     # a switch that no sync commit took along (files unchanged): own commit
     if descs and not (args.dry_run or args.no_commit) and not reg.uncommitted() and \
-            slave.git(["diff", "--quiet", "HEAD", "--", REGISTRY], check=False).returncode == 1:
+            repo.git(["diff", "--quiet", "HEAD", "--", REGISTRY], check=False).returncode == 1:
         to = f"tag {args.tag}" if args.tag else f"branch {args.branch}"
         msg = (descs[0] if len(descs) == 1 else f"Switch sources to {to}\n\n"
                + "\n".join(f"- {d}" for d in descs)) + "\n"
-        rc = max(rc, commit_staged(slave, "sources", msg, args, "staged", rels=[]))
+        rc = max(rc, commit_staged(repo, "sources", msg, args, "staged", rels=[]))
     if args.all and not done and rc == EXIT_OK:
         print(paint("everything up to date", "green"))
     for name, (tag, line, new) in sorted(newest.items()):
@@ -1912,19 +1913,19 @@ def cmd_pull(ctx, slave, args):
     return rc
 
 
-def diff_pairs(ctx, slave, args):
+def diff_pairs(ctx, repo, args):
     """(st, name, base, other) blob ids for every linked file with a difference.
-    base = last synced master version; other = local file (None if missing),
-    or with --upstream the master version pull would sync to (with the same
+    base = last synced upstream version; other = local file (None if missing),
+    or with --upstream the upstream version pull would sync to (with the same
     --commit / -b / --tag). All as actual content in this repo's normalized
     form (LFS resolved), so eol conventions and LFS pointers don't show up."""
     if (args.commit or args.branch or args.tag) and not args.upstream:
         raise FsError("--commit, -b and --tag require --upstream")
     rc = EXIT_OK
     pairs = []
-    reg = Registry(slave)
+    reg = Registry(repo)
     reg.dry_run = True                   # -b/--tag: switch the sources in memory only
-    links = select_links(slave, reg, args.files)
+    links = select_links(repo, reg, args.files)
     check_target_args(args, links)
     if args.branch or args.tag:
         _, _, failed = retarget(ctx, reg, links, args, report=False)
@@ -1932,7 +1933,7 @@ def diff_pairs(ctx, slave, args):
             rc = EXIT_ERROR
             links = [lk for lk in links if lk.rel not in failed]
     for link in links:
-        st = evaluate(ctx, slave, link)
+        st = evaluate(ctx, repo, link)
         if st.error:
             report_error(st)
             rc = EXIT_ERROR
@@ -1953,54 +1954,56 @@ def diff_pairs(ctx, slave, args):
         elif st.local == "clean":
             continue
         try:
-            base = local_equiv(slave, st.src, st.old_blob, st.rel, link.path)
+            base = local_equiv(repo, st.src, st.old_blob, st.rel, link.path)
             if not base:
                 raise FsError(f"synced version {st.old_blob[:12]} unavailable")
-            base = slave.content_id(base, st.rel)
+            base = repo.content_id(base, st.rel)
             if args.upstream:
-                other = slave.store(slave.normalize(st.src.read_content(st.new_blob,
+                other = repo.store(repo.normalize(st.src.read_content(st.new_blob,
                                                                         st.new_path), st.rel))
             elif args.committed:
-                other = slave.content_id(st.head_blob, st.rel)
+                other = repo.content_id(st.head_blob, st.rel)
             elif st.local == "missing":
                 other = None
             else:
-                other = slave.content_id(slave.worktree_blob(link.target, write=True), st.rel)
+                other = repo.content_id(repo.worktree_blob(link.target, write=True), st.rel)
         except FsError as e:
             error(f"{st.rel}: {e}")
             rc = EXIT_ERROR
             continue
-        name = link.path if args.master_paths else st.rel
+        name = link.path if args.for_upstream else st.rel
         pairs.append((st, name, base, other))
     return rc, pairs
 
 
-def make_tree(slave, entries):
+def make_tree(repo, entries):
     """Tree object with the given (path, blob id) entries, via a temp index."""
     with tempfile.TemporaryDirectory(prefix="filesync-") as td:
         env = dict(os.environ, GIT_INDEX_FILE=str(Path(td) / "index"))
         if entries:
             data = "".join(f"100644 {oid}\t{path}\n" for path, oid in entries)
-            slave.git(["update-index", "--add", "--index-info"], data=data.encode(), env=env)
-        return out(slave.git(["write-tree"], env=env))
+            repo.git(["update-index", "--add", "--index-info"], data=data.encode(), env=env)
+        return out(repo.git(["write-tree"], env=env))
 
 
-def cmd_diff(ctx, slave, args):
-    """One `git diff <tree> <tree>` in the slave repo over all differing files:
+def cmd_diff(ctx, repo, args):
+    """One `git diff <tree> <tree>` in this repo over all differing files:
     real paths, the repo's diff settings and pager, options after `--`."""
-    rc, pairs = diff_pairs(ctx, slave, args)
+    if args.for_upstream and args.upstream:
+        raise FsError("--for-upstream cannot be combined with --upstream")
+    rc, pairs = diff_pairs(ctx, repo, args)
     if not pairs:
         return rc
-    left = make_tree(slave, [(n, b) for _, n, b, _ in pairs])
-    right = make_tree(slave, [(n, o) for _, n, _, o in pairs if o])
-    if args.master_paths:
-        prefixes = []                  # standard a/ b/: `git apply` in the master
+    left = make_tree(repo, [(n, b) for _, n, b, _ in pairs])
+    right = make_tree(repo, [(n, o) for _, n, _, o in pairs if o])
+    if args.for_upstream:
+        prefixes = []                  # standard a/ b/: `git apply` upstream
     else:
         prefixes = ["--src-prefix=synced/", "--dst-prefix=" + (
             "upstream/" if args.upstream else "committed/" if args.committed else "local/")]
     color = {"always": ["--color=always"], "never": ["--no-color"]}.get(args.color, [])
     p = subprocess.run(["git", "diff"] + color + prefixes + args.extra + [left, right],
-                       cwd=slave.top)
+                       cwd=repo.top)
     if p.returncode > 1:
         rc = EXIT_ERROR
     elif p.returncode == 1 and ("--exit-code" in args.extra or "--quiet" in args.extra):
@@ -2008,7 +2011,7 @@ def cmd_diff(ctx, slave, args):
     return rc
 
 
-def difftool_prompting(slave, args):
+def difftool_prompting(repo, args):
     """Ask before each file like `git difftool`: by default only when no files
     were given; -y/--no-prompt and difftool.prompt=false turn it off,
     --prompt turns it on."""
@@ -2016,34 +2019,34 @@ def difftool_prompting(slave, args):
         return True
     if args.no_prompt or args.files:
         return False
-    cfg = out(slave.git(["config", "--type=bool", "difftool.prompt"], check=False))
+    cfg = out(repo.git(["config", "--type=bool", "difftool.prompt"], check=False))
     return cfg != "false"
 
 
-def difftool_name(slave, extra):
+def difftool_name(repo, extra):
     for i, a in enumerate(extra):              # -t TOOL / --tool=TOOL passed after --
         if a.startswith("--tool="):
             return a.split("=", 1)[1]
         if a in ("-t", "--tool") and i + 1 < len(extra):
             return extra[i + 1]
     for key in ("diff.tool", "merge.tool"):
-        name = out(slave.git(["config", key], check=False))
+        name = out(repo.git(["config", key], check=False))
         if name:
             return name
     return "difftool"
 
 
-def cmd_difftool(ctx, slave, args):
+def cmd_difftool(ctx, repo, args):
     """Open each differing file in the configured difftool. Without --upstream
     the real working file is passed, so edits made in the tool are kept."""
-    rc, pairs = diff_pairs(ctx, slave, args)
+    rc, pairs = diff_pairs(ctx, repo, args)
     if not (args.upstream or args.committed):
         for st, _, _, other in pairs:
             if other is None:
                 print(f"{st.rel}: file missing, nothing to compare", file=sys.stderr)
         pairs = [p for p in pairs if p[3] is not None]
-    prompt = difftool_prompting(slave, args)
-    tool = difftool_name(slave, args.extra)
+    prompt = difftool_prompting(repo, args)
+    tool = difftool_name(repo, args.extra)
     with tempfile.TemporaryDirectory(prefix="filesync-") as td:
         for n, (st, name, base, other) in enumerate(pairs, 1):
             if prompt:
@@ -2060,7 +2063,7 @@ def cmd_difftool(ctx, slave, args):
             def tmpfile(label, oid):
                 f = Path(td) / label / Path(name).name    # keep the extension
                 f.parent.mkdir(parents=True, exist_ok=True)
-                f.write_bytes(slave.to_worktree(slave.read_blob(oid), st.rel))
+                f.write_bytes(repo.to_worktree(repo.read_blob(oid), st.rel))
                 return str(f)
             left = tmpfile(f"synced-{src.short(st.old) if st.has_old else st.old_blob[:8]}", base)
             if args.upstream:
@@ -2070,12 +2073,12 @@ def cmd_difftool(ctx, slave, args):
             else:
                 right = str(st.link.target)
             subprocess.run(["git", "difftool", "--no-index", "-y"] + args.extra + [left, right],
-                           cwd=slave.top)
+                           cwd=repo.top)
     return rc
 
 
-def find_matching_commit(slave, src, cur, rel, path, target, max_equiv=100):
-    """Newest master commit that introduced the content of the local file.
+def find_matching_commit(repo, src, cur, rel, path, target, max_equiv=100):
+    """Newest upstream commit that introduced the content of the local file.
     Exact blob match first; then the most recent versions compared by content
     (different eol normalization, LFS in only one of the repos)."""
     hist = src.path_history(path, 5000)
@@ -2088,10 +2091,10 @@ def find_matching_commit(slave, src, cur, rel, path, target, max_equiv=100):
     for rev, oid in hist[:max_equiv]:
         if oid not in seen:
             ptr = lfs_pointer(src.read_blob(oid))
-            if ptr:        # LFS in the master: compare hashes, no download needed
+            if ptr:        # LFS upstream: compare hashes, no download needed
                 seen[oid] = ptr in (local_hash, lfs_pointer(data))
             else:
-                seen[oid] = local_equiv(slave, src, oid, rel, path) == cur
+                seen[oid] = local_equiv(repo, src, oid, rel, path) == cur
         if seen[oid]:
             return rev
     return None
@@ -2099,7 +2102,7 @@ def find_matching_commit(slave, src, cur, rel, path, target, max_equiv=100):
 
 def glob_regex(pattern):
     """Regex for a gitignore-like pattern, matched against a path relative to
-    the master directory: without a '/' it matches a name at any depth, a
+    the upstream directory: without a '/' it matches a name at any depth, a
     leading or inner '/' anchors it, a trailing '/' matches directories only;
     '*' and '?' don't match '/', '**/' matches any number of directories. A
     matching directory stands for everything below it."""
@@ -2156,16 +2159,16 @@ def spec_desc(spec):
     return f"is pinned to {spec['tag']}" + (f" on {spec['branch']}" if spec.get("branch") else "")
 
 
-def find_base(slave, src, head, given, rel, path, target):
+def find_base(repo, src, head, given, rel, path, target):
     """Base of a file to link: (commit, blob, content to write or None,
-    modified). An existing file's master version is looked up (or given:
+    modified). An existing file's upstream version is looked up (or given:
     --commit); a missing file gets the version at head."""
-    cur = slave.worktree_blob(target)
+    cur = repo.worktree_blob(target)
     modified = None          # unknown: compared below
     if given:
         commit = given
     elif cur:
-        commit = find_matching_commit(slave, src, cur, rel, path, target)
+        commit = find_matching_commit(repo, src, cur, rel, path, target)
         modified = not commit
         if commit:
             print(f"{rel} matches upstream {src.short(commit)}")
@@ -2184,20 +2187,20 @@ def find_base(slave, src, head, given, rel, path, target):
         return commit, blob, src.read_content(blob, path), False
     if modified is None:
         try:
-            modified = not matches_base(slave, src, SimpleNamespace(blob=blob, path=path, rel=rel),
+            modified = not matches_base(repo, src, SimpleNamespace(blob=blob, path=path, rel=rel),
                                         cur, target.read_bytes)
         except BaseUnavailable:
             modified = False
     return commit, blob, None, modified
 
 
-# a file to link: slave path, master path, base commit and blob, content to
+# a file to link: its path here, upstream path, base commit and blob, content to
 # write (None: the file exists), whether it differs from the base
 Planned = namedtuple("Planned", "rel path commit blob content modified")
 
 
 def build_add_message(plan, src, name, url, ref, mpath, relink, strict, at):
-    """Commit message for add; plan: [Planned]; at: the master revision a
+    """Commit message for add; plan: [Planned]; at: the upstream revision a
     directory was linked at."""
     fetched = all(p.content is not None for p in plan)
     subject_ref = f"{name}@{src.short(plan[0].commit)}"
@@ -2222,10 +2225,10 @@ def build_add_message(plan, src, name, url, ref, mpath, relink, strict, at):
     return "\n".join(lines) + "\n"
 
 
-def cmd_add(ctx, slave, args):
-    reg = Registry(slave)
-    target = slave.user_path(args.file)
-    rel = slave.rel(target)
+def cmd_add(ctx, repo, args):
+    reg = Registry(repo)
+    target = repo.user_path(args.file)
+    rel = repo.rel(target)
     problem = path_problem(rel) if rel != "." else None
     if problem:
         raise FsError(f"cannot link '{rel}': {problem}")
@@ -2243,12 +2246,12 @@ def cmd_add(ctx, slave, args):
     path = (args.path or ("" if rel == "." else rel)).strip("/")
     path = "" if path == "." else path
     patterns = args.include or args.exclude
-    master_file = bool(path) and not patterns and bool(src.blob_at(head, path))
-    if target.is_dir() and master_file:       # like cp: into the directory
+    upstream_file = bool(path) and not patterns and bool(src.blob_at(head, path))
+    if target.is_dir() and upstream_file:       # like cp: into the directory
         target = target / Path(path).name
-        rel = slave.rel(target)
-    if target.is_dir() or patterns or not master_file and src.is_dir(head, path):
-        plan, relink = plan_dir(slave, reg, src, args, at or head, rel, path, target)
+        rel = repo.rel(target)
+    if target.is_dir() or patterns or not upstream_file and src.is_dir(head, path):
+        plan, relink = plan_dir(repo, reg, src, args, at or head, rel, path, target)
         if not plan:
             return EXIT_OK
     else:
@@ -2257,7 +2260,7 @@ def cmd_add(ctx, slave, args):
             raise FsError(f"'{rel}' is already linked (use --force to relink)")
         if target.is_dir():
             raise FsError(f"cannot link '{rel}': is a directory")
-        plan = [Planned(rel, path, *find_base(slave, src, head, at, rel, path, target))]
+        plan = [Planned(rel, path, *find_base(repo, src, head, at, rel, path, target))]
     rels = [p.rel for p in plan]
     name = named or reg.source_name(url, spec, any_line)
     shown_ref = ref_text(ref, source_line(reg.sources.get(name) or spec))
@@ -2280,12 +2283,12 @@ def cmd_add(ctx, slave, args):
             link.set("strict", "true")
         if p.content is not None:
             link.target.parent.mkdir(parents=True, exist_ok=True)
-            link.target.write_bytes(slave.to_worktree(slave.normalize(p.content, p.rel), p.rel))
+            link.target.write_bytes(repo.to_worktree(repo.normalize(p.content, p.rel), p.rel))
         # the link commit contains the file as it is in the working tree
-        slave.git(["add", "--", lit(p.rel)])
+        repo.git(["add", "--", lit(p.rel)])
         print(f"{paint('linked', 'green')} {p.rel} -> {name}:{p.path} ({shown_ref})")
     reg.finish()
-    if slave.git(["diff", "--cached", "--quiet", "HEAD", "--"] + [lit(r) for r in rels]
+    if repo.git(["diff", "--cached", "--quiet", "HEAD", "--"] + [lit(r) for r in rels]
                  + [REGISTRY], check=False).returncode == 0:
         print(f"{rel}: link{'s' if len(rels) > 1 else ''} and "
               f"file{'s' if len(rels) > 1 else ''} unchanged, nothing to commit")
@@ -2293,12 +2296,12 @@ def cmd_add(ctx, slave, args):
     # staged only, like git add; the proposed message is prepared for the commit
     msg = build_add_message(plan, src, name, url, ref, path, relink, args.strict, at or head)
     msg_name = rels[0] if len(rels) == 1 else (rel if rel != "." else "root")
-    report_staged(slave, msg_name, msg, paint("staged", "green"), rels)
+    report_staged(repo, msg_name, msg, paint("staged", "green"), rels)
     return EXIT_OK
 
 
-def plan_dir(slave, reg, src, args, at, rel, path, target):
-    """Files to link for add DIR: every file below the master directory path
+def plan_dir(repo, reg, src, args, at, rel, path, target):
+    """Files to link for add DIR: every file below the upstream directory path
     at revision at that matches --include/--exclude, as rel/<path below>;
     already linked files are skipped unless --force. Returns (plan, relink)."""
     if target.exists() and not target.is_dir():
@@ -2315,7 +2318,7 @@ def plan_dir(slave, reg, src, args, at, rel, path, target):
             continue
         r = below if rel == "." else f"{rel}/{below}"
         problem = path_problem(r)
-        if problem or (slave.top / r).is_dir():
+        if problem or (repo.top / r).is_dir():
             warn(f"skipping {r}: {problem or 'is a directory'}")
         elif r in reg.files and not args.force:
             skipped.append(r)
@@ -2329,13 +2332,13 @@ def plan_dir(slave, reg, src, args, at, rel, path, target):
             print(f"no files to link below '{path or '/'}' in {src.label}")
         return [], False
     given = at if args.commit else None
-    plan = [Planned(r, p, *find_base(slave, src, at, given, r, p, slave.top / r)) for r, p in todo]
+    plan = [Planned(r, p, *find_base(repo, src, at, given, r, p, repo.top / r)) for r, p in todo]
     return plan, any(r in reg.files for r, _ in todo)
 
 
-def cmd_unlink(ctx, slave, args):
-    reg = Registry(slave)
-    links = select_links(slave, reg, args.files)
+def cmd_unlink(ctx, repo, args):
+    reg = Registry(repo)
+    links = select_links(repo, reg, args.files)
     for link in links:
         if args.dry_run:
             print(f"would unlink {link.rel}")
@@ -2347,15 +2350,15 @@ def cmd_unlink(ctx, slave, args):
     return EXIT_OK
 
 
-def cmd_mv(ctx, slave, args):
-    reg = Registry(slave)
-    old = slave.rel(slave.user_path(args.src))
+def cmd_mv(ctx, repo, args):
+    reg = Registry(repo)
+    old = repo.rel(repo.user_path(args.src))
     if old not in reg.files:
         raise FsError(f"'{old}' is not linked")
-    dst = slave.user_path(args.dst)
+    dst = repo.user_path(args.dst)
     if dst.is_dir():
         dst = dst / Path(old).name
-    new = slave.rel(dst)
+    new = repo.rel(dst)
     problem = path_problem(new)
     if problem:
         raise FsError(f"cannot move to '{new}': {problem}")
@@ -2364,12 +2367,12 @@ def cmd_mv(ctx, slave, args):
     if args.dry_run:
         print(f"would move {old} -> {new}")
         return EXIT_OK
-    if slave.git(["ls-files", "--error-unmatch", "--", lit(old)], check=False).returncode == 0:
+    if repo.git(["ls-files", "--error-unmatch", "--", lit(old)], check=False).returncode == 0:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        slave.git(["mv", "--", old, new])
-    elif (slave.top / old).exists():
+        repo.git(["mv", "--", old, new])
+    elif (repo.top / old).exists():
         dst.parent.mkdir(parents=True, exist_ok=True)
-        (slave.top / old).rename(dst)
+        (repo.top / old).rename(dst)
     reg.rename_file(old, new)
     reg.finish()
     print(f"{paint('moved', 'green')} {old} -> {new} (link kept)")
@@ -2377,7 +2380,7 @@ def cmd_mv(ctx, slave, args):
 
 
 def commit_in(src, link):
-    """The commit of a link's synced version in another master (a fork, a
+    """The commit of a link's synced version in another upstream (a fork, a
     moved repository): the recorded one if it is there, else the newest
     commit on the branch that has the synced blob at the path; None if the
     version isn't there."""
@@ -2389,18 +2392,18 @@ def commit_in(src, link):
     return None
 
 
-def cmd_set(ctx, slave, args):
-    """Change the link of linked files - their source, master path or strict
+def cmd_set(ctx, repo, args):
+    """Change the link of linked files - their source, upstream path or strict
     flag - like 'source' does for sources. Only .git-filesync is changed
     (and staged); the synced version (the base) is kept where it still
-    applies: for another branch or tag of the same master, and for another
-    master that has it (a fork, a moved repository); with another path it
+    applies: for another branch or tag of the same upstream, and for another
+    upstream that has it (a fork, a moved repository); with another path it
     is looked up like for add."""
     if not (args.source or args.branch or args.tag or args.path or args.strict is not None):
         raise FsError("nothing to change: give --source, -b/--tag, -p or --strict/--no-strict")
-    reg = Registry(slave)
+    reg = Registry(repo)
     reg.dry_run = args.dry_run
-    links = select_links(slave, reg, args.files)
+    links = select_links(repo, reg, args.files)
     if args.path and len(links) != 1:
         raise FsError("-p requires exactly one file")
     would = "would: " if args.dry_run else ""
@@ -2445,7 +2448,7 @@ def cmd_set(ctx, slave, args):
         if not head:
             raise FsError(ref_missing(lk.ref, src))
         path = args.path.strip("/")
-        commit, blob, _, modified = find_base(slave, src, head, None, lk.rel, path, lk.target)
+        commit, blob, _, modified = find_base(repo, src, head, None, lk.rel, path, lk.target)
         if (path, commit, blob) != (lk.path, lk.commit, lk.blob):
             print(f"{would}{lk.rel}: path {lk.path} -> {path}, based on {src.short(commit)}"
                   + (", with local modifications" if modified else ""))
@@ -2471,10 +2474,10 @@ def source_files(reg, name):
     return sorted(rel for rel, f in reg.files.items() if f.get("source") == name)
 
 
-def cmd_source(ctx, slave, args):
+def cmd_source(ctx, repo, args):
     """Like `git remote`: list, rename and change the [source]s. Only
     .git-filesync is changed (and staged); `pull` then syncs the files."""
-    reg = Registry(slave)
+    reg = Registry(repo)
     action = args.action
     if not action:
         for name, s in sorted(reg.sources.items()):
@@ -2565,11 +2568,11 @@ def print_mappings(maps, url=None):
         print("no mappings" + (f" for {url}" if url else ""))
 
 
-def cmd_map(args, slave):
-    """Map a master URL to a local checkout. Default scope is the current
-    (slave) repository's config, so different slaves can use different
-    checkouts of the same master; --global applies to all repositories."""
-    top = slave.top if slave else None
+def cmd_map(args, repo):
+    """Map an upstream URL to a local checkout. Default scope is the current
+    repository's config, so different repositories can use different
+    checkouts of the same upstream; --global applies to all repositories."""
+    top = repo.top if repo else None
     if not args.dir and not args.unset:      # listing: all scopes visible here
         print_mappings(local_mappings(cwd=top), args.url)
         return EXIT_OK
@@ -2577,7 +2580,7 @@ def cmd_map(args, slave):
         raise FsError("--unset needs the URL of the mapping to remove")
     if args.glob:
         scope = "--global"
-    elif slave:
+    elif repo:
         scope = "--local"
     else:
         raise FsError("not inside a Git repository; use --global for a global mapping")
@@ -2594,7 +2597,7 @@ def cmd_map(args, slave):
         if rest:
             print(f"now using [{rest[-1][0]}] {rest[-1][3]}")
         return EXIT_OK
-    base = slave.base if slave else Path.cwd()
+    base = repo.base if repo else Path.cwd()
     d = (base / os.path.expanduser(args.dir)).resolve()
     if git(["-C", d, "rev-parse", "--git-dir"], env=clean_env(), check=False).returncode:
         raise FsError(f"{d} is not a Git repository")
@@ -2602,25 +2605,25 @@ def cmd_map(args, slave):
         git(["config", scope, "--unset-all", k], cwd=top)
     git(["config", scope, f"filesync.{args.url}.localpath", str(d)], cwd=top)
     print(f"{paint(f'[{name}]', 'cyan')} {args.url} -> {d}")
-    if scope == "--global" and slave:
+    if scope == "--global" and repo:
         own = mappings_for(args.url, "--local", cwd=top)
         if own:
             warn(f"this repository has its own mapping ({own[-1][3]}), which takes precedence")
     return EXIT_OK
 
 
-def hook_dir(slave, action):
-    hp = out(slave.git(["config", "core.hooksPath"], check=False))
+def hook_dir(repo, action):
+    hp = out(repo.git(["config", "core.hooksPath"], check=False))
     if hp:
         hookdir = Path(os.path.expanduser(hp))
         if not hookdir.is_absolute():
-            hookdir = slave.top / hookdir
+            hookdir = repo.top / hookdir
         warn(f"core.hooksPath is set; {action} {hookdir} "
              "(may affect other repositories using it)")
     else:
-        hookdir = Path(out(slave.git(["rev-parse", "--git-path", "hooks"])))
+        hookdir = Path(out(repo.git(["rev-parse", "--git-path", "hooks"])))
         if not hookdir.is_absolute():
-            hookdir = slave.top / hookdir
+            hookdir = repo.top / hookdir
     return hookdir
 
 
@@ -2634,8 +2637,8 @@ def is_our_hook_line(line):
     return s.startswith(f"# {HOOK_MARKER}:") or s.startswith("git filesync status --hook")
 
 
-def cmd_install_hooks(slave, args):
-    hookdir = hook_dir(slave, "installing into")
+def cmd_install_hooks(repo, args):
+    hookdir = hook_dir(repo, "installing into")
     hookdir.mkdir(parents=True, exist_ok=True)
     for name, cmd in HOOKS.items():
         f = hookdir / name
@@ -2652,10 +2655,10 @@ def cmd_install_hooks(slave, args):
     return EXIT_OK
 
 
-def cmd_uninstall_hooks(slave, args):
+def cmd_uninstall_hooks(repo, args):
     """Remove our hooks. A hook file that only contains our snippet is deleted;
     in other hook files only our lines are removed, the rest stays untouched."""
-    hookdir = hook_dir(slave, "removing from")
+    hookdir = hook_dir(repo, "removing from")
     for name in HOOKS:
         f = hookdir / name
         if not f.is_file():
@@ -2692,7 +2695,7 @@ def main(argv=None):
                         help="same as --color=never")
     common = argparse.ArgumentParser(add_help=False, parents=[colorp])
     common.add_argument("--no-fetch", action="store_true",
-                        help="do not fetch master repositories, use cached state")
+                        help="do not fetch upstream repositories, use cached state")
     common.add_argument("--remote", action="store_true",
                         help="ignore local checkout mappings, use the remote URL")
 
@@ -2713,13 +2716,13 @@ def main(argv=None):
                    help="exit with 1 if something is to sync or a strict file is modified")
     p.add_argument("--hook", action="store_true", help="terse output for git hooks")
 
-    p = sub.add_parser("pull", parents=[common], help="sync file(s) from master")
+    p = sub.add_parser("pull", parents=[common], help="sync file(s) from upstream")
     p.add_argument("files", nargs="*", help="files or directories")
     p.add_argument("--all", action="store_true", help="sync all files with something to sync")
-    p.add_argument("--commit", metavar="REV", help="sync to this master revision (exactly one file)")
-    p.add_argument("-b", "--branch", help="switch to following this master branch, and sync; "
+    p.add_argument("--commit", metavar="REV", help="sync to this upstream revision (exactly one file)")
+    p.add_argument("-b", "--branch", help="switch to following this upstream branch, and sync; "
                                           "with --tag: the branch to look for newer tags on")
-    p.add_argument("--tag", help="switch to (pin to) this master tag, and sync")
+    p.add_argument("--tag", help="switch to (pin to) this upstream tag, and sync")
     p.add_argument("--no-edit", action="store_true", help="commit without opening the editor")
     p.add_argument("--no-commit", action="store_true",
                    help="only stage; a plain 'git commit' offers the proposed message")
@@ -2730,14 +2733,14 @@ def main(argv=None):
     p.add_argument("--dry-run", action="store_true",
                    help="only report what would happen (incl. merge conflicts)")
 
-    for name, hlp in (("diff", "show local modifications against the synced master version"),
+    for name, hlp in (("diff", "show local modifications against the synced upstream version"),
                       ("difftool", "same in the configured difftool")):
         p = sub.add_parser(name, parents=[common], help=hlp,
                            epilog="Options after '--' are passed to git " + name + ".")
         p.add_argument("files", nargs="*", help="files or directories (default: all)")
         g = p.add_mutually_exclusive_group()
         g.add_argument("--upstream", action="store_true",
-                       help="show what 'pull' would bring instead (synced -> current master)")
+                       help="show what 'pull' would bring instead (synced -> current upstream)")
         g.add_argument("--committed", action="store_true",
                        help="only the committed adaptations (synced -> HEAD)")
         p.add_argument("--commit", metavar="REV",
@@ -2745,8 +2748,9 @@ def main(argv=None):
         p.add_argument("-b", "--branch", help="with --upstream: as for pull, synced -> BRANCH")
         p.add_argument("--tag", help="with --upstream: as for pull, synced -> TAG")
         if name == "diff":
-            p.add_argument("--master-paths", action="store_true",
-                           help="name files by their master path, for 'git apply' in the master")
+            p.add_argument("--for-upstream", action="store_true",
+                           help="a patch for 'git apply' in the upstream repository: "
+                                "upstream paths (not with --upstream)")
         else:
             p.add_argument("-y", "--no-prompt", action="store_true",
                            help="don't ask before launching the tool for each file")
@@ -2754,37 +2758,37 @@ def main(argv=None):
                            help="ask before each file even if files are given")
 
     p = sub.add_parser("add", parents=[common], help="link a file (or all files of a directory) "
-                                                     "to the master repository")
+                                                     "to the upstream repository")
     p.add_argument("file", metavar="FILE|DIR",
-                   help="file in this repository (fetched from master if missing), or a "
-                        "directory: all files below the master directory are linked")
-    p.add_argument("source", metavar="URL|SOURCE", help="master URL or name of a [source] in "
+                   help="file in this repository (fetched from upstream if missing), or a "
+                        "directory: all files below the upstream directory are linked")
+    p.add_argument("source", metavar="URL|SOURCE", help="upstream URL or name of a [source] in "
                    + REGISTRY)
-    p.add_argument("-b", "--branch", help="master branch (default: remote HEAD, or the ref of "
+    p.add_argument("-b", "--branch", help="upstream branch (default: remote HEAD, or the ref of "
                                           "SOURCE); with --tag: the branch to look for newer "
                                           "tags on")
-    p.add_argument("--tag", help="pin to this master tag instead of following a branch")
-    p.add_argument("-p", "--path", help="path in master repo (default: same as here)")
+    p.add_argument("--tag", help="pin to this upstream tag instead of following a branch")
+    p.add_argument("-p", "--path", help="upstream path (default: same as here)")
     p.add_argument("--include", metavar="PATTERN", action="append",
                    help="directory: only files matching PATTERN (gitignore-like; repeatable)")
     p.add_argument("--exclude", metavar="PATTERN", action="append",
                    help="directory: skip files matching PATTERN (repeatable)")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be linked")
-    p.add_argument("--commit", metavar="REV", help="master revision the local file corresponds to")
+    p.add_argument("--commit", metavar="REV", help="upstream revision the local file corresponds to")
     p.add_argument("--force", action="store_true", help="relink an already linked file")
     p.add_argument("--strict", action="store_true",
                    help="file must stay an exact copy (no local modifications)")
 
     p = sub.add_parser("set", parents=[common], help="change the link of linked files: source, "
-                                                     "master path, strict")
+                                                     "upstream path, strict")
     p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
     p.add_argument("--source", metavar="URL|SOURCE",
-                   help="link to another master (URL) or [source]; the synced version is kept")
-    p.add_argument("-b", "--branch", help="branch of the master (as for add); without --source: "
+                   help="link to another upstream (URL) or [source]; the synced version is kept")
+    p.add_argument("-b", "--branch", help="upstream branch (as for add); without --source: "
                                           "switch to following it, without syncing")
-    p.add_argument("--tag", help="pin to this tag of the master (as for add); without --source: "
+    p.add_argument("--tag", help="pin to this upstream tag (as for add); without --source: "
                                  "switch to it, without syncing")
-    p.add_argument("-p", "--path", help="another path in the master (one file); the synced "
+    p.add_argument("-p", "--path", help="another upstream path (one file); the synced "
                                         "version is looked up as for add")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--strict", action="store_const", const=True,
@@ -2827,10 +2831,10 @@ def main(argv=None):
         else:
             a.add_argument("value", metavar=arg)
 
-    p = sub.add_parser("map", parents=[colorp], help="use a local checkout for a master URL "
+    p = sub.add_parser("map", parents=[colorp], help="use a local checkout for an upstream URL "
                                                      "(this repo's config; --global for all repos)")
-    p.add_argument("url", nargs="?", help="master URL (without DIR: list its mappings)")
-    p.add_argument("dir", nargs="?", help="local checkout of the master")
+    p.add_argument("url", nargs="?", help="upstream URL (without DIR: list its mappings)")
+    p.add_argument("dir", nargs="?", help="local checkout of the upstream repository")
     p.add_argument("--unset", action="store_true", help="remove the mapping for URL")
     p.add_argument("--global", dest="glob", action="store_true",
                    help="use the global git config instead of this repository's")
@@ -2847,25 +2851,25 @@ def main(argv=None):
     if not args.cmd:
         args = ap.parse_args(["status"])
     args.extra = extra
-    args.master_paths = getattr(args, "master_paths", False)
+    args.for_upstream = getattr(args, "for_upstream", False)
     try:
         try:
-            slave = Slave()
+            repo = Repo()
         except FsError:
-            slave = None
-        setup_colors(args.color, slave.top if slave else None)
+            repo = None
+        setup_colors(args.color, repo.top if repo else None)
         if args.cmd == "map":
-            return cmd_map(args, slave)
-        if slave is None:
+            return cmd_map(args, repo)
+        if repo is None:
             raise FsError("not inside a Git working tree")
         if args.cmd == "install-hooks":
-            return cmd_install_hooks(slave, args)
+            return cmd_install_hooks(repo, args)
         if args.cmd == "uninstall-hooks":
-            return cmd_uninstall_hooks(slave, args)
-        ctx = Context(args, slave)
+            return cmd_uninstall_hooks(repo, args)
+        ctx = Context(args, repo)
         return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
                 "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
-                "diff": cmd_diff, "difftool": cmd_difftool}[args.cmd](ctx, slave, args)
+                "diff": cmd_diff, "difftool": cmd_difftool}[args.cmd](ctx, repo, args)
     except FsError as e:
         error(str(e))
         return EXIT_ERROR

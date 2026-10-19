@@ -6,9 +6,9 @@ For motivation and installation see the [README](README.md).
 ## Contents
 
 - [Concepts](#concepts)
-  - [Master, slave and links](#master-slave-and-links)
+  - [Upstream, downstream and links](#upstream-downstream-and-links)
   - [The `.git-filesync` file](#the-git-filesync-file)
-  - [Local modifications on top of the master version](#local-modifications-on-top-of-the-master-version)
+  - [Local modifications on top of the upstream version](#local-modifications-on-top-of-the-upstream-version)
   - [Strict files](#strict-files)
 - [Commands](#commands)
   - [Common options](#common-options)
@@ -16,27 +16,27 @@ For motivation and installation see the [README](README.md).
   - [`add`](#add) · [`set`](#set) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map)
   - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
 - [Further topics](#further-topics)
-  - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted in the master](#files-renamed-or-deleted-in-the-master)
+  - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted upstream](#files-renamed-or-deleted-upstream)
   - [Git LFS](#git-lfs) · [Line endings](#line-endings) · [Offline operation](#offline-operation)
   - [Colors](#colors) · [CI](#ci) · [Exit codes](#exit-codes) · [Binary files](#binary-files) · [Windows](#windows)
   - [Shipping git-filesync with your repository](#shipping-git-filesync-with-your-repository)
 
 ## Concepts
 
-### Master, slave and links
+### Upstream, downstream and links
 
-The **master** is the repository where a file is developed. A **slave** is a
-repository that carries a copy of it. The slave records a **link** for each
-such file: which master repository and branch (or tag), which path there,
-and which master version the copy is based on. Updates are never applied
+The **upstream repository** (short: upstream) is where a file is developed.
+A **downstream repository** carries a copy of it and records a **link** for
+each such file: which upstream repository and branch (or tag), which path
+there, and which upstream version the copy is based on. Updates are never applied
 automatically – `pull` syncs one file at a time, with a commit message that
-lists every master commit that changed the file since the last sync.
+lists every upstream commit that changed the file since the last sync.
 
-All commands run inside the slave repository.
+All commands run inside the downstream repository.
 
 ### The `.git-filesync` file
 
-Lives at the root of the slave repository and is committed like any other
+Lives at the root of the downstream repository and is committed like any other
 file. Git-config format:
 
 ```ini
@@ -45,9 +45,9 @@ file. Git-config format:
 	branch = main
 [file "src/foo.c"]
 	source = owner/lib
-	path = lib/foo.c       # path in the master
-	commit = 3f2a9c1e…     # master commit the synced version comes from
-	blob = 8d01b7aa…       # master's file at that commit
+	path = lib/foo.c       # path upstream
+	commit = 3f2a9c1e…     # upstream commit the synced version comes from
+	blob = 8d01b7aa…       # the upstream file at that commit
 [file "include/bar.h"]
 	source = owner/lib
 	path = include/bar.h
@@ -60,7 +60,7 @@ file. Git-config format:
 	branch = main          # optional: where newer tags are looked for
 ```
 
-- A `[source]` names a master repository and either a branch it follows or
+- A `[source]` names an upstream repository and either a branch it follows or
   a tag it is [pinned](#pinning-to-a-tag) to – the latter optionally with
   the branch on which [newer tags](#newer-tags) are looked for. `add` with
   a URL reuses an existing source only if URL *and* branch/tag match (with
@@ -71,15 +71,15 @@ file. Git-config format:
   URL, branch or tag, a number is appended (`owner/repo-2`, …). Rename it
   with [`source rename`](#source); `status`, `add` and the commit messages
   of `pull` show it.
-- `[file]` sections are keyed by the path in the slave repository.
+- `[file]` sections are keyed by the path in the downstream repository.
 - `commit` and `blob` are maintained by the tool: `blob` is the synced
-  version of the master's file, `commit` the master commit that last changed
+  version of the upstream file, `commit` the upstream commit that last changed
   it (not the branch tip at sync time). One file version thus always gives
   the same entry, and commits that don't touch the file – unpushed, rebased
   or not – don't matter.
-- Everything else may be edited by hand, e.g. the path in the master:
+- Everything else may be edited by hand, e.g. the upstream path:
   `git config -f .git-filesync file.src/foo.c.path lib/new_name.c` (a file
-  renamed in the master is [followed by `pull`](#files-renamed-or-deleted-in-the-master)
+  renamed upstream is [followed by `pull`](#files-renamed-or-deleted-upstream)
   anyway). [`source`](#source) changes URL, branch and tag of a source.
 - When the last link is removed, the file is deleted.
 - File paths must lie inside the working tree. Entries pointing outside it
@@ -87,22 +87,22 @@ file. Git-config format:
   and never written – a cloned repository's `.git-filesync` can't make
   `pull` touch other files.
 
-### Local modifications on top of the master version
+### Local modifications on top of the upstream version
 
-The file in the slave doesn't have to be identical to the master version: it
+The file downstream doesn't have to be identical to the upstream version: it
 may carry local adaptations. Its entry in `.git-filesync` records the
-**base** of the file – "this file is based on master commit X" – not its
-content. Since file and entry are always committed together, every slave
-commit precisely defines the local layer: file content minus the master
+**base** of the file – "this file is based on upstream commit X" – not its
+content. Since file and entry are always committed together, every downstream
+commit precisely defines the local layer: file content minus upstream
 version named in the entry.
 
 ```
-  master version (entry: commit X)  +  local modifications  =  file in the slave
+  upstream version (entry: commit X)  +  local modifications  =  file downstream
 ```
 
 Committed local changes are **adaptations**; changes not committed yet are
 **uncommitted changes** – `status` shows both separately. `pull` keeps
-adaptations by merging them with the new master version, and – like
+adaptations by merging them with the new upstream version, and – like
 `git pull` – refuses files with uncommitted changes (see [`pull`](#pull)).
 `diff` and `difftool` show both kinds (see [`diff`](#diff)).
 
@@ -130,15 +130,15 @@ or lift the restriction (`git filesync set --no-strict FILE`).
 | Command | Purpose |
 |---|---|
 | [`status [PATH…]`](#status) | state of the linked files, like `git status` |
-| [`pull PATH…`, `pull --all`](#pull) | sync files from the master |
-| [`diff [PATH…] [-- OPTS]`](#diff) | local changes against the synced master version |
+| [`pull PATH…`, `pull --all`](#pull) | sync files from upstream |
+| [`diff [PATH…] [-- OPTS]`](#diff) | local changes against the synced upstream version |
 | [`difftool [PATH…] [-- OPTS]`](#difftool) | the same in your difftool |
-| [`add FILE\|DIR URL\|SOURCE`](#add) | link a file – or all files of a directory – to the master repository |
-| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, master path, strict |
+| [`add FILE\|DIR URL\|SOURCE`](#add) | link a file – or all files of a directory – to the upstream repository |
+| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, upstream path, strict |
 | [`unlink PATH…`](#unlink) | remove links, keep the files |
 | [`mv OLD NEW`](#mv) | move a linked file and its link |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
-| [`map [URL [DIR]]`](#map) | use a local checkout of the master |
+| [`map [URL [DIR]]`](#map) | use a local checkout of upstream |
 | [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks) | reminder hooks |
 
 Commands named like a Git command behave like it (`status`, `pull`, `diff`,
@@ -168,7 +168,7 @@ directory stands for all linked files below it. Options follow the command
 | Option | Effect |
 |---|---|
 | `-s`, `--short` | short format, three columns |
-| `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one also the [newer tags](#newer-tags) of the master |
+| `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one also the [newer tags](#newer-tags) of upstream |
 | `--exit-code` | exit with 1 if something is to sync or a strict file is modified |
 | `--hook` | terse output on stderr, used by the [reminder hooks](#install-hooks-uninstall-hooks) |
 
@@ -176,8 +176,8 @@ directory stands for all linked files below it. Options follow the command
 
 | Respect | Compares | States |
 |---|---|---|
-| upstream | synced master version ↔ current master | up to date, `pending`, `older`, `changed`, `renamed`, `deleted`, `new` |
-| committed | synced master version ↔ committed file (`HEAD`) | `unmodified`, `adapted` |
+| upstream | synced upstream version ↔ current upstream | up to date, `pending`, `older`, `changed`, `renamed`, `deleted`, `new` |
+| committed | synced upstream version ↔ committed file (`HEAD`) | `unmodified`, `adapted` |
 | working tree | committed file ↔ working file | clean, `modified`, `deleted`, `new file` |
 
 and reports them in sections like `git status`:
@@ -201,7 +201,7 @@ Uncommitted changes:
 ```
 
 `renamed` and `deleted` are explained under [Files renamed or deleted in
-the master](#files-renamed-or-deleted-in-the-master). Without anything to
+upstream](#files-renamed-or-deleted-upstream). Without anything to
 report: `nothing to sync, all 5 linked files unmodified`. Paths are shown relative to the current directory. `-v` adds a
 `Linked files:` section with every file and its source; the hints are turned
 off by `advice.statusHints = false`. Warnings (e.g. about a mapped checkout)
@@ -212,7 +212,7 @@ something to report, with three columns:
 
 | Column | Meaning |
 |---|---|
-| 1 – upstream | `P` pending, `O` master branch older than last sync, `D` history diverged or previous sync point unknown, `R` renamed in the master, `X` deleted in the master, `N` not in the working tree yet, `E` error |
+| 1 – upstream | `P` pending, `O` upstream branch older than last sync, `D` history diverged or previous sync point unknown, `R` renamed upstream, `X` deleted upstream, `N` not in the working tree yet, `E` error |
 | 2 – committed | `A` adapted |
 | 3 – working tree | `M` modified, `D` deleted, `?` not committed yet |
 
@@ -229,9 +229,9 @@ Like `git status`, the exit code is 0 (2 on errors); `--exit-code` makes it
 
 ### `pull`
 
-`pull PATH…`, `pull --all` – sync to the master's current version of the
+`pull PATH…`, `pull --all` – sync to the current upstream version of the
 file: the version on the source's branch (with a [local checkout](#map):
-that checkout's branch), or at its [tag](#pinning-to-a-tag). Recorded is the master commit that last changed the
+that checkout's branch), or at its [tag](#pinning-to-a-tag). Recorded is the upstream commit that last changed the
 file. The editor opens with the proposed commit message:
 
 ```
@@ -249,16 +249,16 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | Option | Effect |
 |---|---|
 | `--all` | all linked files with something to sync |
-| `--commit REV` | sync to this master revision instead – branch, tag or commit id, also backwards; exactly one file. The link keeps its branch or tag |
+| `--commit REV` | sync to this upstream revision instead – branch, tag or commit id, also backwards; exactly one file. The link keeps its branch or tag |
 | `-b`, `--branch BRANCH` | switch the files to following BRANCH and sync them (see [Switching branch or tag](#switching-branch-or-tag)); with `--tag`: the branch to look for newer tags on |
 | `--tag TAG` | switch the files to (pin them to) TAG and sync them; the source's branch stays the one to look for newer tags on |
-| `--overwrite` | discard local adaptations and take the master version as is (also when the file is up to date) |
+| `--overwrite` | discard local adaptations and take the upstream version as is (also when the file is up to date) |
 | `--autostash` | set uncommitted changes aside, sync, re-apply them |
 | `--no-edit` | commit with the proposed message without opening the editor |
 | `--no-commit` | only update and stage the file and its entry; a plain `git commit` then offers the proposed message (see [Proposed commit messages](#proposed-commit-messages)) |
-| `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename in the master, and every refusal |
+| `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename upstream, and every refusal |
 
-**Adaptations** are merged with the new master version (3-way merge, base =
+**Adaptations** are merged with the new upstream version (3-way merge, base =
 the last synced version). On conflicts the file gets the usual conflict
 markers; resolve them, then `git add` the file and run `git commit`, which
 offers the proposed message (see [Proposed commit
@@ -273,8 +273,8 @@ file. This works for modified files, not for deleted or not yet committed
 ones. If the sync itself ends in conflicts, the stashed version is not
 re-applied but kept in `.git/FILESYNC_STASH_*`.
 
-**Revisions:** `--commit` accepts branch names (`develop` means the master's
-current `develop`), tags and commit ids. Recorded is the commit that last
+**Revisions:** `--commit` accepts branch names (`develop` means the current
+upstream `develop`), tags and commit ids. Recorded is the commit that last
 changed the file up to that revision. Going back to an older version works
 the same way; the commit message then lists what is reverted.
 
@@ -286,24 +286,24 @@ for other files – commit those first (e.g. after [`add`](#add)), or use
 `--no-commit` to stage everything and commit it together.
 
 With `--all`, a file that can't be synced (conflict, strict violation, file
-deleted in the master, …) is reported and the other files are still synced.
+deleted upstream, …) is reported and the other files are still synced.
 
 For files of a source [pinned to a tag](#pinning-to-a-tag), `pull` ends with
-a hint if the master has [newer tags](#newer-tags):
+a hint if upstream has [newer tags](#newer-tags):
 
 ```
 hint: owner/lib is pinned to tag v1.2.0; the newest tag on branch main is v1.4.0 (use 'git filesync pull --tag v1.4.0 <file>...' to switch)
 ```
 
-A file **renamed in the master** is followed: `pull` takes the new path into
-the entry and notes the rename in the commit message. A file **deleted in
-the master** is refused, see [Files renamed or deleted in the
-master](#files-renamed-or-deleted-in-the-master).
+A file **renamed upstream** is followed: `pull` takes the new path into
+the entry and notes the rename in the commit message. A file **deleted
+upstream** is refused, see [Files renamed or deleted
+upstream](#files-renamed-or-deleted-upstream).
 
 #### Switching branch or tag
 
 `pull -b BRANCH` and `pull --tag TAG` switch the given files to another
-branch or tag of their master and sync them in the same step – adaptations
+branch or tag of their upstream and sync them in the same step – adaptations
 are merged with the 3-way merge as usual, the base being the version synced
 so far. The commit message says `Switched from tag v1.2.0 to tag v1.3.0.`
 
@@ -320,7 +320,7 @@ so far. The commit message says `Switched from tag v1.2.0 to tag v1.3.0.`
 - Files that don't change between the two versions get no sync commit of
   their own; a switch that no sync commit takes along is committed on its
   own (`Switch owner/lib from tag v1.2.0 to tag v1.3.0`).
-- A branch or tag that doesn't exist in the master is refused, nothing
+- A branch or tag that doesn't exist upstream is refused, nothing
   changes. `--dry-run` shows the switch (`would: …`) along with the syncs.
 
 ```sh
@@ -335,46 +335,50 @@ behind).
 
 ### `diff`
 
-`diff [PATH…] [-- OPTS]` – local changes against the synced master version.
+`diff [PATH…] [-- OPTS]` – local changes against the synced upstream version.
 
 | Option | Effect |
 |---|---|
 | `--committed` | only the committed adaptations (synced → `HEAD`) |
-| `--upstream` | what `pull` would bring (synced → current master) |
+| `--upstream` | what `pull` would bring (synced → current upstream) |
 | `--commit REV`, `-b BRANCH`, `--tag TAG` | with `--upstream`: what `pull` with the same option would bring (synced → that revision, branch or tag); nothing is switched |
-| `--master-paths` | name files by their master path, for `git apply` in the master |
+| `--for-upstream` | a patch for the upstream repository: upstream paths, standard `a/` `b/` prefixes, for `git apply`; not with `--upstream` |
 
 ```sh
-git filesync diff                    # all local changes: synced master version -> working file
-git filesync diff --committed        # adaptations only: synced master version -> HEAD
-git filesync diff --upstream         # what `pull` would bring: synced -> current master
+git filesync diff                    # all local changes: synced upstream version -> working file
+git filesync diff --committed        # adaptations only: synced upstream version -> HEAD
+git filesync diff --upstream         # what `pull` would bring: synced -> current upstream
 git filesync diff --upstream --tag v1.3.0 src/foo.c   # what `pull --tag v1.3.0` would bring
 git filesync diff -- --stat          # anything after `--` goes to `git diff`
 ```
 
 Without file arguments all linked files are covered. `diff` runs a single
-`git diff` in the slave repository, so pager, colors and diff options work as
-usual. With `--exit-code` or `--quiet` after `--`, exit code 1 means
+`git diff` in the downstream repository, so pager, colors and diff options
+work as usual. With `--exit-code` or `--quiet` after `--`, exit code 1 means
 differences, like `git diff`.
 
-`--commit`, `-b` and `--tag` select the master version exactly like the
+`--commit`, `-b` and `--tag` select the upstream version exactly like the
 same options of [`pull`](#pull) (`--commit` for one file only, files
-renamed in the master are followed), so replacing `pull` with
+renamed upstream are followed), so replacing `pull` with
 `diff --upstream` in a command line previews its changes. They only work
 with `--upstream`; `.git-filesync` stays untouched. `pull --dry-run` tells
 whether the adaptations would merge cleanly; on conflicts it points to
 both diffs.
 
-**Upstreaming local changes:** `--master-paths` names the files by their
-path in the master, giving a patch that can be applied there:
+**Upstreaming local changes:** `--for-upstream` names the files by their
+upstream path, giving a patch that can be applied there (with
+`--committed`: only the committed adaptations):
 
 ```sh
-git filesync diff --master-paths src/foo.c > foo.patch
-cd ~/src/lib && git apply -3 ../slave-repo/foo.patch
+git filesync diff --for-upstream src/foo.c > foo.patch
+cd ~/src/lib && git apply -3 ../my-repo/foo.patch
 ```
 
-`-3` uses the base version recorded in the patch, so it also works when the
-master has moved on in the meantime.
+The patch is relative to the synced version, not to the current upstream
+state, and records that version's blob id. `-3` uses it as the base of a
+3-way merge, so the patch applies on any upstream branch or commit – check
+out the one you want first; conflicts are resolved there with the usual Git
+tools.
 
 ### `difftool`
 
@@ -397,11 +401,11 @@ questions, `--prompt` asks even for explicitly given files.
 
 ### `add`
 
-`add FILE URL|SOURCE` – link FILE to a file in a master repository, given by
+`add FILE URL|SOURCE` – link FILE to a file in an upstream repository, given by
 its URL or by the name of a `[source]` already in `.git-filesync`:
 
 - **URL**: the file joins an existing source only if the URL and the
-  branch or tag (`-b`, `--tag`, default: the master's default branch) both
+  branch or tag (`-b`, `--tag`, default: the upstream default branch) both
   match – with `--tag` but no `-b`, a source pinned to that tag is taken
   whatever branch it looks for newer tags on; otherwise a new source is
   created.
@@ -410,25 +414,25 @@ its URL or by the name of a `[source]` already in `.git-filesync`:
   given, they must match the source (otherwise `add` refuses – give the URL
   to link to another branch or tag).
 
-`add DIR URL|SOURCE` – the same for every file below a directory of the
-master (see [below](#linking-a-directory)).
+`add DIR URL|SOURCE` – the same for every file below an upstream
+directory (see [below](#linking-a-directory)).
 
 | Option | Effect |
 |---|---|
-| `-b`, `--branch BRANCH` | master branch; default: the master's default branch, or the branch/tag of the given `[source]`. With `--tag`: the branch to look for [newer tags](#newer-tags) on (a warning if the tag isn't on it) |
-| `--tag TAG` | [pin](#pinning-to-a-tag) to a master tag instead of following a branch |
-| `-p`, `--path PATH` | path in the master; default: the same as FILE or DIR (`/`: the master's root) |
+| `-b`, `--branch BRANCH` | upstream branch; default: the upstream default branch, or the branch/tag of the given `[source]`. With `--tag`: the branch to look for [newer tags](#newer-tags) on (a warning if the tag isn't on it) |
+| `--tag TAG` | [pin](#pinning-to-a-tag) to an upstream tag instead of following a branch |
+| `-p`, `--path PATH` | upstream path; default: the same as FILE or DIR (`/`: the upstream root) |
 | `--include PATTERN` | directory: only files matching PATTERN; repeatable |
 | `--exclude PATTERN` | directory: skip files matching PATTERN; repeatable, beats `--include` |
-| `--commit REV` | master revision FILE corresponds to, instead of looking it up |
+| `--commit REV` | upstream revision FILE corresponds to, instead of looking it up |
 | `--strict` | the file must stay an exact copy (see [Strict files](#strict-files)) |
 | `--force` | relink a file that is already linked |
-| `-n`, `--dry-run` | change nothing, only show what would be linked and on which master version it would be based |
+| `-n`, `--dry-run` | change nothing, only show what would be linked and on which upstream version it would be based |
 
-- If FILE exists, the master version it matches is looked up and recorded
+- If FILE exists, the upstream version it matches is looked up and recorded
   as its base. If none matches, the branch head is taken (with a warning) and
   the differences count as adaptations; `--commit` chooses a better base.
-- If FILE doesn't exist, it is fetched from the master.
+- If FILE doesn't exist, it is fetched from upstream.
 - Like `git add`, `add` stages FILE (as it is in the working tree) and its
   entry in `.git-filesync`, but doesn't commit. A plain `git commit` then
   opens the editor with the proposed commit message (`git commit --no-edit`
@@ -456,10 +460,10 @@ git filesync add cfg/x.yml https://github.com/owner/lib.git --tag v1.2.0
 
 #### Linking a directory
 
-If DIR is an existing directory, or the master path is a directory, or
-`--include` / `--exclude` are given, `add` links every file below the master
+If DIR is an existing directory, or the upstream path is a directory, or
+`--include` / `--exclude` are given, `add` links every file below upstream
 directory: `-p api` with DIR `proto` links `api/v1/x.proto` as
-`proto/v1/x.proto`. (A master *file* given for an existing directory goes
+`proto/v1/x.proto`. (An upstream *file* given for an existing directory goes
 into it, like `cp`.) Each file gets its own ordinary `[file]` entry – after
 `add` there is no difference to files linked one by one – and all of them
 are staged together, with one proposed message:
@@ -474,15 +478,15 @@ Upstream: https://github.com/owner/backend.git (main:api/)
 ```
 
 Files already linked are skipped (`--force` relinks them), so running the
-same `add` again later links just the files that are new in the master.
+same `add` again later links just the files that are new upstream.
 Existing files are linked as they are, like a single FILE.
 
-Patterns work like `.gitignore` lines, relative to the master directory:
+Patterns work like `.gitignore` lines, relative to the upstream directory:
 
 | Pattern | Matches |
 |---|---|
 | `*.proto` | without `/`: a name at any depth |
-| `/top.txt`, `v1/*.proto` | with a leading or inner `/`: relative to the master directory |
+| `/top.txt`, `v1/*.proto` | with a leading or inner `/`: relative to the upstream directory |
 | `test/` | trailing `/`: a directory (with everything below it) |
 | `**/gen/*.h` | `**/` any number of directories; `*` and `?` don't match `/`; `[abc]`, `[!abc]` |
 
@@ -494,31 +498,31 @@ git filesync add proto https://github.com/owner/backend.git -p api \
 ### `set`
 
 `set PATH… OPTIONS` – change the link of linked files: their source, their
-path in the master, whether they are strict. It does for files what
+upstream path, whether they are strict. It does for files what
 [`source`](#source) does for sources: only `.git-filesync` is changed (and
 staged); `status` then shows what changes, and `pull` syncs.
 
 | Option | Effect |
 |---|---|
-| `--source URL\|SOURCE` | link to another master – a fork, a moved repository – or to another `[source]`. URL, name and `-b` / `--tag` are taken as for [`add`](#add). If the files are all files of their source and there is no source with that URL and branch or tag yet, the source itself is changed; otherwise they move to that source (created if necessary), and a source left without files is removed |
+| `--source URL\|SOURCE` | link to another upstream repository – a fork, a moved repository – or to another `[source]`. URL, name and `-b` / `--tag` are taken as for [`add`](#add). If the files are all files of their source and there is no source with that URL and branch or tag yet, the source itself is changed; otherwise they move to that source (created if necessary), and a source left without files is removed |
 | `-b`, `--branch BRANCH` | with `--source`: as for `add`; without: the files follow BRANCH, like `pull -b`, but without syncing |
 | `--tag TAG` | with `--source`: as for `add`; without: [pin](#pinning-to-a-tag) the files to TAG, like `pull --tag`, but without syncing |
-| `-p`, `--path PATH` | another path in the master (exactly one file) |
+| `-p`, `--path PATH` | another upstream path (exactly one file) |
 | `--strict`, `--no-strict` | mark the files as [strict](#strict-files), or allow adaptations again |
 | `-n`, `--dry-run` | only show what would change |
 
 The synced version the files are based on (`commit` / `blob`) is kept where
 it still applies, so adaptations stay adaptations:
 
-- **another branch or tag** of the same master: kept as it is;
-- **another master** (`--source` with another URL): kept if that master has
+- **another branch or tag** of the same upstream: kept as it is;
+- **another upstream** (`--source` with another URL): kept if that one has
   it – the recorded commit, or else the newest commit on its branch with the
   same version of the file (e.g. a copy with a history of its own).
   Otherwise there is a warning, and the previous sync point counts as
   unknown;
-- **another path** (`-p`): looked up as for `add` – the master version the
+- **another path** (`-p`): looked up as for `add` – the upstream version the
   file matches; if none matches, the branch head, with a warning, and the
-  differences count as adaptations. (A file renamed in the master doesn't
+  differences count as adaptations. (A file renamed upstream doesn't
   need this: [`pull`](#pull) follows renames.)
 
 ```sh
@@ -548,9 +552,9 @@ own, or it goes into the next sync commit.
 
 | Command | Effect |
 |---|---|
-| `source` | list the source names (`-v`: with URL, branch or tag – for a tag also the [newer tags](#newer-tags) of the master – and number of linked files) |
+| `source` | list the source names (`-v`: with URL, branch or tag – for a tag also the [newer tags](#newer-tags) of upstream – and number of linked files) |
 | `source rename OLD NEW` | rename a source, including every `source =` line |
-| `source set-url NAME URL` | change the URL, e.g. after the master moved (its commits must be there) |
+| `source set-url NAME URL` | change the URL, e.g. after upstream moved (its commits must be there) |
 | `source set-branch NAME BRANCH` | follow BRANCH; for a source pinned to a tag only the branch to look for newer tags on (the tag stays) |
 | `source set-branch NAME --unset` | for a pinned source: look for newer tags on all branches |
 | `source set-tag NAME TAG` | [pin](#pinning-to-a-tag) to TAG; a branch stays, as the one to look for newer tags on |
@@ -573,7 +577,7 @@ shows what is to sync for the source's files.
 
 ### `map`
 
-`map [URL [DIR]]` – use the local checkout DIR instead of fetching the master
+`map [URL [DIR]]` – use the local checkout DIR instead of fetching the upstream
 URL. Without DIR, the mappings are listed (only those for URL, if given).
 
 | Option | Effect |
@@ -582,14 +586,14 @@ URL. Without DIR, the mappings are listed (only those for URL, if given).
 | `--unset` | remove the mapping for URL |
 
 ```sh
-cd slave-repo
+cd my-repo
 git filesync map https://github.com/owner/lib.git ~/src/lib
 ```
 
-This writes `filesync.<url>.localpath` into the **slave repository's own
-config** (`.git/config`). Different slaves can thus point to different
-checkouts of the same master – e.g. one at the newest state, another at an
-older one until its own code has been adapted.
+This writes `filesync.<url>.localpath` into the **downstream repository's
+own config** (`.git/config`). Different downstream repositories can thus
+point to different checkouts of the same upstream – e.g. one at the newest
+state, another at an older one until its own code has been adapted.
 
 With `--global` the mapping goes into your global Git config and applies to
 all repositories without a mapping of their own; a repository's own mapping
@@ -607,7 +611,7 @@ which branch is currently checked out there. Nothing is fetched; all of this
 works offline.
 
 - local branch ahead of the last sync → `N upstream commit(s) pending`
-- local branch older than the last sync (e.g. reset) → `master branch is N
+- local branch older than the last sync (e.g. reset) → `upstream branch is N
   commit(s) older than last sync`; `pull` goes back to it and the commit
   message lists what is reverted
 - a different branch checked out in the checkout, with a different version
@@ -622,7 +626,7 @@ works offline.
 
 `--remote` bypasses the mapping.
 
-Without a mapping, `status` and `pull` work against the master repository on
+Without a mapping, `status` and `pull` work against the upstream repository on
 the server. It is cached as a blobless partial clone in `~/.cache/git-filesync`
 (Windows: `%LOCALAPPDATA%\git-filesync`, override with `FILESYNC_CACHE`) and
 fetched (branches and tags) on each run – except when all that is needed is
@@ -649,14 +653,14 @@ lines; from other hooks it removes just those lines.
 ### Pinning to a tag
 
 Instead of following a branch, a source can be pinned to a tag, e.g. a
-release of the master:
+release of upstream:
 
 ```sh
 git filesync add cfg/x.yml https://github.com/owner/lib.git --tag v1.2.0
 ```
 
 `.git-filesync` then has `tag = v1.2.0` in the `[source]`. `status`
-compares against the version at the tag – commits on the master's branches
+compares against the version at the tag – commits on the upstream branches
 don't matter – and `pull` syncs to it. A `branch` in a pinned source (`add
 --tag v1.2.0 -b main`, or kept when a source following `main` is pinned)
 only says where to look for [newer tags](#newer-tags).
@@ -670,7 +674,7 @@ checkout is used, whatever is checked out there.
 Since a pinned file only changes when the tag does, `pull` usually has
 nothing to do – except to bring a file back to the tag's version (e.g. after
 `pull --commit`) or after the tag was changed. To learn about newer
-releases, `pull`, `status -v` and `source -v` fetch the master's tags (unless
+releases, `pull`, `status -v` and `source -v` fetch the upstream tags (unless
 `--no-fetch`) and name the [newer tags](#newer-tags).
 
 To move on to a newer release, switch and sync in one step:
@@ -710,7 +714,7 @@ went through. Tags on side branches merged into it don't count.
   hint: owner/lib is pinned to tag v1.2.0; newer tags: v1.2.1 on maint; v1.4.0 on main (use 'git filesync pull --tag TAG <file>...' to switch, 'git filesync source set-branch owner/lib BRANCH' to look on one branch only)
   ```
 
-Pre-releases count like any other tag. Branches are those of the master
+Pre-releases count like any other tag. Branches are those of upstream
 (`origin/…` in the cache); with a [mapped checkout](#map) its local branches
 and tags, unpushed ones included.
 
@@ -732,9 +736,9 @@ whatever its message, and on `git reset`.
   `.git/FILESYNC_MSG_*` and prints a `git commit -e -F …` command that uses
   it.
 
-### Files renamed or deleted in the master
+### Files renamed or deleted upstream
 
-When the linked path no longer exists in the master, `status` looks at the
+When the linked path no longer exists upstream, `status` looks at the
 commit that removed it:
 
 - **renamed** (also with changes, also several times): shown as
@@ -743,7 +747,7 @@ commit that removed it:
   entry, merges adaptations as usual and notes the rename in the commit
   message (`Renamed upstream: lib/foo.c -> lib/bar.c`); the listed commits
   cover both paths.
-- **deleted**: shown as `deleted:    src/foo.c  (in the master, by 1a2b3c4)`,
+- **deleted**: shown as `deleted:    src/foo.c  (upstream, by 1a2b3c4)`,
   short format `X`, counted as something to do by `--exit-code` and the
   hooks. `pull` refuses and says what to do: keep the file as your own
   with `git filesync unlink src/foo.c`, or delete it too with
@@ -758,17 +762,17 @@ file](#the-git-filesync-file)).
 
 ### Git LFS
 
-Whether a synced file is stored in Git LFS in the master, in the slave, in
-both or in neither doesn't matter:
+Whether a synced file is stored in Git LFS upstream, downstream, in both or
+in neither doesn't matter:
 
-- Master side: LFS pointers are resolved to the real content (`git lfs
+- Upstream side: LFS pointers are resolved to the real content (`git lfs
   smudge` in the mapped checkout or the cache; the content comes from the
-  local LFS store or the master's LFS server). Comparisons against a master
+  local LFS store or the upstream LFS server). Comparisons against an upstream
   file in LFS use the pointer's SHA-256, so no download is needed to tell
-  whether the slave's copy is unmodified.
-- Slave side: the file is written as real content and stored the way the
-  slave's `.gitattributes` say – as an LFS object if it is tracked there,
-  as a regular blob otherwise.
+  whether the downstream copy is unmodified.
+- Downstream side: the file is written as real content and stored the way
+  the downstream repository's `.gitattributes` say – as an LFS object if it
+  is tracked there, as a regular blob otherwise.
 - `diff`, `difftool` and merges always work on the real content.
 
 If LFS content can't be retrieved (git-lfs missing, LFS server unreachable,
@@ -777,11 +781,11 @@ writing a pointer file.
 
 ### Line endings
 
-Master and slave may normalize differently (e.g. CRLF committed in the
-master, `core.autocrlf` or `text=auto` in the slave). The master's content is
-always compared and merged in the form the slave would store it, and written
-as a checkout of the slave would produce it – no false "local
-modifications", no eol-only conflicts.
+Upstream and downstream may normalize differently (e.g. CRLF committed
+upstream, `core.autocrlf` or `text=auto` downstream). The upstream content
+is always compared and merged in the form the downstream repository would
+store it, and written as a checkout there would produce it – no false
+"local modifications", no eol-only conflicts.
 
 ### Offline operation
 
@@ -809,7 +813,7 @@ way. `diff` is colored by `git diff` itself.
 
 ### CI
 
-A scheduled job in the slave repo fails when a sync is pending
+A scheduled job in the downstream repo fails when a sync is pending
 (`status --exit-code`), so e.g. GitHub notifies you:
 
 ```yaml
@@ -828,7 +832,7 @@ jobs:
 
 This uses the latest release. To pin a version, download
 `https://github.com/stsichler/git-filesync/releases/download/v0.5.0/git-filesync.py`
-instead. (For private master repositories the job needs a token with read
+instead. (For private upstream repositories the job needs a token with read
 access.)
 
 ### Exit codes
@@ -836,7 +840,7 @@ access.)
 | Code | Meaning |
 |---|---|
 | `0` | ok |
-| `1` | unfinished: `pull` with conflicts or without commit; `status --exit-code` with something to sync (including files deleted in the master) or a strict violation; `diff -- --exit-code` with differences |
+| `1` | unfinished: `pull` with conflicts or without commit; `status --exit-code` with something to sync (including files deleted upstream) or a strict violation; `diff -- --exit-code` with differences |
 | `2` | error |
 
 `--dry-run` / `-n` exit with 0, or 2 on errors – also for refusals they
@@ -861,7 +865,7 @@ arguments before git-filesync sees them:
   file matches: `git filesync add 'f[1].txt' …` turns into `f1.txt` when
   that file exists.
 - **Arguments starting with `/`** become Windows paths: `--include /x.md`
-  turns into `C:/Program Files/Git/x.md`. For the master's root, `-p .`
+  turns into `C:/Program Files/Git/x.md`. For the upstream root, `-p .`
   works as well as `-p /`.
 
 For such arguments, run the script directly instead of through the alias,

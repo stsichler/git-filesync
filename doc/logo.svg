@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img">
   <title>git-filesync</title>
   <g stroke-linejoin="round" stroke-linecap="round">
-    <!-- master file -->
+    <!-- upstream file -->
     <path d="M14 12H46L60 26V72H14Z" fill="#F05133" stroke="#F05133" stroke-width="4"/>
     <path d="M46 12V26H60" fill="#FFFFFF" fill-opacity=".45" stroke="#FFFFFF" stroke-width="3"/>
     <path d="M23 38H51M23 48H51M23 58H41" stroke="#FFFFFF" stroke-width="5"/>

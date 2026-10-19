@@ -8,9 +8,9 @@
 ![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
 
 **Keep individual files in sync between Git repositories.** One repository is
-the **master** where a file is developed; other repositories (**slaves**)
+**upstream**, where a file is developed; other repositories (**downstream**)
 carry a copy of it and pull updates manually, one file at a time – with a
-commit message listing every master commit that changed the file since the
+commit message listing every upstream commit that changed the file since the
 last sync.
 
 ```console
@@ -36,7 +36,7 @@ meaningful commit.
 Because each linked file is a real copy committed in your repository, the
 repository stays **self-contained**: after a plain clone or checkout every
 file is there – unlike with Git submodules, nothing has to be fetched from
-other repositories, and neither git-filesync nor access to the master is
+other repositories, and neither git-filesync nor access to the upstream repository is
 needed to build.
 
 For files another project publishes as **release assets** – a tool binary,
@@ -51,8 +51,8 @@ way.
 | Unit | a whole repository, in its own directory | single files, each at any path in your repository |
 | What your repository contains | a pointer to a commit in the other repository | a real copy of the file, committed like any other file |
 | Local changes | made and committed in the other repository | allowed in your repository as committed adaptations, kept on every sync by a 3-way merge – or forbidden per file (`strict`) |
-| Cloning and building | needs `--recurse-submodules` and access to every submodule repository | a plain clone is complete and works on its own, even if a master repository is no longer reachable |
-| Updating | moves the pointer; your log shows only the new commit id | `pull` per file; the commit contains the actual change and lists the master commits it brings |
+| Cloning and building | needs `--recurse-submodules` and access to every submodule repository | a plain clone is complete and works on its own, even if an upstream repository is no longer reachable |
+| Updating | moves the pointer; your log shows only the new commit id | `pull` per file; the commit contains the actual change and lists the upstream commits it brings |
 | For everyone else | `git submodule update` after clones, pulls and branch switches | nothing – only whoever syncs needs git-filesync |
 
 Submodules remain the better choice when you want a whole repository
@@ -69,7 +69,7 @@ git-vendor manages that directory exclusively – files of your own in it are
 removed – and discards local changes on update (keeping them as a patch is
 experimental there). git-filesync links single files at any path – next to
 your own files, under another name if you like – keeps your committed
-adaptations by merging, and lists the master commits in every sync commit.
+adaptations by merging, and lists the upstream commits in every sync commit.
 To take a whole directory, `add` links all its files (with `--include` /
 `--exclude` patterns) in one go; each of them is an ordinary link
 afterwards.
@@ -77,21 +77,21 @@ afterwards.
 ## Features
 
 - Links single files between repositories – one by one or all files of a
-  master directory at once; all links of a slave live in one file,
+  upstream directory at once; all links of a repository live in one file,
   `.git-filesync`, at its root (git-config format, like `.gitmodules`)
-- Self-contained slaves: linked files are committed copies, so a clone is
+- Self-contained repositories: linked files are committed copies, so a clone is
   complete without fetching anything from other repositories
-- Follows a branch of the master, or is pinned to a tag (e.g. a release) –
+- Follows an upstream branch, or is pinned to a tag (e.g. a release) –
   with a hint at newer tags; `pull --tag` switches and syncs in one step
-- Proposed commit message lists all master commits touching the file since
+- Proposed commit message lists all upstream commits touching the file since
   the last sync
-- Local adaptations on top of the master version are kept via 3-way merge,
+- Local adaptations on top of the upstream version are kept via 3-way merge,
   shown with `diff` / `difftool` – or forbidden per file (`strict`)
-- Files renamed in the master are followed, deleted ones reported
+- Files renamed upstream are followed, deleted ones reported
 - Commands named like Git commands behave like them (`status`, `pull`,
   `diff`, `difftool`, `mv`); dry runs for `pull`, `add`, `unlink`, `mv`
-- Optional local checkout of the master instead of fetching – works offline
-- Git LFS in the master, the slave, both or neither
+- Optional local checkout of the upstream repository instead of fetching – works offline
+- Git LFS upstream, downstream, both or neither
 - Correct with differing line-ending conventions (`core.autocrlf`, `text=auto`)
 - Colored output, reminder hooks, CI-friendly exit codes
 - One self-contained Python script, standard library only
@@ -131,10 +131,10 @@ everyone has the same version – see
 ## Quick start
 
 ```sh
-cd slave-repo
+cd my-repo
 
 # 1. Link a file (once): staged like git add, then committed - git commit
-#    offers the proposed message. Without -b the master's default branch is
+#    offers the proposed message. Without -b the upstream default branch is
 #    used, without -p the same path as here.
 git filesync add src/foo.c https://github.com/owner/lib.git -p lib/foo.c
 git commit
@@ -165,13 +165,13 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | Command | Purpose |
 |---|---|
 | `status [PATH…]` | state of the linked files, like `git status` |
-| `pull PATH…`, `pull --all` | sync files from the master, keeping local adaptations |
-| `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced master version |
-| `add FILE\|DIR URL\|SOURCE` | link a file (or all files of a master directory) to the master |
-| `set PATH… OPTIONS` | change source, master path or strict of linked files |
+| `pull PATH…`, `pull --all` | sync files from upstream, keeping local adaptations |
+| `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced upstream version |
+| `add FILE\|DIR URL\|SOURCE` | link a file (or all files of an upstream directory) to upstream |
+| `set PATH… OPTIONS` | change source, upstream path or strict of linked files |
 | `unlink PATH…`, `mv OLD NEW` | remove or move links |
 | `source [ACTION …]` | list sources; rename, change URL, branch or tag |
-| `map [URL [DIR]]` | use a local checkout of the master instead of fetching |
+| `map [URL [DIR]]` | use a local checkout of the upstream repository instead of fetching |
 | `install-hooks`, `uninstall-hooks` | reminder hooks for `push` and `merge` |
 
 `git filesync <command> -h` lists the options of a command. The
@@ -187,13 +187,13 @@ The whole tool is the single file `git-filesync.py`. Tests:
 test/regress.sh            # Linux/macOS (bash); needs git, python3, git-lfs for the LFS part
 ```
 
-The script builds throwaway master/slave repositories in a temp directory
+The script builds throwaway upstream/downstream repositories in a temp directory
 and checks linking, status, pull, merge, conflicts, diff / difftool, strict
 files, `.git-filesync` handling (sources, unlink, mv, commit consistency),
 unsafe registry entries, wildcard characters in file names, local checkout
 mappings, offline operation, eol handling (autocrlf /
 text=auto / plain), Git LFS in all combinations, colors, hooks, tags,
-sources, files renamed or deleted in the master, dry runs and directories. It runs on
+sources, files renamed or deleted upstream, dry runs and directories. It runs on
 every push via GitHub Actions.
 
 Issues and pull requests are welcome. Please add a test to `test/regress.sh`
