@@ -208,6 +208,7 @@ import tempfile
 import time
 from collections import namedtuple
 from dataclasses import dataclass, field
+from typing import Optional
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
@@ -1094,6 +1095,7 @@ def ref_text(ref, line=None):
 def spec_text(spec):
     """'branch main' / 'tag v1.2' / 'tag v1.2 on main' - for messages."""
     ref = source_ref(spec)
+    assert ref, "a spec has a branch or a tag"
     return ref_text(ref, source_line(spec)) if ref[0] == "tag" else f"branch {ref[1]}"
 
 
@@ -1372,25 +1374,25 @@ class FileState:
     old_blob: str
     new_path: str             # upstream path, the new one if renamed there
     strict: bool
-    error: str = None
+    error: Optional[str] = None
     warnings: list = field(default_factory=list)
     src: object = None        # Source of the upstream repository
-    new: str = None           # upstream commit and blob a pull would sync to
-    new_blob: str = None
+    new: Optional[str] = None  # upstream commit and blob a pull would sync to
+    new_blob: Optional[str] = None
     count: int = 0            # upstream commits touching the file since the sync
     behind: int = 0           # ... or by how many the branch went back
     has_old: bool = False     # synced commit exists upstream
     diverged: bool = False
-    moved: tuple = None       # ('renamed' | 'deleted', path, commit)
-    newest: list = None       # newer tags of a pinned source
-    committed: str = None     # see evaluate()
+    moved: Optional[tuple] = None   # ('renamed' | 'deleted', path, commit)
+    newest: Optional[list] = None   # newer tags of a pinned source
+    committed: Optional[str] = None  # see evaluate()
     worktree: str = "clean"
     local: str = "clean"
-    head_blob: str = None
+    head_blob: Optional[str] = None
     changed: bool = False     # upstream version differs from the base
     pending: bool = False     # something for pull to do
     violation: bool = False   # strict file modified
-    repinned: str = None      # pull -b/--tag: the previous branch or tag
+    repinned: Optional[str] = None  # pull -b/--tag: the previous branch or tag
 
 
 def evaluate(ctx, repo, link):
@@ -2420,6 +2422,7 @@ def cmd_add(ctx, repo, args):
         raise FsError(f"cannot link '{rel}': {problem}")
     url, spec, named = add_ref(ctx, reg, args)
     ref = source_ref(spec)
+    assert ref, "add_ref gives a branch or a tag"
     any_line = "branch" not in spec    # --tag without -b: any branch to look on
     src = ctx.source(url, ref, named or reg.source_name(url, spec, any_line))
     head = src.resolve()
@@ -2914,19 +2917,19 @@ def cmd_cache(args):
         if not clones:
             print(f"the cache is empty ({root})")
         return EXIT_OK
-    if action == "clear":
-        removed = prune_cache(None, 0, args.dry_run, grace=False)
-    elif action == "prune":
-        max_age, max_size = cache_limits()
-        if args.older_than is not None:
-            max_age = args.older_than
-        if args.max_size is not None:
-            max_size = parse_size(args.max_size)
-        if max_age is None and max_size is None:
-            print("no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize) - nothing to do")
-            return EXIT_OK
-        removed = prune_cache(max_age, max_size, args.dry_run)
     if action in ("prune", "clear"):
+        if action == "clear":
+            removed = prune_cache(None, 0, args.dry_run, grace=False)
+        else:
+            max_age, max_size = cache_limits()
+            if args.older_than is not None:
+                max_age = args.older_than
+            if args.max_size is not None:
+                max_size = parse_size(args.max_size)
+            if max_age is None and max_size is None:
+                print("no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize) - nothing to do")
+                return EXIT_OK
+            removed = prune_cache(max_age, max_size, args.dry_run)
         verb = "would remove" if args.dry_run else "removed"
         for item in removed:
             print(f"{verb} {describe_clone(item).lstrip()}")
@@ -3136,11 +3139,11 @@ def cmd_uninstall_hooks(repo, args):
 
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
-        try:
-            # LF line ends like git's output, also on Windows (no CRLF translation)
-            stream.reconfigure(errors="replace", newline="\n")
-        except AttributeError:
-            pass
+        # LF line ends like git's output, also on Windows (no CRLF translation);
+        # not there if the stream was replaced (e.g. by a test harness)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(errors="replace", newline="\n")
 
     colorp = argparse.ArgumentParser(add_help=False)
     colorp.add_argument("--color", nargs="?", const="always", default="auto",
