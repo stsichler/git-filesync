@@ -401,6 +401,17 @@ check "list marks overridden global" \
 check "after local unset, global applies" "$(cd sB && st)" "P"
 check "local map outside repo fails" "$(rc git filesync map "$URL3" "$T/coA")" "2"
 
+# the name of a [source] instead of the URL: the mapping belongs to the URL
+SRC3=$(git -C sB config -f .git-filesync file.x.c.source)
+(cd sB && git filesync map "$SRC3" "$T/coB" >/dev/null)
+check "map SOURCE: mapping for its URL" \
+  "$(cd sB && git filesync map "$URL3" | grep -c "^\[local\] $URL3 -> .*coB$")" "1"
+check "map SOURCE: listing by name" "$(cd sB && git filesync map "$SRC3" | grep -c '^\[local\]')" "1"
+(cd sB && git filesync map "$SRC3" --unset >/dev/null)
+check "map SOURCE --unset" "$(git -C sB config --local --get-regexp '^filesync\.' | lines)" "0"
+check "map: mistyped source name refused" "$(cd sB && rc git filesync map no-such-source "$T/coB")" "2"
+check "map: nothing written for it" "$(git -C sB config --local --get-regexp '^filesync\.' | lines)" "0"
+
 # A mapped repository follows the link's branch in the checkout (refs/heads/main),
 # not whatever is checked out there.
 (cd sB && git filesync map "$URL3" "$T/coB" >/dev/null)

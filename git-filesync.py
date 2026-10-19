@@ -144,11 +144,12 @@ follow the command.
                                 missing
     source set-tag NAME --unset  remove the tag: follow the branch again
 
-    map [URL [DIR]]             use the local checkout DIR instead of fetching
-                                URL; its branch is used, unpushed commits
-                                included; without DIR: list mappings
+    map [URL|SOURCE [DIR]]      use the local checkout DIR instead of fetching
+                                URL (SOURCE: the URL of that [source]); its
+                                branch is used, unpushed commits included;
+                                without DIR: list mappings
         --global                global git config (default: this repository)
-        --unset                 remove the mapping for URL
+        --unset                 remove the mapping for the URL
 
     install-hooks               install pre-push/post-merge hooks (or update
                                 them): reminders about pending syncs, strict
@@ -2594,16 +2595,43 @@ def print_mappings(maps, url=None):
         print("no mappings" + (f" for {url}" if url else ""))
 
 
+def looks_like_url(s):
+    """'scheme://...' or scp-like 'host:path' (also 'C:/...') - never taken
+    as the name of a [source]."""
+    return "://" in s or bool(re.match(r"[^/]+:", s))
+
+
+def map_url(repo, arg, setting):
+    """The URL map works on: arg, or the url of the [source] named arg in this
+    repository's .git-filesync (a URL-like arg is always a URL). When
+    setting a mapping, an arg that is neither (nor an existing path, which
+    git takes as a URL too) is refused - most likely a mistyped name."""
+    if not arg or looks_like_url(arg):
+        return arg
+    if repo:
+        source = Registry(repo).sources.get(arg)
+        if source is not None:
+            if not source.get("url"):
+                raise FsError(f"[source \"{arg}\"] in {REGISTRY} has no url")
+            return source["url"]
+    if setting and not (repo.base if repo else Path.cwd()).joinpath(arg).exists():
+        where = f"a [source] in {REGISTRY}" if repo else "a [source] (not inside a repository)"
+        raise FsError(f"'{arg}' is neither a URL nor {where}")
+    return arg
+
+
 def cmd_map(args, repo):
     """Map an upstream URL to a local checkout. Default scope is the current
     repository's config, so different repositories can use different
-    checkouts of the same upstream; --global applies to all repositories."""
+    checkouts of the same upstream; --global applies to all repositories.
+    Instead of the URL, the name of a [source] may be given."""
     top = repo.top if repo else None
+    args.url = map_url(repo, args.url, bool(args.dir))
     if not args.dir and not args.unset:      # listing: all scopes visible here
         print_mappings(local_mappings(cwd=top), args.url)
         return EXIT_OK
     if not args.url:
-        raise FsError("--unset needs the URL of the mapping to remove")
+        raise FsError("--unset needs the URL (or source) of the mapping to remove")
     if args.glob:
         scope = "--global"
     elif repo:
@@ -2955,9 +2983,11 @@ def main(argv=None):
 
     p = sub.add_parser("map", parents=[colorp], help="use a local checkout for an upstream URL "
                                                      "(this repo's config; --global for all repos)")
-    p.add_argument("url", nargs="?", help="upstream URL (without DIR: list its mappings)")
+    p.add_argument("url", nargs="?", metavar="URL|SOURCE",
+                   help="upstream URL, or the name of a [source] for its URL "
+                        "(without DIR: list its mappings)")
     p.add_argument("dir", nargs="?", help="local checkout of the upstream repository")
-    p.add_argument("--unset", action="store_true", help="remove the mapping for URL")
+    p.add_argument("--unset", action="store_true", help="remove the mapping for the URL")
     p.add_argument("--global", dest="glob", action="store_true",
                    help="use the global git config instead of this repository's")
 

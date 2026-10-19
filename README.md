@@ -172,7 +172,7 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `set PATH… OPTIONS` | change source, upstream path or strict of linked files |
 | `unlink PATH…`, `mv OLD NEW` | remove or move links |
 | `source [ACTION …]` | list sources; rename, change URL, branch or tag |
-| `map [URL [DIR]]` | use a local checkout of the upstream repository instead of fetching |
+| `map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
 | `install-hooks`, `uninstall-hooks` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |
 
 `git filesync <command> -h` lists the options of a command. The

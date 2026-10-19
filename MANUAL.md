@@ -138,7 +138,7 @@ or lift the restriction (`git filesync set --no-strict FILE`).
 | [`unlink PATH…`](#unlink) | remove links, keep the files |
 | [`mv OLD NEW`](#mv) | move a linked file and its link |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
-| [`map [URL [DIR]]`](#map) | use a local checkout of upstream |
+| [`map [URL\|SOURCE [DIR]]`](#map) | use a local checkout of upstream |
 | [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks) | hooks: reminders, push check |
 
 Commands named like a Git command behave like it (`status`, `pull`, `diff`,
@@ -576,18 +576,27 @@ shows what is to sync for the source's files.
 
 ### `map`
 
-`map [URL [DIR]]` – use the local checkout DIR instead of fetching the upstream
-URL. Without DIR, the mappings are listed (only those for URL, if given).
+`map [URL|SOURCE [DIR]]` – use the local checkout DIR instead of fetching the
+upstream URL. Instead of the URL, the name of a `[source]` in
+`.git-filesync` can be given: its URL is meant – the mapping always belongs
+to the URL, so it applies to every source with that URL. Without DIR, the
+mappings are listed (only those for the URL, if given).
 
 | Option | Effect |
 |---|---|
 | `--global` | in your global Git config, for all repositories (default: this repository's config) |
-| `--unset` | remove the mapping for URL |
+| `--unset` | remove the mapping for the URL |
 
 ```sh
 cd my-repo
 git filesync map https://github.com/owner/lib.git ~/src/lib
+git filesync map owner/lib ~/src/lib      # the same, by the name of the [source]
 ```
+
+Something that looks like a URL (`scheme://…`, or `host:path` like
+`git@github.com:owner/lib.git`) is always taken as one. An argument that
+is neither a URL, nor a source, nor an existing path is refused when
+setting a mapping – most likely a mistyped name.
 
 This writes `filesync.<url>.localpath` into the **downstream repository's
 own config** (`.git/config`). Different downstream repositories can thus
