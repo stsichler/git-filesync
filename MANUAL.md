@@ -13,7 +13,7 @@ For motivation and installation see the [README](README.md).
 - [Commands](#commands)
   - [Common options](#common-options)
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool)
-  - [`add`](#add) · [`set`](#set) · [`edit`](#edit) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map)
+  - [`add`](#add) · [`set`](#set) · [`edit`](#edit) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map) · [`cache`](#cache)
   - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted upstream](#files-renamed-or-deleted-upstream)
@@ -140,6 +140,7 @@ or lift the restriction (`git filesync set --no-strict FILE`).
 | [`mv OLD NEW`](#mv) | move a linked file and its link |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
 | [`map [URL\|SOURCE [DIR]]`](#map) | use a local checkout of upstream |
+| [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear |
 | [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks) | hooks: reminders, push check |
 
 Commands named like a Git command behave like it (`status`, `pull`, `diff`,
@@ -663,7 +664,49 @@ URL. File contents are fetched only when needed, which requires Git's wire
 protocol v2: git-filesync asks for it, whatever `protocol.version` says (Git
 2.27 and 2.28 default to v0); GitHub, GitLab and other current servers
 support it. The cache only holds what can be fetched again: deleting it is
-safe, the next run clones anew.
+safe, the next run clones anew. See [`cache`](#cache) for its size and how
+it is cleaned up.
+
+### `cache`
+
+```
+git filesync cache [list | prune [--older-than DAYS] [--max-size SIZE] [-n] | clear [-n] | dir]
+```
+
+The cache of upstream clones (one blobless clone per URL, see
+[`map`](#map)), shared by all repositories of your user. Works outside a
+repository, too.
+
+```
+$ git filesync cache
+/home/me/.cache/git-filesync: 12 clones, 85.3 MiB
+cleaned up automatically: clones unused for 90 days (filesync.cacheMaxAge, filesync.cacheMaxSize)
+$ git filesync cache list
+  31.2 MiB  2026-10-19  https://github.com/owner/lib.git
+   4.1 MiB  2026-09-02  https://gitlab.com/group/tools.git
+…
+```
+
+| Action | Effect |
+|---|---|
+| (none) | where the cache is, how big, and its limits |
+| `list` | the clones, most recently used first: size, last used, URL |
+| `prune` | remove clones not used for `filesync.cacheMaxAge` days, then the least recently used beyond `filesync.cacheMaxSize`; `--older-than DAYS` and `--max-size SIZE` (e.g. `500M`, `2G`) set other limits for this run; `-n` only shows what would be removed |
+| `clear` | remove all clones (`-n`: only show them) |
+| `dir` | print the cache's directory, e.g. to keep it between CI runs |
+
+**Automatically**, after a fetch and at most once a day, the cache is
+cleaned up by the configured limits:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `filesync.cacheMaxAge` | `90` | remove clones unused for that many days; `0` or `off`: never |
+| `filesync.cacheMaxSize` | (none) | then remove the least recently used clones until the cache is at most this big, e.g. `2G`; `0` or `off`: no limit |
+
+A clone used in the last minutes is never removed, so a command running in
+parallel doesn't lose its clone. A removed clone is simply cloned again
+when it is needed; only the offline fallback ("using cached state") needs
+it to be there.
 
 ### `install-hooks`, `uninstall-hooks`
 

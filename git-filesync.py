@@ -155,6 +155,19 @@ follow the command.
         --global                global git config (default: this repository)
         --unset                 remove the mapping for the URL
 
+    cache                       the cache of upstream clones: where, how big,
+                                the limits
+    cache list                  its clones, most recently used first
+    cache prune                 remove clones not used for 90 days (or as
+                                configured: filesync.cacheMaxAge DAYS,
+                                filesync.cacheMaxSize SIZE; 0/off: none) -
+                                also done automatically after a fetch, at
+                                most once a day
+        --older-than DAYS, --max-size SIZE  other limits (SIZE: 500M, 2G)
+        -n, --dry-run           only show what would be removed
+    cache clear [-n]            remove all clones
+    cache dir                   print its directory (e.g. for CI caching)
+
     install-hooks               install pre-push/post-merge hooks (or update
                                 them): reminders about pending syncs, strict
                                 violations, errors; pre-push also warns if a
@@ -188,9 +201,11 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 from collections import namedtuple
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
@@ -336,6 +351,142 @@ def cache_root():
     else:
         base = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     return Path(base) / "git-filesync"
+
+
+# cache clones unused for this many days are removed (filesync.cacheMaxAge),
+# checked at most once per CACHE_PRUNE_EVERY seconds; never one used in the
+# last CACHE_GRACE seconds. USED_MARKER in a clone: touched on each use.
+CACHE_MAX_AGE, CACHE_PRUNE_EVERY, CACHE_GRACE = 90, 86400, 600
+USED_MARKER = "filesync-last-used"
+
+
+def human_size(n):
+    """'512 bytes' / '1.2 KiB' / '3.4 MiB' / '1.1 GiB'."""
+    for unit in ("bytes", "KiB", "MiB"):
+        if n < 1024:
+            return f"{n} {unit}" if unit == "bytes" else f"{n:.1f} {unit}"
+        n /= 1024
+    return f"{n:.1f} GiB"
+
+
+def parse_size(text):
+    """Bytes of '500M', '2G', '1.5GiB', '100k', '1000' (1024-based)."""
+    m = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt]?)(?:i?b)?\s*", text or "", re.I)
+    if not m:
+        raise FsError(f"'{text}' is not a size like 500M or 2G")
+    return int(float(m.group(1)) * 1024 ** " kmgt".index(m.group(2).lower() or " "))
+
+
+def rmtree(path):
+    """Remove a directory tree - also Git's read-only pack files on Windows."""
+    def retry(func, p, _):
+        os.chmod(p, stat.S_IWRITE)
+        func(p)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=retry)
+    else:
+        shutil.rmtree(path, onerror=retry)
+
+
+def touch_used(d):
+    """Note that cache clone d was used now (for cleaning up the cache)."""
+    try:
+        (d / USED_MARKER).touch()
+    except OSError:
+        pass
+
+
+def cache_clones():
+    """[(dir, size, last used, url)] of the clones in the cache, most
+    recently used first."""
+    root = cache_root()
+    result = []
+    for d in root.glob("*.git") if root.is_dir() else []:
+        if not d.is_dir():
+            continue
+        size = 0
+        for base, _, files in os.walk(d):
+            for f in files:
+                try:
+                    size += os.lstat(os.path.join(base, f)).st_size
+                except OSError:
+                    pass
+        used = 0.0
+        for f in (d / USED_MARKER, d / "FETCH_HEAD", d):      # older clones: no marker
+            try:
+                used = f.stat().st_mtime
+                break
+            except OSError:
+                continue
+        url = out(git(["-C", d, "config", "remote.origin.url"], env=clean_env(), check=False))
+        result.append((d, size, used, url))
+    return sorted(result, key=lambda x: x[2], reverse=True)
+
+
+def cache_limits():
+    """(max age in days, max size in bytes) from filesync.cacheMaxAge
+    (default CACHE_MAX_AGE) and filesync.cacheMaxSize (default none);
+    None = no limit ('0' or 'off')."""
+    off = ("0", "off", "false", "no", "never")
+    age, size = (out(git(["config", f"filesync.{key}"], check=False)).strip()
+                 for key in ("cacheMaxAge", "cacheMaxSize"))
+    if not age:
+        max_age = CACHE_MAX_AGE
+    elif age.lower() in off:
+        max_age = None
+    elif age.isdigit():
+        max_age = int(age)
+    else:
+        raise FsError(f"filesync.cacheMaxAge: '{age}' is not a number of days")
+    return max_age, None if not size or size.lower() in off else parse_size(size)
+
+
+def prune_cache(max_age, max_size, dry_run=False, grace=True):
+    """Remove the clones not used for max_age days, then the least recently
+    used until the cache is at most max_size - with grace never one used in
+    the last minutes; also leftovers of unfinished clones. Returns the
+    removed [(dir, size, last used, url)]. A removed clone is simply cloned
+    again when needed."""
+    now, removed = time.time(), []
+    clones = cache_clones()
+    total = sum(size for _, size, _, _ in clones)
+    for item in reversed(clones):                 # least recently used first
+        d, size, used, _ = item
+        if grace and now - used < CACHE_GRACE:
+            continue
+        if (max_age is not None and now - used > max_age * 86400) or \
+                (max_size is not None and total > max_size):
+            if not dry_run:
+                try:
+                    rmtree(d)
+                except OSError:
+                    continue
+            removed.append(item)
+            total -= size
+    if not dry_run:
+        root = cache_root()
+        for d in root.glob("*.git.tmp*") if root.is_dir() else []:
+            try:
+                if now - d.stat().st_mtime > 86400:
+                    rmtree(d)
+            except OSError:
+                pass
+    return removed
+
+
+def auto_prune():
+    """After a clone or fetch: clean up the cache by the configured limits,
+    at most once a day. Never fails a command."""
+    marker = cache_root() / "last-prune"
+    try:
+        if marker.is_file() and time.time() - marker.stat().st_mtime < CACHE_PRUNE_EVERY:
+            return
+        max_age, max_size = cache_limits()
+        marker.write_text("", encoding="ascii")
+        if max_age is not None or max_size is not None:
+            prune_cache(max_age, max_size)
+    except (FsError, OSError) as e:
+        warn(f"cache not cleaned up: {e}")
 
 
 MAP_REGEX = r"^filesync\..+\.localpath$"
@@ -760,6 +911,7 @@ class Context:
                     shutil.rmtree(tmp, ignore_errors=True)
         elif tag and not self.want_tags and git(["-C", d, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
                          env=env, check=False).returncode == 0:
+            touch_used(d)
             return d       # not marked ready: a branch of the same URL still fetches
         elif self.fetch:
             p = git(["-C", d] + fetch, env=env, check=False)
@@ -767,6 +919,9 @@ class Context:
                 warn(f"fetching {url} failed, using cached state")
                 self._fetch_failed.add(d)
             self._drop_heads(d)
+        touch_used(d)
+        if self.fetch:
+            auto_prune()
         self._ready.add(d)
         return d
 
@@ -2738,6 +2893,59 @@ def cmd_map(args, repo):
     return EXIT_OK
 
 
+def describe_clone(item):
+    _, size, used, url = item
+    return (f"{human_size(size):>10}  {time.strftime('%Y-%m-%d', time.localtime(used))}  "
+            f"{url or paint('(URL unknown)', 'dim')}")
+
+
+def cmd_cache(args):
+    """Show, list and clean up the cache of upstream clones (shared by all
+    repositories of this user)."""
+    root = cache_root()
+    action = args.action
+    if action == "dir":
+        print(root)
+        return EXIT_OK
+    if action == "list":
+        clones = cache_clones()
+        for item in clones:
+            print(describe_clone(item))
+        if not clones:
+            print(f"the cache is empty ({root})")
+        return EXIT_OK
+    if action == "clear":
+        removed = prune_cache(None, 0, args.dry_run, grace=False)
+    elif action == "prune":
+        max_age, max_size = cache_limits()
+        if args.older_than is not None:
+            max_age = args.older_than
+        if args.max_size is not None:
+            max_size = parse_size(args.max_size)
+        if max_age is None and max_size is None:
+            print("no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize) - nothing to do")
+            return EXIT_OK
+        removed = prune_cache(max_age, max_size, args.dry_run)
+    if action in ("prune", "clear"):
+        verb = "would remove" if args.dry_run else "removed"
+        for item in removed:
+            print(f"{verb} {describe_clone(item).lstrip()}")
+        size = sum(s for _, s, _, _ in removed)
+        recent = action == "prune" and any(time.time() - used < CACHE_GRACE
+                                           for _, _, used, _ in cache_clones())
+        print(f"{verb} {plural(len(removed), 'clone')} ({human_size(size)}) from the cache"
+              + (" - clones used in the last minutes are kept" if recent else ""))
+        return EXIT_OK
+    clones = cache_clones()
+    max_age, max_size = cache_limits()
+    print(f"{root}: {plural(len(clones), 'clone')}, {human_size(sum(s for _, s, _, _ in clones))}")
+    limits = ([f"clones unused for {max_age} days"] if max_age is not None else []) + \
+        ([f"the least recently used above {human_size(max_size)}"] if max_size is not None else [])
+    print("cleaned up automatically: " + (" and ".join(limits) if limits else "never")
+          + " (filesync.cacheMaxAge, filesync.cacheMaxSize)")
+    return EXIT_OK
+
+
 def hook_reminders(ctx, repo):
     """Terse notes on stderr about linked files needing attention: something
     to sync, a strict violation, an error."""
@@ -3089,6 +3297,23 @@ def main(argv=None):
     p.add_argument("--global", dest="glob", action="store_true",
                    help="use the global git config instead of this repository's")
 
+    p = sub.add_parser("cache", parents=[colorp],
+                       help="show, list or clean up the cache of upstream clones")
+    actions = p.add_subparsers(dest="action", metavar="ACTION")
+    actions.add_parser("list", parents=[colorp],
+                       help="the clones, most recently used first: size, last used, URL")
+    a = actions.add_parser("prune", parents=[colorp],
+                           help="remove clones not used for a while (default: the configured "
+                                "limits, filesync.cacheMaxAge / cacheMaxSize)")
+    a.add_argument("--older-than", type=int, metavar="DAYS",
+                   help="clones not used for DAYS days")
+    a.add_argument("--max-size", metavar="SIZE",
+                   help="then the least recently used, down to SIZE (e.g. 500M, 2G)")
+    a.add_argument("-n", "--dry-run", action="store_true", help="only show what would be removed")
+    a = actions.add_parser("clear", parents=[colorp], help="remove all clones")
+    a.add_argument("-n", "--dry-run", action="store_true", help="only show what would be removed")
+    actions.add_parser("dir", parents=[colorp], help="print the cache's directory")
+
     sub.add_parser("install-hooks", parents=[colorp], help="install the pre-push/post-merge hooks")
     sub.add_parser("uninstall-hooks", parents=[colorp], help="remove the hooks again")
     p = sub.add_parser("hook", parents=[colorp], help="what the installed hooks run")
@@ -3113,6 +3338,8 @@ def main(argv=None):
         setup_colors(args.color, repo.top if repo else None)
         if args.cmd == "map":
             return cmd_map(args, repo)
+        if args.cmd == "cache":               # also outside a repository
+            return cmd_cache(args)
         if repo is None:
             raise FsError("not inside a Git working tree")
         if args.cmd == "install-hooks":

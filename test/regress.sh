@@ -45,6 +45,7 @@
 #   17. add DIR: all files of an upstream directory, --include / --exclude
 #   18. pull -b / --tag: switching branch or tag; newer tags
 #   19. set: change source, upstream path or strict of linked files
+#   20. cache: show, list and clean up the cache of upstream clones
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -1518,6 +1519,49 @@ check "edit: unreadable result fails" "$(GIT_EDITOR="sh $T/ed-broken.sh" rc git 
 check "edit: ... and stages nothing" "$(git diff --cached --name-only)" ""
 git checkout -q .git-filesync
 check "edit without .git-filesync" "$( (new_repo "$T/s13e" && rc git filesync edit) )" "2"
+
+
+# =============================================================================
+section "20. cache: show, list and clean up the cache of upstream clones"
+# =============================================================================
+cd "$T"
+
+# make every clone look unused for a long time (a marker in each clone)
+age_clones() { for d in "$T"/cache/*.git; do touch -t 202001010000 "$d/filesync-last-used"; done; }
+nclones() { ls -d "$T"/cache/*.git 2>/dev/null | lines; }
+N=$(nclones)
+check "cache: clones there" "$([ "$N" -gt 2 ] && echo yes)" "yes"
+check "cache dir" "$(basename "$(git filesync cache dir)")" "cache"
+check "cache: summary" "$(git filesync cache | sed -n 2p)" \
+  "cleaned up automatically: clones unused for 90 days (filesync.cacheMaxAge, filesync.cacheMaxSize)"
+check "cache list: one line per clone" "$(git filesync cache list | lines)" "$N"
+check "cache list: the URL" "$(git filesync cache list | grep -c " $URL12$")" "1"
+check "cache prune: recently used ones kept" "$(git filesync cache prune --older-than 0 | tail -1)" \
+  "removed 0 clones (0 bytes) from the cache - clones used in the last minutes are kept"
+age_clones
+check "cache prune -n" "$(git filesync cache prune -n | grep -c '^would remove .* 2020-01-01 ')" "$N"
+check "cache prune -n: nothing removed" "$(nclones)" "$N"
+check "cache prune --max-size: least recently used" \
+  "$(git filesync cache prune --older-than 100000 --max-size 0 -n | grep -c '^would remove .* 2020-01-01 ')" "$N"
+
+# automatic clean-up after a fetch, at most once a day: here everything
+# but the clone just used is old
+git config --global filesync.cacheMaxAge 1
+rm -f "$T/cache/last-prune"
+new_repo s20
+addc a.c "$URL12"
+check "automatic clean-up keeps the clone in use" "$(nclones)" "1"
+age_clones
+quiet git filesync status
+check "... at most once a day" "$(nclones)" "1"
+git config --global filesync.cacheMaxAge off
+check "cacheMaxAge off: no limits" "$(git filesync cache prune)" \
+  "no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize) - nothing to do"
+git config --global --unset filesync.cacheMaxAge
+check "cache clear -n" "$(git filesync cache clear -n | tail -1 | cut -d' ' -f1-4)" "would remove 1 clone"
+quiet git filesync cache clear
+check "cache clear" "$(nclones) $(git filesync cache list)" "0 the cache is empty ($(git filesync cache dir))"
+check "status after clear: cloned again" "$(rc git filesync status)" "0"
 
 
 # =============================================================================
