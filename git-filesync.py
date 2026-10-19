@@ -185,7 +185,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 HOOK_MARKER = "git-filesync"
