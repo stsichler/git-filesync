@@ -675,8 +675,8 @@ Apart from `error`, the hooks never block – not even if git-filesync itself
 fails or is missing.
 
 The hooks run `git filesync hook pre-push` / `hook post-merge`, which are
-not meant to be run by hand (from a terminal, `hook pre-push` checks
-`HEAD`).
+not meant to be run by hand (without the arguments git passes, `hook
+pre-push` checks `HEAD`).
 
 `uninstall-hooks` deletes hook files that only contain the git-filesync
 lines; from other hooks it removes just those lines.

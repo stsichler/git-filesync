@@ -2653,11 +2653,12 @@ def hook_reminders(ctx, repo):
               "for strict violations", file=sys.stderr)
 
 
-def pushed_revs():
+def pushed_revs(hook_args):
     """Commits a push sends: from the pre-push hook's stdin ('<local ref>
     <local sha> <remote ref> <remote sha>' per ref; deletions skipped).
-    Run by hand from a terminal: HEAD."""
-    if sys.stdin is None or sys.stdin.isatty():
+    Run by hand - git always passes the remote's name and URL: HEAD. (Not
+    stdin.isatty(): on Windows that's also true for NUL, i.e. </dev/null.)"""
+    if not hook_args or sys.stdin is None:
         return ["HEAD"]
     revs = []
     for line in sys.stdin:
@@ -2667,13 +2668,13 @@ def pushed_revs():
     return revs
 
 
-def push_check(ctx, repo):
+def push_check(ctx, repo, hook_args):
     """pre-push: links in the pushed commits whose synced upstream commit is
     not on the upstream server (e.g. pulled from an unpushed commit of a
     mapped checkout) - others couldn't find their base. Warns on stderr;
     True if such a link was found."""
     found = {}       # (url, commit) -> [rels]
-    for rev in pushed_revs():
+    for rev in pushed_revs(hook_args):
         p = repo.git(["config", "--blob", f"{rev}:{REGISTRY}", "--list", "-z"], check=False)
         if p.returncode:
             continue          # no (readable) registry in that commit
@@ -2711,7 +2712,7 @@ def cmd_hook(ctx, repo, args):
     if mode not in ("warn", "error", "off"):
         warn(f"filesync.pushCheck: unknown value '{mode}', using 'warn'")
         mode = "warn"
-    if mode == "off" or not push_check(ctx, repo):
+    if mode == "off" or not push_check(ctx, repo, args.hook_args):
         return EXIT_OK
     if mode == "error":
         print(paint("filesync: push refused (filesync.pushCheck = error)", "boldred", "err"),

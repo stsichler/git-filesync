@@ -271,6 +271,8 @@ check "pre-push: unpushed upstream commit reported" "$(echo "$PUSH" | git filesy
 check "pre-push: only a warning by default" "$(echo "$PUSH" | rc git filesync hook pre-push origin x)" "0"
 check "pre-push: nothing pushed, nothing checked" \
   "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'not on the server')" "0"
+check "pre-push by hand (no arguments): checks HEAD" \
+  "$(git filesync hook pre-push </dev/null 2>&1 | grep -c 'not on the server')" "1"
 git config filesync.pushCheck off
 check "pushCheck=off: no check" "$(echo "$PUSH" | git filesync hook pre-push origin x 2>&1 | grep -c 'not on the server')" "0"
 git config filesync.pushCheck error
@@ -560,7 +562,7 @@ check "strict violation reported (uncommitted)" "$(git filesync status -s src/ba
 check "strict violation in long format" \
   "$(git filesync status src/bar.h | grep -cE "^${TAB}modified:[[:space:]]+src/bar\.h  \(NOT ALLOWED: strict\)")" "1"
 check "strict violation exit code" "$(rc git filesync status --exit-code src/bar.h)" "1"
-check "strict violation in hook output" "$(git filesync hook pre-push </dev/null 2>&1 | grep -c 'NOT ALLOWED')" "1"
+check "strict violation in hook output" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'NOT ALLOWED')" "1"
 check "pull refuses strict merge" "$(rc git filesync pull --no-edit src/bar.h)" "2"
 check "pull --all continues after strict error" "$(git filesync pull --all --no-edit 2>&1 | grep -c '^error:')" "0"
 check "non-strict file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
@@ -728,7 +730,7 @@ check "status --exit-code" "$(rc git filesync status --exit-code)" "1"
 check "status: advice.statusHints=false" "$(git -c advice.statusHints=false filesync status | grep -c '(use ')" "0"
 check "status -v: all files listed" \
   "$(git filesync status -v | grep -A6 '^Linked files:' | grep -cE "^${TAB}(unmodified|adapted):")" "5"
-check "hook: adapted alone is quiet" "$(git filesync hook pre-push </dev/null 2>&1 | grep -c 'c\.c')" "0"
+check "hook: adapted alone is quiet" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'c\.c')" "0"
 
 # pull refuses to overwrite uncommitted changes, unless --autostash
 check "pull refuses uncommitted changes" "$(rc git filesync pull --no-edit d.c)" "2"
@@ -1148,7 +1150,7 @@ check "deleted upstream: short code" "$(st gone.c)" "X"
 check "deleted upstream: unlink hint" "$(git filesync status | grep -c 'git filesync unlink <file>')" "1"
 check "deleted upstream: status rc 0" "$(rc git filesync status)" "0"
 check "deleted upstream: --exit-code" "$(rc git filesync status --exit-code gone.c)" "1"
-check "deleted upstream: hook" "$(git filesync hook pre-push </dev/null 2>&1 | grep -c 'gone.c: upstream deleted')" "1"
+check "deleted upstream: hook" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'gone.c: upstream deleted')" "1"
 
 # pull follows the rename; a committed adaptation is merged across it
 sedi 's/^e$/e-local/' r.c
