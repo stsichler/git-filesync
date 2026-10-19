@@ -2501,6 +2501,20 @@ def cmd_set(ctx, repo, args):
     return EXIT_OK
 
 
+def shell():
+    """sh to run a command line the way git does (e.g. the editor): from
+    PATH, or else the one of Git for Windows (<git>/mingw64/libexec/git-core
+    -> <git>/bin/sh.exe)."""
+    sh = shutil.which("sh")
+    if sh:
+        return sh
+    root = Path(out(git(["--exec-path"]))).parents[2]
+    for cand in (root / "bin" / "sh.exe", root / "usr" / "bin" / "sh.exe"):
+        if cand.exists():
+            return str(cand)
+    raise FsError("no sh found to run the editor")
+
+
 def registry_problems(reg):
     """What a hand-edited .git-filesync lacks: messages for entries that
     status would report as broken (and unused sources)."""
@@ -2533,8 +2547,12 @@ def cmd_edit(ctx, repo, args):
     if not path.exists():
         raise FsError(f"no {REGISTRY} yet - link files with 'git filesync add'")
     before = path.read_bytes()
-    # git's own editor logic: GIT_EDITOR, core.editor, VISUAL, EDITOR
-    if subprocess.run(["git", "config", "-f", REGISTRY, "--edit"], cwd=repo.top).returncode:
+    # the editor git would use (GIT_EDITOR, core.editor, VISUAL, EDITOR), run
+    # like git runs it - not via `git config --edit`, which exits with 0 even
+    # if the editor fails
+    editor = out(repo.git(["var", "GIT_EDITOR"]))
+    if subprocess.run([shell(), "-c", f'{editor} "$@"', editor, REGISTRY],
+                      cwd=repo.top).returncode:
         raise FsError("the editor failed; nothing staged")
     if path.exists() and path.read_bytes() == before:
         print(f"{REGISTRY}: no changes")

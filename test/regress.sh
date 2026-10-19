@@ -1502,6 +1502,7 @@ check "set -n: nothing changed" "$(git status --porcelain)" ""
 # edit: .git-filesync in the editor (here: scripts as GIT_EDITOR), then
 # checked and staged
 check "edit without changes" "$(git filesync edit)" ".git-filesync: no changes"
+check "edit: failing editor" "$(GIT_EDITOR=false git filesync edit 2>&1)" "error: the editor failed; nothing staged"
 printf 'git config -f "$1" file.a.c.strict true\n' > "$T/ed-strict.sh"
 OUT=$(GIT_EDITOR="sh $T/ed-strict.sh" git filesync edit 2>&1)
 check "edit: change staged" "$(git diff --cached --name-only) $(git config -f .git-filesync file.a.c.strict)" \
