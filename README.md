@@ -89,7 +89,8 @@ afterwards.
   shown with `diff` / `difftool` – or forbidden per file (`strict`)
 - Files renamed upstream are followed, deleted ones reported
 - Commands named like Git commands behave like them (`status`, `pull`,
-  `diff`, `difftool`, `mv`); dry runs for `pull`, `add`, `unlink`, `mv`
+  `diff`, `difftool`, `restore`, `rm`, `mv`); dry runs for `pull`, `add`,
+  `rm`, `unlink`, `mv`
 - Optional local checkout of the upstream repository instead of fetching – works offline
 - Git LFS upstream, downstream, both or neither
 - Correct with differing line-ending conventions (`core.autocrlf`, `text=auto`)
@@ -168,10 +169,11 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `status [PATH…]` | state of the linked files, like `git status` |
 | `pull PATH…`, `pull --all` | sync files from upstream, keeping local adaptations |
 | `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced upstream version |
+| `restore PATH…` | files back to the synced upstream version, like `git restore` |
 | `add FILE\|DIR URL\|SOURCE` | link a file (or all files of an upstream directory) to upstream |
 | `set PATH… OPTIONS` | change source, upstream path or strict of linked files |
 | `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
-| `unlink PATH…`, `mv OLD NEW` | remove or move links |
+| `rm PATH…`, `unlink PATH…`, `mv OLD NEW` | remove links with their files (like `git rm`) or without, move them |
 | `source [ACTION …]` | list sources; rename, change URL, branch or tag |
 | `map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
 | `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear |

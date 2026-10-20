@@ -13,7 +13,7 @@ For motivation and installation see the [README](README.md).
 - [Commands](#commands)
   - [Common options](#common-options)
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool) · [`restore`](#restore)
-  - [`add`](#add) · [`set`](#set) · [`edit`](#edit) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map) · [`cache`](#cache)
+  - [`add`](#add) · [`set`](#set) · [`edit`](#edit) · [`rm`](#rm) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map) · [`cache`](#cache)
   - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted upstream](#files-renamed-or-deleted-upstream)
@@ -575,9 +575,18 @@ checked and staged, like after [`set`](#set):
 
 For the usual changes, the commands that know what they mean are safer:
 [`set`](#set) (source, path, strict of files), [`source`](#source) (URL,
-branch, tag, name of a source), [`unlink`](#unlink), [`mv`](#mv). `edit`
+branch, tag, name of a source), [`rm`](#rm), [`unlink`](#unlink), [`mv`](#mv). `edit`
 keeps whatever you write: a changed `commit` or `blob` changes what counts
 as an adaptation.
+
+### `rm`
+
+`rm PATH…` – like `git rm`: remove the files and their links; both are
+staged. A file with uncommitted changes (or one never committed) is not
+removed – nothing is, then – unless `-f` / `--force` is given; a committed
+adaptation is no reason to refuse. A file that is gone already just loses
+its link. `-n` / `--dry-run` only lists what would be removed. To keep the
+files, use [`unlink`](#unlink).
 
 ### `unlink`
 
@@ -922,7 +931,7 @@ commit that removed it:
   short format `X`, counted as something to do by `--exit-code` and the
   hooks. `pull` refuses and says what to do: keep the file as your own
   with `git filesync unlink src/foo.c`, or delete it too with
-  `git filesync unlink src/foo.c && git rm src/foo.c`. `pull --commit REV`
+  `git filesync rm src/foo.c`. `pull --commit REV`
   still syncs to a revision that has the file.
 
 Renames are detected the way `git diff -M` does (similar content); in the

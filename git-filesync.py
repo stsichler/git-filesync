@@ -144,6 +144,12 @@ follow the command.
                                 config --edit`); afterwards it is checked
                                 and staged
 
+    rm PATH...                  remove linked files and their links, staged
+                                like `git rm`; refused for files with
+                                uncommitted changes
+        -f, --force             remove them anyway
+        -n, --dry-run           only show what would be removed
+
     unlink PATH...              remove links (the files are kept)
     mv OLD NEW                  move a linked file (git mv), keeping its link
         -n, --dry-run           (both) only show what would be done
@@ -2121,7 +2127,7 @@ def pull_one(repo, reg, st, args):
         raise FsError(f"{st.rel}: '{st.moved[1]}' was deleted in {src.label} "
                       f"({src.short(st.moved[2])}) - keep the file with "
                       f"'git filesync unlink {rel}', or delete it too with "
-                      f"'git filesync unlink {rel} && git rm {rel}'")
+                      f"'git filesync rm {rel}'")
     # like `git pull`: uncommitted changes are never merged into a sync
     # commit; --autostash sets them aside and re-applies them afterwards
     dirty = st.worktree in ("modified", "deleted", "added")
@@ -2811,6 +2817,34 @@ def cmd_unlink(ctx, repo, args):
             continue
         reg.remove_file(link.rel)
         print(f"{paint('unlinked', 'green')} {link.rel} (file kept)")
+    if not args.dry_run:
+        reg.finish()
+    return EXIT_OK
+
+
+def cmd_rm(ctx, repo, args):
+    """Like `git rm`: remove the links and the files, both staged. Refused
+    (for all) if a file has uncommitted changes, unless -f; a committed
+    adaptation is no reason to refuse. A file that is gone already is fine."""
+    reg = Registry(repo)
+    links = select_links(repo, reg, args.files)
+    repo.prefetch([lk.rel for lk in links])
+    if not args.force:
+        dirty = [lk.rel for lk in links if lk.target.exists() and
+                 (repo.head_blob(lk.rel) is None or repo.is_modified(lk.rel))]
+        if dirty:
+            raise FsError("".join(f"{r}: has uncommitted changes\n" for r in dirty[:-1])
+                          + f"{dirty[-1]}: has uncommitted changes - use -f to remove "
+                          f"{'it' if len(dirty) == 1 else 'them'} anyway")
+    for link in links:
+        if args.dry_run:
+            print(f"would remove {link.rel}")
+            continue
+        repo.git(["rm", "-q", "-f", "--ignore-unmatch", "--", lit(link.rel)])
+        if link.target.is_file():       # never added to git
+            link.target.unlink()
+        reg.remove_file(link.rel)
+        print(f"{paint('removed', 'green')} {link.rel}")
     if not args.dry_run:
         reg.finish()
     return EXIT_OK
@@ -3560,6 +3594,13 @@ def main(argv=None):
     p.add_argument("-W", "--worktree", action="store_true",
                    help="restore the working tree (the default; with -S: both)")
 
+    p = add_command(sub, "rm", parents=[colorp],
+                    help="remove linked files and their links, like 'git rm'")
+    p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
+    p.add_argument("-f", "--force", action="store_true",
+                   help="also remove files with uncommitted changes")
+    p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be removed")
+
     p = add_command(sub, "unlink", parents=[colorp], help="remove links (the files are kept)")
     p.add_argument("files", nargs="+", help="files or directories")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be unlinked")
@@ -3658,7 +3699,7 @@ def main(argv=None):
         ctx = Context(args, repo)
         return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
                 "edit": cmd_edit,
-                "restore": cmd_restore, "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
+                "restore": cmd_restore, "rm": cmd_rm, "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
                 "diff": cmd_diff, "difftool": cmd_difftool,
                 "hook": cmd_hook}[args.cmd](ctx, repo, args)
     except FsError as e:

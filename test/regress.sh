@@ -32,7 +32,7 @@
 #    4. map: mappings to local checkouts of an upstream
 #    5. Offline operation
 #    6. diff / difftool / strict files
-#    7. .git-filesync registry: sources, unlink, mv, commit consistency
+#    7. .git-filesync registry: sources, rm, unlink, mv, commit consistency
 #    8. Colors
 #    9. status like 'git status', pull like 'git pull'
 #   10. Robustness: unsafe registry paths, special file names, odd entries
@@ -650,7 +650,7 @@ check "--overwrite discards in non-strict file" "$(git filesync diff)" ""
 
 
 # =============================================================================
-section "7. .git-filesync registry: sources, unlink, mv, commit consistency"
+section "7. .git-filesync registry: sources, rm, unlink, mv, commit consistency"
 # =============================================================================
 # (continues in s4)
 
@@ -692,6 +692,21 @@ git commit -qm unlink
 git filesync unlink src/foo.c src/bar.h >/dev/null
 check "unlink all: registry removed" "$([ -e .git-filesync ] && echo exists || echo gone)" "gone"
 check "unlink all: removal staged" "$(git status --porcelain .git-filesync)" "D  .git-filesync"
+git reset -q --hard
+
+# rm: removes file and entry, both staged, like git rm; refused (for all
+# files) with uncommitted changes unless -f
+echo more >> src/foo.c
+check "rm: refused with uncommitted changes" "$(git filesync rm src 2>&1)" \
+  "error: src/foo.c: has uncommitted changes - use -f to remove it anyway"
+check "rm: refused, nothing removed" "$(ls src | oneline) $(git status --porcelain | oneline)" "bar.h foo.c   M src/foo.c "
+check "rm -n" "$(git filesync rm -n -f src | sort | oneline)" "would remove src/bar.h would remove src/foo.c "
+quiet git filesync rm -f src/foo.c
+check "rm -f: file and entry removed, staged" "$(git status --porcelain | oneline)" "M  .git-filesync D  src/foo.c "
+check "rm: entry gone" "$(git config -f .git-filesync --get-regexp '^file\.src/foo\.c\.' | lines)" "0"
+rm src/bar.h
+check "rm: file gone already" "$(git filesync rm src/bar.h)" "removed src/bar.h"
+check "rm: last one removes the registry" "$(git status --porcelain | oneline)" "D  .git-filesync D  src/bar.h D  src/foo.c "
 git reset -q --hard
 
 # a new [source] is keyed 'owner/repo' after its URL; another URL with the
