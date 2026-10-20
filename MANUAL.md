@@ -756,8 +756,11 @@ it to be there.
 
 `install-hooks` adds a `pre-push` hook (fetches) and a `post-merge` hook
 (cached state only). Both report pending syncs, errors and strict
-violations on stderr. If a hook already exists, the lines to add are
-printed instead; hooks installed by an older version are updated. With
+violations on stderr. If a hook of another tool already exists, the lines
+to add are printed instead; `install-hooks --force` adds them itself, right
+after the `#!` line – before anything else, as needed for `git lfs
+pre-push` (see below) and for hooks that end with `exec` or `exit`. Hooks
+installed by an older version are updated in place. With
 `core.hooksPath` set, the hooks go there (with a warning, as other
 repositories may share that directory).
 
@@ -766,7 +769,7 @@ being pushed to the hook on stdin, once – whichever command reads them
 first gets them. The git-filesync block reads them and hands them on to
 the commands after it; it can't get them back from a command before it.
 So put it **before** `git lfs pre-push` (as `install-hooks` says when the
-hook exists). Otherwise Git LFS works, but the push check sees nothing to
+hook exists, and `install-hooks --force` does). Otherwise Git LFS works, but the push check sees nothing to
 check. git-assetsync's block works the same way; the two can come in
 either order, both before `git lfs pre-push`:
 

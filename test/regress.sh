@@ -256,6 +256,21 @@ check "foreign hook: still executable" "$([ -x .git/hooks/pre-push ] && echo yes
 check "foreign hook without snippet untouched" "$(cat .git/hooks/post-merge)" "$(printf '#!/bin/sh\necho other')"
 rm -f .git/hooks/pre-push .git/hooks/post-merge
 
+# install-hooks --force adds our lines to a foreign hook, right after the #!
+# line (before git lfs pre-push, which reads the refs from stdin)
+printf '#!/bin/sh\ngit lfs pre-push "$@"\n' > .git/hooks/pre-push
+chmod +x .git/hooks/pre-push
+check "foreign hook: --force suggested" \
+  "$(git filesync install-hooks 2>/dev/null | grep -c "^(or run 'git filesync install-hooks --force' to add them)$")" "1"
+OUT=$(git filesync install-hooks --force 2>/dev/null)
+check "install-hooks --force: lines added" "$(echo "$OUT" | grep -c '^pre-push: lines added to the existing hook$')" "1"
+check "install-hooks --force: our block first, the rest kept" \
+  "$(head -2 .git/hooks/pre-push | cut -c1-14 | oneline)| $(tail -1 .git/hooks/pre-push)" "#!/bin/sh # git-filesync | git lfs pre-push \"\$@\""
+check "install-hooks --force again: nothing to do" "$(git filesync install-hooks --force 2>/dev/null | grep -c 'already installed')" "2"
+git filesync uninstall-hooks >/dev/null
+check "uninstall after --force: foreign lines kept" "$(cat .git/hooks/pre-push)" "$(printf '#!/bin/sh\ngit lfs pre-push "$@"')"
+rm -f .git/hooks/pre-push
+
 # hooks of an older version are updated in place, other lines kept
 printf '#!/bin/sh\necho mine\n# git-filesync: old\ngit filesync status --hook </dev/null || true\nexit 0\n' \
   > .git/hooks/post-merge
