@@ -167,11 +167,10 @@ follow the command.
                                 a tag is taken as immutable: fetched only if
                                 missing
     source set-tag NAME --unset  remove the tag: follow the branch again
-
-    map [URL|SOURCE [DIR]]      use the local checkout DIR instead of fetching
-                                URL (SOURCE: the URL of that [source]); its
-                                branch is used, unpushed commits included;
-                                without DIR: list mappings
+    source map [URL|SOURCE [DIR]]  use the local checkout DIR instead of
+                                fetching URL (SOURCE: the URL of that
+                                [source]); its branch is used, unpushed
+                                commits included; without DIR: list mappings
         --global                global git config (default: this repository)
         --unset                 remove the mapping for the URL
 
@@ -3629,15 +3628,15 @@ def main(argv=None):
                            "look for newer tags on all branches")
         else:
             a.add_argument("value", metavar=arg)
-
-    p = add_command(sub, "map", parents=[colorp], help="use a local checkout for an upstream URL "
-                                                     "(this repo's config; --global for all repos)")
-    p.add_argument("url", nargs="?", metavar="URL|SOURCE",
+    a = add_command(actions, "map", parents=[colorp],
+                    help="use a local checkout for an upstream URL (this repo's config; "
+                         "--global for all repos)")
+    a.add_argument("url", nargs="?", metavar="URL|SOURCE",
                    help="upstream URL, or the name of a [source] for its URL "
                         "(without DIR: list its mappings)")
-    p.add_argument("dir", nargs="?", help="local checkout of the upstream repository")
-    p.add_argument("--unset", action="store_true", help="remove the mapping for the URL")
-    p.add_argument("--global", dest="glob", action="store_true",
+    a.add_argument("dir", nargs="?", help="local checkout of the upstream repository")
+    a.add_argument("--unset", action="store_true", help="remove the mapping for the URL")
+    a.add_argument("--global", dest="glob", action="store_true",
                    help="use the global git config instead of this repository's")
 
     p = add_command(sub, "cache", parents=[colorp],
@@ -3682,7 +3681,7 @@ def main(argv=None):
         except FsError:
             repo = None
         setup_colors(args.color, repo.top if repo else None)
-        if args.cmd == "map":
+        if args.cmd == "source" and args.action == "map":     # also outside a repository
             return cmd_map(args, repo)
         if args.cmd == "cache":               # also outside a repository
             return cmd_cache(args)

@@ -13,7 +13,7 @@ For motivation and installation see the [README](README.md).
 - [Commands](#commands)
   - [Common options](#common-options)
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool) · [`restore`](#restore)
-  - [`add`](#add) · [`set`](#set) · [`edit`](#edit) · [`rm`](#rm) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map) · [`cache`](#cache)
+  - [`add`](#add) · [`set`](#set) · [`edit`](#edit) · [`rm`](#rm) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`source map`](#source-map) · [`cache`](#cache)
   - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted upstream](#files-renamed-or-deleted-upstream)
@@ -141,7 +141,7 @@ changes with `git restore`, or lift the restriction (`git filesync set
 | [`unlink PATH…`](#unlink) | remove links, keep the files |
 | [`mv OLD NEW`](#mv) | move a linked file and its link |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
-| [`map [URL\|SOURCE [DIR]]`](#map) | use a local checkout of upstream |
+| [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
 | [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear |
 | [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks) | hooks: reminders, push check |
 
@@ -164,7 +164,7 @@ the command and lists them.
 | Option | Commands | Effect |
 |---|---|---|
 | `--no-fetch` | `status`, `pull`, `diff`, `difftool`, `add`, `set`, `source -v` | don't fetch, use the cached state (offline) |
-| `--remote` | same | ignore local checkout mappings (see [`map`](#map)) |
+| `--remote` | same | ignore local checkout mappings (see [`source map`](#source-map)) |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
 ### `status`
@@ -235,7 +235,7 @@ Like `git status`, the exit code is 0 (2 on errors); `--exit-code` makes it
 ### `pull`
 
 `pull PATH…`, `pull --all` – sync to the current upstream version of the
-file: the version on the source's branch (with a [local checkout](#map):
+file: the version on the source's branch (with a [local checkout](#source-map):
 that checkout's branch), or at its [tag](#pinning-to-a-tag). Recorded is the upstream commit that last changed the
 file. The editor opens with the proposed commit message:
 
@@ -639,9 +639,9 @@ tag) is refused; move the files with [`set -b` / `--tag`](#set)
 instead. After changing URL, branch or tag, `status`
 shows what is to sync for the source's files.
 
-### `map`
+### `source map`
 
-`map [URL|SOURCE [DIR]]` – use the local checkout DIR instead of fetching the
+`source map [URL|SOURCE [DIR]]` – use the local checkout DIR instead of fetching the
 upstream URL. Instead of the URL, the name of a `[source]` in
 `.git-filesync` can be given: its URL is meant – the mapping always belongs
 to the URL, so it applies to every source with that URL. Without DIR, the
@@ -654,8 +654,8 @@ mappings are listed (only those for the URL, if given).
 
 ```sh
 cd my-repo
-git filesync map https://github.com/owner/lib.git ~/src/lib
-git filesync map owner/lib ~/src/lib      # the same, by the name of the [source]
+git filesync source map https://github.com/owner/lib.git ~/src/lib
+git filesync source map owner/lib ~/src/lib      # the same, by the name of the [source]
 ```
 
 Something that looks like a URL (`scheme://…`, or `host:path` like
@@ -673,9 +673,9 @@ all repositories without a mapping of their own; a repository's own mapping
 always takes precedence.
 
 ```sh
-git filesync map                     # list mappings (scope, overridden ones marked)
-git filesync map URL --unset         # remove this repo's mapping
-git filesync map --global URL --unset
+git filesync source map                     # list mappings (scope, overridden ones marked)
+git filesync source map URL --unset         # remove this repo's mapping
+git filesync source map --global URL --unset
 ```
 
 When mapped, `status` and `pull` use the source's branch **as it is in that
@@ -718,7 +718,7 @@ git filesync cache [list | prune [--older-than DAYS] [--max-size SIZE] [-n] | cl
 ```
 
 The cache of upstream clones (one blobless clone per URL, see
-[`map`](#map)), shared by all repositories of your user. Works outside a
+[`source map`](#source-map)), shared by all repositories of your user. Works outside a
 repository, too.
 
 ```
@@ -794,7 +794,7 @@ the block comes before `git lfs pre-push`.
 **Push check:** the `pre-push` hook also looks at the commits being pushed:
 a linked file synced to an upstream commit that isn't on the upstream
 server – typically pulled from an unpushed commit of a [mapped
-checkout](#map) – is reported:
+checkout](#source-map) – is reported:
 
 ```
 filesync: src/foo.c: synced from upstream commit 1a2b3c4d5e6f, which is not on the server (https://github.com/owner/lib.git) - push it there first
@@ -850,7 +850,7 @@ only says where to look for [newer tags](#newer-tags).
 Tags are taken as immutable, like Git does: once the tag is in the cache,
 `status` (and the hooks) fetch nothing for it, so they need no network for
 pinned sources. A tag moved on the server is only noticed when the cache is
-fetched for another reason. With a [mapped checkout](#map), the tag in that
+fetched for another reason. With a [mapped checkout](#source-map), the tag in that
 checkout is used, whatever is checked out there.
 
 Since a pinned file only changes when the tag does, `pull` usually has
@@ -898,7 +898,7 @@ went through. Tags on side branches merged into it don't count.
   ```
 
 Pre-releases count like any other tag. Branches are those of upstream
-(`origin/…` in the cache); with a [mapped checkout](#map) its local branches
+(`origin/…` in the cache); with a [mapped checkout](#source-map) its local branches
 and tags, unpushed ones included.
 
 ### Proposed commit messages
@@ -981,7 +981,7 @@ store it, and written as a checkout there would produce it – no false
 
 ### Offline operation
 
-With a [mapped local checkout](#map), all commands work without network
+With a [mapped local checkout](#source-map), all commands work without network
 access (`add` takes the default branch from the checkout's `origin/HEAD`,
 or – with a warning if the checkout has a remote – from the branch checked
 out there). Sources [pinned to a tag](#pinning-to-a-tag) work offline as

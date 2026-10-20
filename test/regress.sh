@@ -20,7 +20,7 @@
 # Naming in the scenarios:
 #   upstream, m, m3 ...  upstream repositories (where "upstream" commits are made)
 #   *.git                bare copies of them, standing in for the server
-#   co*                  local checkouts of an upstream (for 'git filesync map')
+#   co*                  local checkouts of an upstream (for 'git filesync source map')
 #   downstream, s, sA .. repositories that link files from an upstream
 #   file:///nowhere/...  URL of a server that does not exist; such sources
 #                        only work through a mapping to a local checkout
@@ -29,7 +29,7 @@
 #    1. Basic workflow: add, status, pull, merge, conflict, hooks
 #    2. Line endings: CRLF upstream, repositories with different normalization
 #    3. Branch name as --commit
-#    4. map: mappings to local checkouts of an upstream
+#    4. source map: mappings to local checkouts of an upstream
 #    5. Offline operation
 #    6. diff / difftool / strict files
 #    7. .git-filesync registry: sources, rm, unlink, mv, commit consistency
@@ -212,10 +212,10 @@ check "git reset drops the prepared message" "$(ls "$(git rev-parse --git-dir)/S
 check "... but the copy stays" "$(head -1 .git/FILESYNC_SQUASH_MSG | cut -d' ' -f1-3)" "[filesync] Sync src/lib.c"
 
 # mapped to the local checkout, unpushed upstream commits are seen and warned
-git filesync map "$URL" "$T/upstream" >/dev/null
+git filesync source map "$URL" "$T/upstream" >/dev/null
 (cd "$T/upstream" && sedi 's/^f$/F/' lib.c && git commit -qam "unpushed F")
 check "local checkout warns unpushed" "$(git filesync status 2>/dev/null | grep -c 'not pushed')" "1"
-git filesync map "$URL" --unset >/dev/null
+git filesync source map "$URL" --unset >/dev/null
 check "--remote / unmapped ignores unpushed" "$(git filesync status 2>/dev/null | grep -c 'not pushed')" "0"
 (cd "$T/upstream" && git push -q origin main)
 
@@ -291,7 +291,7 @@ git filesync uninstall-hooks >/dev/null
 
 # pre-push: a pushed file synced to an upstream commit that isn't on the
 # server (pulled from an unpushed commit of the mapped checkout)
-git filesync map "$URL" "$T/upstream" >/dev/null
+git filesync source map "$URL" "$T/upstream" >/dev/null
 (cd "$T/upstream" && echo unpushed >> lib.c && git commit -qam "unpushed line")
 check "pull from an unpushed upstream commit" "$(rc git filesync pull --no-edit --overwrite src/lib.c)" "0"
 UNPUSHED=$(git -C "$T/upstream" rev-parse --short=12 HEAD)
@@ -343,7 +343,7 @@ quiet .git/hooks/pre-push origin x </dev/null
 check "pre-push: nothing in, nothing restored" "$(wc -c < "$T/after-refs" | tr -d ' ')" "0"
 git filesync uninstall-hooks >/dev/null
 git remote remove origin
-git filesync map "$URL" --unset >/dev/null
+git filesync source map "$URL" --unset >/dev/null
 
 # output into a pipe that is closed early
 check "broken pipe no traceback" "$(git filesync status 2>&1 | head -1 | grep -c Traceback)" "0"
@@ -412,9 +412,10 @@ check "--commit <branch> gets current head" "$(tr -d '\r' < w.c)" "y"
 
 
 # =============================================================================
-section "4. map: mappings to local checkouts of an upstream"
+section "4. source map: mappings to local checkouts of an upstream"
 # =============================================================================
 cd "$T"
+check "map is 'source map' now" "$(rc git filesync map)" "2"
 
 # upstream m3 with x.c = v1; checkout coA has an unpushed v2, coB is at v1
 git init -q m3
@@ -431,8 +432,8 @@ for s in sA sB sC; do
 done
 
 # sA -> coA (given as relative path from a subdirectory), sB -> coB
-(cd sA && mkdir -p sub && cd sub && git filesync map "$URL3" ../../coA >/dev/null)
-(cd sB && git filesync map "$URL3" "$T/coB" >/dev/null)
+(cd sA && mkdir -p sub && cd sub && git filesync source map "$URL3" ../../coA >/dev/null)
+(cd sB && git filesync source map "$URL3" "$T/coB" >/dev/null)
 check "map default scope is repo-local" "$(git -C sA config --local --get-regexp '^filesync\.' | lines)" "1"
 check "nothing written globally" "$(git config --global --get-regexp '^filesync\.' | lines)" "0"
 check "repo A uses checkout A" "$(cd sA && st)" "P"
@@ -441,30 +442,30 @@ check "repo B uses checkout B" "$(cd sB && st)" ""
 check "repo A synced from checkout A" "$(cat sA/x.c)" "v2"
 
 # global mapping (set from sC) -> coA; local mappings take precedence
-(cd sC && git filesync map --global "$URL3" "$T/coA" >/dev/null)
+(cd sC && git filesync source map --global "$URL3" "$T/coA" >/dev/null)
 check "global mapping used without local one" \
   "$(cd sC && git filesync status -v | grep -c "via local checkout .*coA)")" "1"
 check "local mapping overrides global" "$(cd sB && st)" ""
 check "list marks overridden global" \
-  "$(cd sB && git filesync map | grep '^\[global\]' | grep -c overridden)" "1"
-(cd sB && git filesync map "$URL3" --unset >/dev/null)
+  "$(cd sB && git filesync source map | grep '^\[global\]' | grep -c overridden)" "1"
+(cd sB && git filesync source map "$URL3" --unset >/dev/null)
 check "after local unset, global applies" "$(cd sB && st)" "P"
-check "local map outside repo fails" "$(rc git filesync map "$URL3" "$T/coA")" "2"
+check "local map outside repo fails" "$(rc git filesync source map "$URL3" "$T/coA")" "2"
 
 # the name of a [source] instead of the URL: the mapping belongs to the URL
 SRC3=$(git -C sB config -f .git-filesync file.x.c.source)
-(cd sB && git filesync map "$SRC3" "$T/coB" >/dev/null)
+(cd sB && git filesync source map "$SRC3" "$T/coB" >/dev/null)
 check "map SOURCE: mapping for its URL" \
-  "$(cd sB && git filesync map "$URL3" | grep -c "^\[local\] $URL3 -> .*coB$")" "1"
-check "map SOURCE: listing by name" "$(cd sB && git filesync map "$SRC3" | grep -c '^\[local\]')" "1"
-(cd sB && git filesync map "$SRC3" --unset >/dev/null)
+  "$(cd sB && git filesync source map "$URL3" | grep -c "^\[local\] $URL3 -> .*coB$")" "1"
+check "map SOURCE: listing by name" "$(cd sB && git filesync source map "$SRC3" | grep -c '^\[local\]')" "1"
+(cd sB && git filesync source map "$SRC3" --unset >/dev/null)
 check "map SOURCE --unset" "$(git -C sB config --local --get-regexp '^filesync\.' | lines)" "0"
-check "map: mistyped source name refused" "$(cd sB && rc git filesync map no-such-source "$T/coB")" "2"
+check "map: mistyped source name refused" "$(cd sB && rc git filesync source map no-such-source "$T/coB")" "2"
 check "map: nothing written for it" "$(git -C sB config --local --get-regexp '^filesync\.' | lines)" "0"
 
 # A mapped repository follows the link's branch in the checkout (refs/heads/main),
 # not whatever is checked out there.
-(cd sB && git filesync map "$URL3" "$T/coB" >/dev/null)
+(cd sB && git filesync source map "$URL3" "$T/coB" >/dev/null)
 (cd coB && git tag v1 && echo v1b > x.c && git commit -qam v1b)         # local, unpushed
 check "mapped: local branch commit pending" "$(cd sB && st)" "P"
 (cd sB && quiet git filesync pull --no-edit x.c)
@@ -495,11 +496,11 @@ check "mapped: uncommitted change not synced" "$(cd sB && st)" ""
 (cd coB && git fetch -q)
 git init -q sD
 (cd sD && git commit -q --allow-empty -m i \
-  && git filesync map "$URL3" "$T/coB" >/dev/null \
+  && git filesync source map "$URL3" "$T/coB" >/dev/null \
   && addc -b rel x.c "$URL3")
 check "mapped: falls back to origin/<branch>" "$(cat sD/x.c)" "v2"
 check "mapped: fallback noted" "$(cd sD && git filesync status | grep -c 'using origin/rel')" "1"
-git filesync map --global "$URL3" --unset >/dev/null
+git filesync source map --global "$URL3" --unset >/dev/null
 
 
 # =============================================================================
@@ -512,7 +513,7 @@ cd "$T"
 OFF=https://unreachable.invalid/owner/m3.git
 (cd coA && git remote set-head origin main >/dev/null 2>&1)
 new_repo sOff
-git filesync map "$OFF" "$T/coA" >/dev/null
+git filesync source map "$OFF" "$T/coA" >/dev/null
 check "offline add via mapping (no -b)" "$(rc git filesync add x.c "$OFF")" "0"
 check "offline add: branch from checkout" \
   "$(git config -f .git-filesync --get-regexp "^source\..*\.branch" | cut -d" " -f2)" "main"
@@ -538,7 +539,7 @@ ERR=$(
     git filesync pull --all --no-edit
     git commit -q --allow-empty -m p
     git push -q origin HEAD:main
-    git filesync map
+    git filesync source map
   } 2>&1 >/dev/null | grep -vE 'not pushed|^filesync: |^Cloning '
 )
 check "offline: no errors/warnings in any command" "$ERR" ""
@@ -571,7 +572,7 @@ git init -q m4
 (cd m4 && mkdir lib && printf 'a\nb\nc\nd\ne\n' > lib/foo.c && printf 'x\n' > lib/bar.h \
   && git add . && git commit -qm init)
 new_repo s4
-git filesync map file:///nowhere/m4.git "$T/m4" >/dev/null
+git filesync source map file:///nowhere/m4.git "$T/m4" >/dev/null
 addc src/foo.c file:///nowhere/m4.git -p lib/foo.c
 addc src/bar.h file:///nowhere/m4.git -p lib/bar.h --strict
 
@@ -731,7 +732,7 @@ git reset -q --hard
 # a new [source] is keyed 'owner/repo' after its URL; another URL with the
 # same key gets a number appended instead of reusing the existing source
 check "source key from URL" "$SRC" "nowhere/m4"
-git filesync map file:///other/nowhere/m4.git "$T/m4" >/dev/null
+git filesync source map file:///other/nowhere/m4.git "$T/m4" >/dev/null
 check "add: output shows the new key" \
   "$(git filesync add include/other.h file:///other/nowhere/m4.git -p lib/bar.h 2>&1 | grep -c '^linked include/other.h -> nowhere/m4-2:lib/bar.h (main)')" "1"
 check "same key, other URL: own source" \
@@ -807,7 +808,7 @@ cd "$T"
 git init -q m5
 (cd m5 && for f in a b c d e; do printf '1\n2\n3\n4\n5\n' > $f.c; done && git add . && git commit -qm i)
 new_repo s5
-git filesync map file:///nowhere/m5.git "$T/m5" >/dev/null
+git filesync source map file:///nowhere/m5.git "$T/m5" >/dev/null
 for f in a b c d e; do
   quiet git filesync add $f.c file:///nowhere/m5.git
 done
@@ -883,7 +884,7 @@ git init -q m6
 M6=$(git -C m6 rev-parse HEAD)
 B6=$(git -C m6 rev-parse HEAD:a.txt)
 new_repo s6
-git filesync map file:///nowhere/m6.git "$T/m6" >/dev/null
+git filesync source map file:///nowhere/m6.git "$T/m6" >/dev/null
 
 # hand-written registry with entries pointing outside the work tree or into .git
 printf '[source "m6"]\n\turl = file:///nowhere/m6.git\n\tbranch = main\n' > .git-filesync
@@ -916,7 +917,7 @@ check "upstream path with backslashes (copied on Windows)" \
 addc a.txt file:///nowhere/m6.git
 check "mv outside refused" "$(rc git filesync mv a.txt ../moved.txt)" "2"
 check "mv outside: file stays" "$(ls a.txt ../moved.txt 2>/dev/null)" "a.txt"
-check "map --unset without URL" "$(rc git filesync map --unset)" "2"
+check "map --unset without URL" "$(rc git filesync source map --unset)" "2"
 
 # wildcard characters in a file name are taken literally: 'f[1].txt' must
 # not match the unrelated file f1.txt
@@ -954,7 +955,7 @@ cd "$T"
 git clone -q m6 co6
 (cd co6 && git remote set-head origin -d && git checkout -q -b feature)
 new_repo s7
-git filesync map file:///nowhere/m6.git "$T/co6" >/dev/null
+git filesync source map file:///nowhere/m6.git "$T/co6" >/dev/null
 check "default branch guessed: warned" \
   "$(git filesync add a.txt file:///nowhere/m6.git 2>&1 | grep -c "using its checked-out branch 'feature'")" "1"
 
@@ -997,13 +998,13 @@ check "pull message: only commits changing the file" \
   "$(git log -1 --format=%B | grep '^- ' | tr '\n' '|')" "- f v2 ($(git -C ../co7 rev-parse --short HEAD~1))|"
 
 # mapped: unpushed commits matter only if they change the file
-git filesync map "$URL7" "$T/co7" >/dev/null
+git filesync source map "$URL7" "$T/co7" >/dev/null
 (cd ../co7 && echo o4 > o.txt && git commit -qam "other unpushed")
 check "unpushed commit not touching the file: no warning" "$(git filesync status 2>&1 | grep -c 'not pushed')" "0"
 check "unpushed other commit: still up to date" "$(st)" ""
 (cd ../co7 && echo v3 > f.txt && git commit -qam "f unpushed")
 check "unpushed change of the file: warned" "$(git filesync status 2>&1 | grep -c 'not pushed')" "1"
-git filesync map "$URL7" --unset >/dev/null
+git filesync source map "$URL7" --unset >/dev/null
 
 
 # =============================================================================
@@ -1035,7 +1036,7 @@ if git lfs version >/dev/null 2>&1; then
         rm -rf sl "$T/cache"; git init -q sl; cd sl
         [ $dlfs = yes ] && git lfs track d.txt >/dev/null && git add .gitattributes
         git commit -q --allow-empty -m i
-        [ $via = map ] && git filesync map "$TURL/ml.git" "$T/ml" >/dev/null
+        [ $via = map ] && git filesync source map "$TURL/ml.git" "$T/ml" >/dev/null
         addc d.txt "$TURL/ml.git"
         check "$tag: content after add" "$(head -1 d.txt)" "l1"
         check "$tag: downstream storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
@@ -1060,7 +1061,7 @@ if git lfs version >/dev/null 2>&1; then
         printf 'l1\nl2\nl3\nl4\nl5\n' > d.txt
         git add .
         git commit -qm i
-        [ $via = map ] && git filesync map "$TURL/ml.git" "$T/ml" >/dev/null
+        [ $via = map ] && git filesync source map "$TURL/ml.git" "$T/ml" >/dev/null
         check "$tag: add over an older version: differs from the head" \
           "$(git filesync add d.txt "$TURL/ml.git" 2>&1 | grep -c 'd.txt differs from upstream')" "1"
         git reset -q --hard
@@ -1155,14 +1156,14 @@ quiet git filesync pull --no-edit t.c
 check "pull to the new tag" "$(oneline < t.c)" "1 2 3b "
 
 # with a mapped checkout the tag is taken from there, its branch ignored
-git filesync map "$URL9" "$T/co9" >/dev/null
+git filesync source map "$URL9" "$T/co9" >/dev/null
 (cd ../co9 && sedi 's/^1$/1c/' t.c && git commit -qam "after v2")
 check "mapped: branch ignored" "$(st)" ""
 check "mapped: no checked-out warning for a tag" "$(git filesync status 2>&1 | grep -c 'checked out')" "0"
 (cd ../co9 && git tag v3)
 git filesync source set-tag "$SRC9" v3 >/dev/null
 check "mapped: tag from the checkout" "$(st)" "P"
-git filesync map "$URL9" --unset >/dev/null
+git filesync source map "$URL9" --unset >/dev/null
 check "tag unknown on the server: error" "$(st)" "E"
 
 # back to following the branch: set-branch only sets the branch (the one to
@@ -1371,7 +1372,7 @@ git init -q m11
   && for f in api/a.proto api/v1/b.proto api/v1/b_test.proto api/test/t.proto api/README.md docs/x.md; do
        echo "$f" > $f; done && git add . && git commit -qm init)
 new_repo s11
-git filesync map file:///nowhere/m11.git "$T/m11" >/dev/null
+git filesync source map file:///nowhere/m11.git "$T/m11" >/dev/null
 
 # PROTO - the options linking the .proto files of api/ as proto/
 PROTO=(-p api --include '*.proto' --exclude '*_test.proto' --exclude test/)
@@ -1478,10 +1479,10 @@ git commit -qm "pinned to v1.0 on main"
 
 # with a mapped checkout: its branches and tags, unpushed ones included
 (cd ../co12 && git tag local-3)
-git filesync map "$URL12" "$T/co12" >/dev/null
+git filesync source map "$URL12" "$T/co12" >/dev/null
 check "mapped: newest tag from the checkout" \
   "$(git filesync source -v | grep -c '(tag v1.0 on main, newest local-3, 3 files)')" "1"
-git filesync map "$URL12" --unset >/dev/null
+git filesync source map "$URL12" --unset >/dev/null
 (cd ../co12 && git tag -d local-3 >/dev/null)
 
 # pull -b / --tag sync to another branch or tag once; the links keep their
@@ -1715,7 +1716,7 @@ else
   git init -q m21 && (cd m21 && mkdir lib && for i in $(seq 1 60); do echo "v$i" > lib/f$i.c; done \
     && git add . && git commit -qm init)
   new_repo s21
-  git filesync map file:///nowhere/m21.git "$T/m21" >/dev/null
+  git filesync source map file:///nowhere/m21.git "$T/m21" >/dev/null
   addc src file:///nowhere/m21.git -p lib --include 'f[1-3]?.c'      # 30 files
   C30=$(calls status)
   addc src file:///nowhere/m21.git -p lib                             # all 60

@@ -175,7 +175,7 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
 | `rm PATH…`, `unlink PATH…`, `mv OLD NEW` | remove links with their files (like `git rm`) or without, move them |
 | `source [ACTION …]` | list sources; rename, change URL, branch or tag |
-| `map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
+| `source map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
 | `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear |
 | `install-hooks`, `uninstall-hooks` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |
 
