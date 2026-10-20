@@ -717,6 +717,33 @@ printed instead; hooks installed by an older version are updated. With
 `core.hooksPath` set, the hooks go there (with a warning, as other
 repositories may share that directory).
 
+**Sharing `pre-push` with Git LFS (or git-assetsync):** git passes the refs
+being pushed to the hook on stdin, once – whichever command reads them
+first gets them. The git-filesync block reads them and hands them on to
+the commands after it; it can't get them back from a command before it.
+So put it **before** `git lfs pre-push` (as `install-hooks` says when the
+hook exists). Otherwise Git LFS works, but the push check sees nothing to
+check. git-assetsync's block works the same way; the two can come in
+either order, both before `git lfs pre-push`:
+
+```sh
+#!/bin/sh
+# git-filesync: …
+git_filesync_refs=$(cat)
+printf '%s\n' "$git_filesync_refs" | git filesync hook pre-push "$@" || [ $? -ne 3 ] || exit 1
+[ -z "$git_filesync_refs" ] || exec <<git_filesync_refs_end
+$git_filesync_refs
+git_filesync_refs_end
+command -v git-lfs >/dev/null 2>&1 || { …; exit 2; }
+git lfs pre-push "$@"
+```
+
+Before 0.9.1 the block was a single line that kept the refs to itself: put
+first, it left Git LFS without them – the push went through, but no LFS
+objects were uploaded. Run `git filesync install-hooks` again: it replaces
+the old line by the block, in the same place – in a shared hook, check that
+the block comes before `git lfs pre-push`.
+
 **Push check:** the `pre-push` hook also looks at the commits being pushed:
 a linked file synced to an upstream commit that isn't on the upstream
 server – typically pulled from an unpushed commit of a [mapped

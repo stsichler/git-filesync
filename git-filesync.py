@@ -174,7 +174,8 @@ follow the command.
                                 pushed file is synced to an upstream commit
                                 that isn't on the upstream server
                                 (filesync.pushCheck = warn | error, which
-                                refuses the push | off)
+                                refuses the push | off); in a pre-push hook
+                                shared with git lfs, our lines come first
     uninstall-hooks             remove them again
     hook pre-push|post-merge    what the installed hooks run
 
@@ -218,9 +219,20 @@ EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_REFUSED = 3          # hook pre-push: refuse the push (filesync.pushCheck = error)
 HOOK_MARKER = "git-filesync"
 # What the installed hooks run. Only EXIT_REFUSED blocks a push - any other
-# failure (e.g. git-filesync not installed) never does.
+# failure (e.g. git-filesync not installed) never does. git passes the refs to
+# push on pre-push's stdin once: the block reads them into a variable and
+# restores them for the commands after it (git lfs pre-push needs them too;
+# git-assetsync's block does the same with its own variable). Nothing to
+# restore if there was nothing: a blank line instead of EOF could confuse them.
+REFS_VAR = "git_filesync_refs"
 HOOKS = {
-    "pre-push": f'git filesync hook pre-push "$@" || [ $? -ne {EXIT_REFUSED} ] || exit 1',
+    "pre-push": "\n".join([
+        f"{REFS_VAR}=$(cat)",
+        f"printf '%s\\n' \"${REFS_VAR}\" | git filesync hook pre-push \"$@\""
+        f" || [ $? -ne {EXIT_REFUSED} ] || exit 1",
+        f"[ -z \"${REFS_VAR}\" ] || exec <<{REFS_VAR}_end",
+        f"${REFS_VAR}",
+        f"{REFS_VAR}_end"]),
     "post-merge": 'git filesync hook post-merge "$@" </dev/null || true',
 }
 REGISTRY_HEADER = ("# git-filesync: files of this repository that are kept in sync with\n"
@@ -303,12 +315,23 @@ PROTOCOL_V2 = ["-c", "protocol.version=2"]
 
 
 def git(args, cwd=None, data=None, check=True, env=None):
-    p = subprocess.run(["git"] + [str(a) for a in args], cwd=cwd, input=data,
+    args = [str(a) for a in args]
+    p = subprocess.run(["git"] + args, cwd=cwd, input=data,
                        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if check and p.returncode != 0:
         err = p.stderr.decode("utf-8", "replace").strip()
-        raise FsError(f"git {args[0]} failed: {err}")
+        i = 0
+        while i < len(args) - 1 and args[i] in ("-c", "-C"):    # options before the command
+            i += 2
+        raise FsError(f"git {args[i] if args else ''} failed: {err}")
     return p
+
+
+def chunks(items, n=200):
+    """items in slices of n - several paths per git call, but within the
+    command line length limit (32 KiB on Windows)."""
+    items = list(items)
+    return [items[i:i + n] for i in range(0, len(items), n)]
 
 
 def out(p):
@@ -550,7 +573,7 @@ class Source:
         self.dir, self.ref, self.label = Path(workdir), ref, label
         self.local = local   # mapped local checkout: ref is its local branch
         self.note = note     # remark about the ref choice, shown by status
-        self._newer = {}     # newer_tags() / is_on_branch() results
+        self._memo = {}      # answers that don't change during a run (see prefetch)
 
     def git(self, args, **kw):
         kw.setdefault("env", clean_env())
@@ -558,8 +581,10 @@ class Source:
 
     def head_ref(self):
         """Full ref name checked out in a local checkout, None if detached."""
-        p = self.git(["symbolic-ref", "-q", "HEAD"], check=False)
-        return out(p) if p.returncode == 0 else None
+        if ("head_ref",) not in self._memo:
+            p = self.git(["symbolic-ref", "-q", "HEAD"], check=False)
+            self._memo[("head_ref",)] = out(p) if p.returncode == 0 else None
+        return self._memo[("head_ref",)]
 
     def head_desc(self):
         """What a local checkout has checked out: branch name or detached commit."""
@@ -572,16 +597,47 @@ class Source:
 
     def is_published(self, commit):
         """True if commit is on some remote-tracking branch (or there is no remote)."""
+        key = ("published", commit)
+        if key not in self._memo:
+            self.published([commit])
+        return self._memo.get(key, True)
+
+    def published(self, commits):
+        """Find out at once which of these existing commits are published (see
+        is_published): those not listed by `rev-list C... --not --remotes`."""
+        commits = [c for c in dict.fromkeys(commits) if ("published", c) not in self._memo]
+        if not commits:
+            return
         if not out(self.git(["for-each-ref", "--count=1", "refs/remotes/"])):
-            return True
-        return bool(out(self.git(["for-each-ref", "--count=1", "--contains", commit,
-                                  "refs/remotes/"])))
+            unpublished = set()
+        else:
+            p = self.git(["rev-list"] + commits + ["--not", "--remotes"], check=False)
+            if p.returncode:
+                return            # e.g. an unknown commit: is_published() asks one by one
+            unpublished = set(out(p).split())
+        for c in commits:
+            self._memo[("published", c)] = c not in unpublished
 
     def has_uncommitted(self, path):
-        return self.git(["diff", "--quiet", "HEAD", "--", lit(path)],
-                        check=False).returncode == 1
+        """Does a local checkout have uncommitted changes to path? One `git
+        diff` for the whole checkout, asked once."""
+        key = ("uncommitted",)
+        if key not in self._memo:
+            p = self.git(["diff", "--name-only", "-z", "--no-renames", "HEAD"], check=False)
+            self._memo[key] = set(p.stdout.decode("utf-8", "replace").split("\0")) \
+                if p.returncode == 0 else None
+        if self._memo[key] is None:
+            return self.git(["diff", "--quiet", "HEAD", "--", lit(path)],
+                            check=False).returncode == 1
+        return path in self._memo[key]
 
     def resolve(self, rev=None):
+        key = ("resolve", rev)
+        if key not in self._memo:
+            self._memo[key] = self._resolve(rev)
+        return self._memo[key]
+
+    def _resolve(self, rev):
         if rev is None:
             cands = [self.ref]
         elif not self.local and not re.fullmatch(r"[0-9a-f]{40,64}", rev):
@@ -605,12 +661,76 @@ class Source:
     def blob_at(self, commit, path):
         """Blob id of the file at path, None if there is none (or a directory).
         ls-tree needs no blobs, so nothing is fetched in the blobless cache."""
-        p = self.git(["ls-tree", "-z", "--full-tree", commit, "--", lit(path)], check=False)
-        for entry in p.stdout.decode("utf-8", "replace").split("\0"):
-            info, _, name = entry.partition("\t")
-            if name == path and info.split(" ")[1:2] == ["blob"]:
-                return info.split(" ")[2]
-        return None
+        if ("blob", commit, path) not in self._memo:
+            self.blobs_at(commit, [path])
+        return self._memo[("blob", commit, path)]
+
+    def blobs_at(self, commit, paths):
+        """blob_at() for many paths, with one ls-tree per 200 of them."""
+        paths = [p for p in dict.fromkeys(paths) if ("blob", commit, p) not in self._memo]
+        for part in chunks(paths):
+            p = self.git(["ls-tree", "-z", "--full-tree", commit, "--"] + [lit(x) for x in part],
+                         check=False)
+            found = {}
+            for entry in p.stdout.decode("utf-8", "replace").split("\0"):
+                info, _, name = entry.partition("\t")
+                if info.split(" ")[1:2] == ["blob"]:
+                    found[name] = info.split(" ")[2]
+            for x in part:
+                self._memo[("blob", commit, x)] = found.get(x)
+
+    def check_plain(self, blobs):
+        """Find out with one `cat-file --batch` which of these blobs hold
+        plain content: no CR and no LFS pointer (see is_plain)."""
+        blobs = [b for b in dict.fromkeys(blobs) if b and ("plain", b) not in self._memo]
+        if not blobs:
+            return
+        p = self.git(["cat-file", "--batch"], data="".join(b + "\n" for b in blobs).encode(),
+                     check=False)
+        data, pos = p.stdout, 0
+        for b in blobs:
+            end = data.find(b"\n", pos)
+            head = data[pos:end].split() if end >= 0 else []
+            if len(head) != 3 or head[1] != b"blob":
+                return            # missing or odd: is_plain() says "don't know"
+            size = int(head[2])
+            content = data[end + 1:end + 1 + size]
+            self._memo[("plain", b)] = b"\r" not in content and not lfs_pointer(content)
+            pos = end + 1 + size + 1
+
+    def is_plain(self, blob):
+        """Plain content (see check_plain), None if not known."""
+        return self._memo.get(("plain", blob))
+
+    def commits_exist(self, commits):
+        """Find out at once which of these commit ids exist here (see
+        resolve), with one `cat-file --batch-check`."""
+        commits = [c for c in dict.fromkeys(commits)
+                   if re.fullmatch(r"[0-9a-f]{40,64}", c) and ("resolve", c) not in self._memo]
+        if not commits:
+            return
+        p = self.git(["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                     data="".join(c + "\n" for c in commits).encode(), check=False)
+        lines = out(p).splitlines()
+        if p.returncode or len(lines) != len(commits):
+            return                # resolve() asks one by one
+        for c, line in zip(commits, lines):
+            self._memo[("resolve", c)] = c if line == f"{c} commit" else None
+
+    def prefetch(self, links):
+        """Ask at once what evaluate() needs for these links of this source:
+        their paths at the tip, whether their synced commits exist (and, in
+        a local checkout, are published), the checkout's HEAD versions."""
+        tip = self.resolve()
+        if not tip:
+            return
+        paths = [lk.path for lk in links]
+        self.blobs_at(tip, paths)
+        self.commits_exist(lk.commit for lk in links)
+        if self.local:
+            self.published(lk.commit for lk in links if self.resolve(lk.commit) == lk.commit)
+            if not self.ref.startswith("refs/tags/"):
+                self.blobs_at("HEAD", paths)
 
     def read_blob(self, oid):
         """Raw blob - an LFS pointer for files stored in LFS."""
@@ -627,8 +747,11 @@ class Source:
         return out(self.git(["rev-parse", "--short", oid]))
 
     def is_ancestor(self, a, b):
-        return self.git(["merge-base", "--is-ancestor", a, b],
-                        check=False).returncode == 0
+        key = ("ancestor", a, b)
+        if key not in self._memo:
+            self._memo[key] = self.git(["merge-base", "--is-ancestor", a, b],
+                                       check=False).returncode == 0
+        return self._memo[key]
 
     def branch_refs(self, contains=None):
         """{branch name: ref} of the upstream branches (only those containing
@@ -646,25 +769,25 @@ class Source:
 
     def tags_by_commit(self):
         """{commit: [tag names]} of all tags (annotated ones peeled)."""
-        if not hasattr(self, "_tag_map"):
-            self._tag_map = {}
+        if ("tags",) not in self._memo:
+            tag_map = self._memo[("tags",)] = {}
             fmt = "%(objecttype)%09%(objectname)%09%(*objecttype)%09%(*objectname)%09" \
                   "%(refname:strip=2)"
             for line in out(self.git(["for-each-ref", f"--format={fmt}", "refs/tags/"])).splitlines():
                 kind, oid, peeled_kind, peeled, name = line.split("\t", 4)
                 commit = oid if kind == "commit" else peeled if peeled_kind == "commit" else None
                 if commit:
-                    self._tag_map.setdefault(commit, []).append(name)
-        return self._tag_map
+                    tag_map.setdefault(commit, []).append(name)
+        return self._memo[("tags",)]
 
     def is_on_branch(self, tag, branch):
         """Is tag's commit on branch (None: no such tag or branch)?"""
         key = ("on", tag, branch)
-        if key not in self._newer:
+        if key not in self._memo:
             base = self.resolve(f"refs/tags/{tag}")
             ref = self.branch_refs().get(branch)
-            self._newer[key] = self.is_ancestor(base, ref) if base and ref else None
-        return self._newer[key]
+            self._memo[key] = self.is_ancestor(base, ref) if base and ref else None
+        return self._memo[key]
 
     def line_problem(self, tag, branch):
         """Why newer tags than tag can't be looked for on branch; None if
@@ -692,9 +815,9 @@ class Source:
         parent line (a tag on a merged side branch doesn't count). Looked for
         on branch only, or on every branch containing tag. Returns
         [(tags of that commit, [branches])], empty if there are none."""
-        key = (tag, branch)
-        if key in self._newer:
-            return self._newer[key]
+        key = ("newer", tag, branch)
+        if key in self._memo:
+            return self._memo[key]
         base = self.resolve(f"refs/tags/{tag}")
         refs = {}
         if base and branch:
@@ -711,8 +834,8 @@ class Source:
                     if self.is_ancestor(base, c):
                         found.setdefault(tuple(sorted(tags[c])), []).append(name)
                     break
-        self._newer[key] = sorted(found.items())
-        return self._newer[key]
+        self._memo[key] = sorted(found.items())
+        return self._memo[key]
 
     def last_change(self, rev, path):
         """Newest commit up to rev that changed path: the commit the file's
@@ -807,8 +930,14 @@ class Context:
         in .git-filesync (used as label)."""
         key = (norm_url(url), ref)
         if key not in self._sources:
-            self._sources[key] = self._make(url, ref, name)
-        return self._sources[key]
+            try:
+                self._sources[key] = self._make(url, ref, name)
+            except FsError as e:      # e.g. a failed clone: not tried again for each file
+                self._sources[key] = e
+        s = self._sources[key]
+        if isinstance(s, FsError):
+            raise s
+        return s
 
     def local_path(self, url):
         """Mapped local checkout for url (validated), or None."""
@@ -965,9 +1094,71 @@ class Repo:
         # subdirectory in GIT_PREFIX
         prefix = os.environ.get("GIT_PREFIX")
         self.base = Path.cwd() / prefix if prefix else Path.cwd()
+        self._head = {}           # rel -> blob id in HEAD (None: not there)
+        self._dirty = {}          # rel -> differs between HEAD and working tree
+        self._plain = {}          # rel -> no content-changing attributes
 
     def git(self, args, **kw):
         return git(args, cwd=self.top, **kw)
+
+    def prefetch(self, rels):
+        """Ask at once, for many files, what head_blob() and is_modified()
+        answer: one ls-tree and one diff per 200 files instead of two
+        commands per file."""
+        rels = list(dict.fromkeys(rels))
+        for part in chunks(rels):
+            spec = ["--"] + [lit(r) for r in part]
+            p = self.git(["ls-tree", "-z", "--full-tree", "HEAD"] + spec, check=False)
+            found = {}
+            for entry in p.stdout.decode("utf-8", "replace").split("\0"):
+                info, _, name = entry.partition("\t")
+                if info.split(" ")[1:2] == ["blob"]:
+                    found[name] = info.split(" ")[2]
+            p2 = self.git(["diff", "--name-only", "-z", "--no-renames", "HEAD"] + spec, check=False)
+            if p.returncode or p2.returncode:
+                continue          # e.g. no commit yet: asked one by one
+            dirty = set(p2.stdout.decode("utf-8", "replace").split("\0"))
+            for r in part:
+                self._head[r] = found.get(r)
+                self._dirty[r] = r in dirty
+
+    def check_plain(self, rels):
+        """Find out with one `check-attr` which files have no attributes that
+        change content on checkout or checkin beyond line endings (filter,
+        ident, working-tree-encoding) - see is_plain."""
+        rels = [r for r in dict.fromkeys(rels) if r not in self._plain]
+        if not rels:
+            return
+        attrs = ["filter", "ident", "working-tree-encoding"]
+        p = self.git(["check-attr", "-z", "--stdin"] + attrs,
+                     data="".join(r + "\0" for r in rels).encode(), check=False)
+        if p.returncode:
+            return
+        items = p.stdout.decode("utf-8", "replace").split("\0")
+        plain = dict.fromkeys(rels, True)
+        for i in range(0, len(items) - 2, 3):
+            path, value = items[i], items[i + 2]
+            if path in plain and value not in ("unspecified", "unset"):
+                plain[path] = False
+        self._plain.update(plain)
+
+    def is_plain(self, rel):
+        """No content-changing attributes (see check_plain), None if not known."""
+        return self._plain.get(rel)
+
+    def head_blob(self, rel):
+        """Blob id of rel in HEAD, None if it isn't there."""
+        if rel not in self._head:
+            p = self.git(["rev-parse", "--verify", "-q", f"HEAD:{rel}"], check=False)
+            self._head[rel] = out(p) if p.returncode == 0 else None
+        return self._head[rel]
+
+    def is_modified(self, rel):
+        """Does the working tree file differ from HEAD (like `git diff HEAD`)?"""
+        if rel not in self._dirty:
+            self._dirty[rel] = self.git(["diff", "--quiet", "HEAD", "--", lit(rel)],
+                                        check=False).returncode == 1
+        return self._dirty[rel]
 
     def user_path(self, s):
         return (self.base / s).resolve()
@@ -1351,6 +1542,10 @@ def matches_base(repo, src, link, oid, read):
         return True
     if not link.blob:
         return False
+    if repo.is_plain(link.rel) and src.is_plain(link.blob):
+        # LF-only content without filters here: a checkout and checkin leave
+        # it as it is, so only the very same blob matches (no git calls)
+        return False
     try:
         ptr = lfs_pointer(src.read_blob(link.blob))
         if ptr:   # upstream stores it in LFS: compare against the pointer's hash first
@@ -1395,6 +1590,41 @@ class FileState:
     repinned: Optional[str] = None  # pull -b/--tag: the previous branch or tag
 
 
+def prefetch(ctx, repo, links):
+    """Ask git about many links at once - one command per repository and per
+    source instead of several per file, which adds up (starting a process
+    is slow on Windows). Only fills caches: evaluate() asks for whatever is
+    missing, and reports the errors."""
+    links = [lk for lk in links if not path_problem(lk.rel)]
+    repo.prefetch(lk.rel for lk in links)
+    groups = {}
+    for lk in links:
+        if not (lk.url and lk.ref and lk.path):
+            continue
+        try:
+            src = ctx.source(lk.url, lk.ref, lk.name)
+        except FsError:
+            continue
+        groups.setdefault(id(src), (src, []))[1].append(lk)
+    for src, lks in groups.values():
+        try:
+            src.prefetch(lks)
+        except FsError:
+            pass
+    # files that differ from their base (adapted, uncommitted changes): can
+    # they be compared without git's filters? (see matches_base)
+    differ = [lk for lk in links if lk.blob and repo._head.get(lk.rel) not in (None, lk.blob)
+              or repo._dirty.get(lk.rel)]
+    if differ:
+        repo.check_plain(lk.rel for lk in differ)
+        ids = {id(lk) for lk in differ}
+        for src, lks in groups.values():
+            try:
+                src.check_plain(lk.blob for lk in lks if id(lk) in ids)
+            except FsError:
+                pass
+
+
 def evaluate(ctx, repo, link):
     """State of a linked file in three independent respects:
     upstream  - synced upstream version vs. current one (changed/behind/
@@ -1431,24 +1661,22 @@ def evaluate(ctx, repo, link):
                 st.warnings.append(str(e))
             return False
     try:
-        cur = repo.worktree_blob(link.target)
-        p = repo.git(["rev-parse", "--verify", "-q", f"HEAD:{link.rel}"], check=False)
-        head = st.head_blob = out(p) if p.returncode == 0 else None
+        exists = link.target.is_file()
+        head = st.head_blob = repo.head_blob(link.rel)
         if head:
             st.committed = "unmodified" if base_matches(
                 head, lambda: repo.read_blob(head)) else "adapted"
-        if cur is None:
+        if not exists:
             st.worktree = "deleted" if head else "missing"
         elif not head:
             st.worktree = "added"
-        elif repo.git(["diff", "--quiet", "HEAD", "--", lit(link.rel)],
-                       check=False).returncode == 1:
+        elif repo.is_modified(link.rel):
             st.worktree = "modified"
-        if cur is None:
+        if not exists:
             st.local = "missing"
         elif st.worktree == "clean":
             st.local = "clean" if st.committed == "unmodified" else "modified"
-        elif base_matches(cur, link.target.read_bytes):
+        elif base_matches(repo.worktree_blob(link.target), link.target.read_bytes):
             st.local = "clean"
         else:
             st.local = "modified"
@@ -1479,9 +1707,14 @@ def evaluate(ctx, repo, link):
             return st
         path = st.new_path = st.moved[1]
         st.new_blob = src.blob_at(tip, path)
-    st.new = src.last_change(tip, path)    # not the tip: what a pull records
+    if st.has_old and st.new_blob == st.old_blob and path == link.path:
+        st.new = st.old           # unchanged upstream: no history to look at
+    else:
+        st.new = src.last_change(tip, path)    # not the tip: what a pull records
     if st.has_old:
-        if st.new != st.old and src.is_ancestor(st.new, st.old):
+        if st.new == st.old:
+            pass
+        elif src.is_ancestor(st.new, st.old):
             st.behind = src.count(st.new, st.old, path)   # branch older than last sync
         else:
             st.count = src.count(st.old, st.new, *dict.fromkeys((link.path, path)))
@@ -1680,6 +1913,7 @@ def cmd_status(ctx, repo, args):
         if not args.short:
             print(f"no linked files ({REGISTRY} not found or empty)")
         return EXIT_OK
+    prefetch(ctx, repo, links)
     sts = [evaluate(ctx, repo, link) for link in links]
     attention = [st for st in sts if st.error or st.pending or st.violation]
     rc = EXIT_ERROR if any(st.error for st in sts) else \
@@ -2069,6 +2303,7 @@ def cmd_pull(ctx, repo, args):
     if failed:
         rc = EXIT_ERROR
         links = [lk for lk in links if lk.rel not in failed]
+    prefetch(ctx, repo, links)
     newest = {}
     for link in links:
         st = evaluate(ctx, repo, link)
@@ -2120,6 +2355,7 @@ def diff_pairs(ctx, repo, args):
         if failed:
             rc = EXIT_ERROR
             links = [lk for lk in links if lk.rel not in failed]
+    prefetch(ctx, repo, links)
     for link in links:
         st = evaluate(ctx, repo, link)
         if st.error:
@@ -2793,7 +3029,7 @@ def cmd_source(ctx, repo, args):
         other = reg.find_source(url, spec, exclude=args.name) if source_ref(spec) else None
         if other:
             raise FsError(f"source '{other}' already has this URL and {spec_text(spec)} - "
-                          f"link the files to it with 'git filesync add --force FILE {other}'")
+                          f"move the files to it with 'git filesync set FILE... --source {other}'")
         if action == "set-url":
             reg.set_source(args.name, "url", url)
             done = f"{args.name}: url {url}"
@@ -2952,7 +3188,9 @@ def cmd_cache(args):
 def hook_reminders(ctx, repo):
     """Terse notes on stderr about linked files needing attention: something
     to sync, a strict violation, an error."""
-    sts = [evaluate(ctx, repo, link) for link in Registry(repo).links()]
+    links = Registry(repo).links()
+    prefetch(ctx, repo, links)
+    sts = [evaluate(ctx, repo, link) for link in links]
     attention = [st for st in sts if st.error or st.pending or st.violation]
     for st in attention:
         print(f"filesync: {paint(st.rel, 'yellow', 'err')}: {render(describe(st), 'err')}",
@@ -3080,8 +3318,8 @@ def hook_snippet(cmd):
 
 def is_our_hook_line(line):
     s = line.strip()
-    return s.startswith((f"# {HOOK_MARKER}:", "git filesync hook ",
-                         "git filesync status --hook"))     # the latter: before 0.7
+    return REFS_VAR in s or s.startswith((f"# {HOOK_MARKER}:", "git filesync hook ",
+                                          "git filesync status --hook"))  # the latter: before 0.7
 
 
 def cmd_install_hooks(repo, args):
@@ -3095,18 +3333,24 @@ def cmd_install_hooks(repo, args):
             lines = text.splitlines(keepends=True)
             at = next((i for i, ln in enumerate(lines) if is_our_hook_line(ln)), None)
             if at is None:
-                print(f"{name}: {paint('hook exists', 'yellow')}, add these lines to {f}:\n{snippet}")
+                where = (", before commands that read the pushed refs from stdin "
+                         "(e.g. git lfs pre-push)") if name == "pre-push" else ""
+                print(f"{name}: {paint('hook exists', 'yellow')}, add these lines to {f}"
+                      f"{where}:\n{snippet}")
                 continue
-            # ours: replace our lines with the current ones, in the same place
             rest = [ln for ln in lines if not is_our_hook_line(ln)]
-            new = "".join(rest[:at] + [snippet] + rest[at:])
+            if all(ln.strip() in ("", "#!/bin/sh", "exit 0") for ln in rest):
+                new = "#!/bin/sh\n" + snippet     # one we wrote: without the old exit 0
+            else:                                 # replace our lines, in the same place
+                new = "".join(rest[:at] + [snippet] + rest[at:])
             if new == text:
                 print(f"{name}: already installed")
             else:
                 f.write_bytes(new.encode("utf-8"))
                 print(f"{name}: {paint('updated', 'green')}")
             continue
-        f.write_bytes(("#!/bin/sh\n" + snippet + "exit 0\n").encode())
+        # no exit 0 at the end: lines appended later (e.g. by git lfs) must run
+        f.write_bytes(("#!/bin/sh\n" + snippet).encode())
         f.chmod(0o755)
         print(f"{name}: {paint('installed', 'green')}")
     return EXIT_OK

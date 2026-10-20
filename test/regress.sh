@@ -46,6 +46,7 @@
 #   18. pull -b / --tag: switching branch or tag; newer tags
 #   19. set: change source, upstream path or strict of linked files
 #   20. cache: show, list and clean up the cache of upstream clones
+#   21. Performance: git processes don't grow with the number of files
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -243,7 +244,10 @@ check "own hooks removed" "$(ls .git/hooks/pre-push .git/hooks/post-merge 2>/dev
 # uninstall-hooks must remove only our lines.
 printf '#!/bin/sh\necho mine\n' > .git/hooks/pre-push
 chmod +x .git/hooks/pre-push
-git filesync install-hooks 2>/dev/null | sed -n '/^# git-filesync/,/^git filesync hook/p' >> .git/hooks/pre-push
+OUT=$(git filesync install-hooks 2>/dev/null)
+check "foreign pre-push: put our lines before git lfs" \
+  "$(echo "$OUT" | grep -c '^pre-push: hook exists, add these lines to .*, before commands that read the pushed refs from stdin (e.g. git lfs pre-push):$')" "1"
+echo "$OUT" | sed -n '/^# git-filesync/,/^git_filesync_refs_end$/p' >> .git/hooks/pre-push
 printf '#!/bin/sh\necho other\n' > .git/hooks/post-merge
 git filesync uninstall-hooks >/dev/null
 check "foreign hook: own lines removed" "$(cat .git/hooks/pre-push)" "$(printf '#!/bin/sh\necho mine')"
@@ -258,6 +262,15 @@ check "install-hooks: old hook updated" "$(git filesync install-hooks 2>/dev/nul
 check "updated hook: new command, rest kept" "$(sed -n '2p;4,5p' .git/hooks/post-merge | oneline)" \
   "echo mine git filesync hook post-merge \"\$@\" </dev/null || true exit 0 "
 check "install-hooks again: nothing to do" "$(git filesync install-hooks 2>/dev/null | grep -c 'already installed')" "2"
+git filesync uninstall-hooks >/dev/null
+
+# a hook file we wrote (before 0.9.1: ending in exit 0) is rewritten without
+# exit 0, so lines appended later (git lfs install's) run
+printf '#!/bin/sh\n# git-filesync: old\ngit filesync hook pre-push "$@" || [ $? -ne 3 ] || exit 1\nexit 0\n' \
+  > .git/hooks/pre-push
+quiet git filesync install-hooks
+check "own old hook: exit 0 dropped" "$(head -1 .git/hooks/pre-push) $(grep -c '^exit 0' .git/hooks/pre-push)" "#!/bin/sh 0"
+check "own old hook: refs block" "$(grep -c git_filesync_refs .git/hooks/pre-push)" "5"
 git filesync uninstall-hooks >/dev/null
 
 # pre-push: a pushed file synced to an upstream commit that isn't on the
@@ -290,6 +303,7 @@ check "pre-push: entries of the replaced commit skipped" \
 git init -q --bare "$T/downstream-remote.git"
 git remote add origin "$T/downstream-remote.git"
 git filesync install-hooks >/dev/null
+check "new hook: no exit 0" "$(grep -c '^exit 0' .git/hooks/pre-push)" "0"
 check "installed hook refuses the push" "$(rc git push -q origin HEAD:main)" "1"
 check "push --no-verify skips the hook" "$(rc git push -q --no-verify origin HEAD:main)" "0"
 # ... and those on the remote's remote-tracking branches (origin/main now)
@@ -302,6 +316,15 @@ git commit -q --allow-empty -m "once more"
 check "upstream pushed: not reported" "$(echo "$PUSH" | git filesync hook pre-push other x 2>&1 | grep -c 'not on the server')" "0"
 check "upstream pushed: push goes through" "$(rc git push -q origin HEAD:main)" "0"
 git config --unset filesync.pushCheck
+# commands after our block (e.g. git lfs pre-push) still get the pushed refs;
+# with nothing on stdin, they get nothing (not a blank line)
+printf 'cat > "%s/after-refs"\n' "$T" >> .git/hooks/pre-push
+git commit -q --allow-empty -m "for the stdin test"
+quiet git push -q origin HEAD:main
+check "pre-push: commands after our block get the refs" \
+  "$(lines < "$T/after-refs") $(cut -d' ' -f2-3 "$T/after-refs")" "1 $(git rev-parse HEAD) refs/heads/main"
+quiet .git/hooks/pre-push origin x </dev/null
+check "pre-push: nothing in, nothing restored" "$(wc -c < "$T/after-refs" | tr -d ' ')" "0"
 git filesync uninstall-hooks >/dev/null
 git remote remove origin
 git filesync map "$URL" --unset >/dev/null
@@ -983,6 +1006,28 @@ if git lfs version >/dev/null 2>&1; then
   ERR=$(GIT_LFS_SKIP_SMUDGE=1 git filesync add d.txt "$TURL/ml.git" 2>&1)
   check "lfs unavailable: add fails" "$(echo "$ERR" | grep -c 'stored in Git LFS')" "1"
   check "lfs unavailable: no pointer file written" "$([ -e d.txt ] && echo written || echo none)" "none"
+
+  # pre-push hook shared with git lfs: our block first (as install-hooks
+  # says) - LFS must still get the pushed refs and upload its objects
+  cd "$T"
+  git init -q --bare lfsremote.git
+  new_repo slh
+  git lfs install --local >/dev/null 2>&1
+  git lfs track '*.bin' >/dev/null
+  head -c 2000 /dev/urandom > a.bin
+  git add . && git commit -qm lfs
+  git remote add origin "$T/lfsremote.git"
+  { echo '#!/bin/sh'
+    git filesync install-hooks 2>/dev/null | sed -n '/^# git-filesync/,/^git_filesync_refs_end$/p'
+    tail -n +2 .git/hooks/pre-push; } > hook.new
+  mv hook.new .git/hooks/pre-push && chmod +x .git/hooks/pre-push
+  quiet git push origin main
+  N=$(find "$T/lfsremote.git/lfs/objects" -type f 2>/dev/null | lines)
+  if [ "$N" = 0 ] && ! grep -q 'git lfs pre-push' .git/hooks/pre-push; then
+    echo "skip: git lfs install wrote no pre-push hook"
+  else
+    check "hook with git lfs: our block first, LFS objects uploaded" "$N" "1"
+  fi
 else
   echo "skip Git LFS tests (git-lfs not installed)"
 fi
@@ -1562,6 +1607,45 @@ check "cache clear -n" "$(git filesync cache clear -n | tail -1 | cut -d' ' -f1-
 quiet git filesync cache clear
 check "cache clear" "$(nclones) $(git filesync cache list)" "0 the cache is empty ($(git filesync cache dir))"
 check "status after clear: cloned again" "$(rc git filesync status)" "0"
+
+
+# =============================================================================
+section "21. Performance: git processes don't grow with the number of files"
+# =============================================================================
+cd "$T"
+
+# Starting a process is slow on Windows: status asks git per repository and
+# per source, not per file. A wrapper named git (first on PATH) counts the
+# calls; not on Windows, where Python would still find git.exe first.
+# a failing git command is named in the error, not the "-c" option before it
+check "error names the git command" \
+  "$( (new_repo "$T/s21e" && git filesync add x.c file:///nowhere/none.git -b main 2>&1) | grep -c 'git clone failed')" "1"
+
+if command -v cygpath >/dev/null; then
+  echo "skipped on Windows"
+else
+  REALGIT=$(command -v git)
+  mkdir -p "$T/countbin"
+  printf '#!/bin/sh\necho x >> "$GITCALLS"\nexec "%s" "$@"\n' "$REALGIT" > "$T/countbin/git"
+  chmod +x "$T/countbin/git"
+  # calls of 'git filesync ARGS' (run directly, not through the alias)
+  calls() { : > "$T/calls"; GITCALLS=$T/calls PATH=$T/countbin:$PATH fsd "$@" >/dev/null 2>&1; lines < "$T/calls"; }
+  git init -q m21 && (cd m21 && mkdir lib && for i in $(seq 1 60); do echo "v$i" > lib/f$i.c; done \
+    && git add . && git commit -qm init)
+  new_repo s21
+  git filesync map file:///nowhere/m21.git "$T/m21" >/dev/null
+  addc src file:///nowhere/m21.git -p lib --include 'f[1-3]?.c'      # 30 files
+  C30=$(calls status)
+  addc src file:///nowhere/m21.git -p lib                             # all 60
+  C60=$(calls status)
+  check "status: git calls independent of the number of files ($C30 / $C60)" \
+    "$([ "$C60" -le "$((C30 + 2))" ] && [ "$C60" -lt 30 ] && echo yes)" "yes"
+  # adapted files are compared without a git call each
+  for i in 1 2 3 4 5 6 7 8 9; do echo local >> src/f$i.c; done
+  git commit -qam "adapt 9"
+  check "status: adapted files cost no git calls each" "$([ "$(calls status)" -le "$((C60 + 3))" ] && echo yes)" "yes"
+  check "status: adapted files reported" "$(git filesync status -s | grep -c '^ A ')" "9"
+fi
 
 
 # =============================================================================
