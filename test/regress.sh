@@ -164,6 +164,7 @@ up() { (cd "$T/upstream" && sedi "$1" lib.c && git commit -qam "$2" && git push 
 # downstream: links upstream's lib.c as src/lib.c
 new_repo downstream
 OUT=$(git filesync add src/lib.c "$URL" -p lib.c 2>&1)
+check "command help repeats the summary" "$(git filesync add -h | grep -c '^Link a file (or all files of a directory) to the upstream repository\.$')" "1"
 check "add stages, like git add" "$(git status --porcelain | oneline)" "A  .git-filesync A  src/lib.c "
 check "add: says how to commit" "$(echo "$OUT" | grep -cxE '    git commit|\(it offers the proposed commit message; a copy stays in \.git/FILESYNC_SQUASH_MSG\)')" "2"
 check "add: copy of the proposed message" "$(head -1 .git/FILESYNC_SQUASH_MSG)" "$(head -1 .git/SQUASH_MSG)"
@@ -843,6 +844,9 @@ git reset -q --hard
 # an upstream directory links the files below it
 check "upstream path is a directory" "$(git filesync add -n x.txt file:///nowhere/m6.git -p sub | cut -d' ' -f1-5)" \
   "would link x.txt/s.txt -> nowhere/m6:sub/s.txt"
+check "upstream path with backslashes (copied on Windows)" \
+  "$(git filesync add -n x.txt file:///nowhere/m6.git -p '.\sub\s.txt' | cut -d' ' -f1-5)" \
+  "would link x.txt -> nowhere/m6:sub/s.txt"
 addc a.txt file:///nowhere/m6.git
 check "mv outside refused" "$(rc git filesync mv a.txt ../moved.txt)" "2"
 check "mv outside: file stays" "$(ls a.txt ../moved.txt 2>/dev/null)" "a.txt"
@@ -1172,6 +1176,14 @@ echo "squashed" > "$(git rev-parse --git-dir)/SQUASH_MSG"
 check "foreign SQUASH_MSG: said so" \
   "$(git filesync add f.c "$URL9" -p t.c | grep -c "SQUASH_MSG is in use")" "1"
 check "foreign SQUASH_MSG: kept" "$(cat "$(git rev-parse --git-dir)/SQUASH_MSG")" "squashed"
+# the command shown names its paths relative to the current directory, and works there
+mkdir sub
+CMD=$(cd sub && git filesync add g.c "$URL9" -p t.c | sed -n 's/^    git commit/git commit/p')
+check "foreign SQUASH_MSG, subdirectory: paths relative to it" \
+  "$(echo "$CMD" | grep -cE '^git commit -e -F "\.\./\.git/FILESYNC_MSG_[^"]*" -- g\.c \.\./\.git-filesync$')" "1"
+check "foreign SQUASH_MSG, subdirectory: the command commits" \
+  "$( (cd sub && eval "$CMD" >/dev/null) && git show --name-only --format= HEAD | sort | oneline)" ".git-filesync sub/g.c "
+rm -f "$(git rev-parse --git-dir)/SQUASH_MSG"
 git reset -q --hard
 
 # adds and a pull --no-commit go into one commit, with all their proposals

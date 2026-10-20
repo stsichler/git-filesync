@@ -151,9 +151,11 @@ same exit codes, same caution with uncommitted changes. Like in Git, only
 (see [Proposed commit messages](#proposed-commit-messages)). `git filesync`
 without a command runs `status`.
 
-Paths are relative to the current directory. Where `PATH…` is accepted, a
+Paths are relative to the current directory – the ones you give, and the
+ones in the output and in suggested commands. Where `PATH…` is accepted, a
 directory stands for all linked files below it. Options follow the command
-(`git filesync status --no-fetch`); `git filesync <command> -h` lists them.
+(`git filesync status --no-fetch`); `git filesync <command> -h` describes
+the command and lists them.
 
 ### Common options
 
@@ -422,7 +424,7 @@ directory (see [below](#linking-a-directory)).
 |---|---|
 | `-b`, `--branch BRANCH` | upstream branch; default: the upstream default branch, or the branch/tag of the given `[source]`. With `--tag`: the branch to look for [newer tags](#newer-tags) on (a warning if the tag isn't on it) |
 | `--tag TAG` | [pin](#pinning-to-a-tag) to an upstream tag instead of following a branch |
-| `-p`, `--path PATH` | upstream path; default: the same as FILE or DIR (`/`: the upstream root) |
+| `-p`, `--path PATH` | upstream path; default: the same as FILE or DIR (`/`: the upstream root). Backslashes count as `/`, e.g. in a path copied from a checkout on Windows |
 | `--include PATTERN` | directory: only files matching PATTERN; repeatable |
 | `--exclude PATTERN` | directory: skip files matching PATTERN; repeatable, beats `--include` |
 | `--commit REV` | upstream revision FILE corresponds to, instead of looking it up |
@@ -508,7 +510,7 @@ staged); `status` then shows what changes, and `pull` syncs.
 | `--source URL\|SOURCE` | link to another upstream repository – a fork, a moved repository – or to another `[source]`. URL, name and `-b` / `--tag` are taken as for [`add`](#add). If the files are all files of their source and there is no source with that URL and branch or tag yet, the source itself is changed; otherwise they move to that source (created if necessary), and a source left without files is removed |
 | `-b`, `--branch BRANCH` | with `--source`: as for `add`; without: the files follow BRANCH, like `pull -b`, but without syncing |
 | `--tag TAG` | with `--source`: as for `add`; without: [pin](#pinning-to-a-tag) the files to TAG, like `pull --tag`, but without syncing |
-| `-p`, `--path PATH` | another upstream path (exactly one file) |
+| `-p`, `--path PATH` | another upstream path (exactly one file; `\` counts as `/`, as for `add`) |
 | `--strict`, `--no-strict` | mark the files as [strict](#strict-files), or allow adaptations again |
 | `-n`, `--dry-run` | only show what would change |
 

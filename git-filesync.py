@@ -104,7 +104,8 @@ follow the command.
                                 branch or that of SOURCE); with --tag: the
                                 branch to look for newer tags on
         --tag TAG               pin to an upstream tag instead of a branch
-        -p, --path PATH         upstream path (default: same as FILE)
+        -p, --path PATH         upstream path (default: same as FILE; \\
+                                counts as /)
         --include PATTERN       DIR: only files matching (gitignore-like,
                                 relative to the upstream directory; repeatable)
         --exclude PATTERN       DIR: skip files matching (repeatable)
@@ -349,6 +350,13 @@ def cmd_arg(path):
     if re.search(r"[*?\[\\]|^:", path):
         path = lit(path)
     return path if re.fullmatch(r"[\w./@+-]+", path) else f'"{path}"'
+
+
+def upstream_path(s):
+    """-p: a path in the upstream repository, in git's form. Backslashes count
+    as separators (e.g. a relative path copied from a checkout on Windows);
+    upstream file names with a backslash are not supported."""
+    return "/".join(p for p in s.replace("\\", "/").split("/") if p not in ("", "."))
 
 
 def plural(n, word):
@@ -1818,6 +1826,11 @@ def shown(repo, rel):
     return Path(os.path.relpath(repo.top / rel, repo.base)).as_posix()
 
 
+def path_arg(repo, rel):
+    """A path of this repository as argument in a command shown to the user."""
+    return cmd_arg(shown(repo, rel))
+
+
 def print_short(repo, sts):
     for st in sts:
         code = short_code(st)
@@ -1998,8 +2011,8 @@ def message_file(repo, name, msg, rels=None):
     their entries with it."""
     msgfile = repo.state_file("FILESYNC_MSG_", name)
     msgfile.write_bytes(msg.encode("utf-8"))
-    paths = " ".join([cmd_arg(r) for r in ([name] if rels is None else rels)] + [REGISTRY])
-    return msgfile, f'git commit -e -F "{msgfile}" -- {paths}'
+    paths = " ".join(path_arg(repo, r) for r in ([name] if rels is None else rels) + [REGISTRY])
+    return msgfile, f'git commit -e -F "{shown_path(repo, msgfile)}" -- {paths}'
 
 
 def propose_message(repo, msg):
@@ -2092,7 +2105,7 @@ def pull_one(repo, reg, st, args):
     if args.commit:
         new, new_blob, path = commit_target(st, args.commit)
     elif st.moved and st.moved[0] == "deleted":
-        rel = cmd_arg(st.rel)
+        rel = path_arg(repo, st.rel)
         raise FsError(f"{st.rel}: '{st.moved[1]}' was deleted in {src.label} "
                       f"({src.short(st.moved[2])}) - keep the file with "
                       f"'git filesync unlink {rel}', or delete it too with "
@@ -2108,11 +2121,12 @@ def pull_one(repo, reg, st, args):
     local_mod = st.committed == "adapted" if stash is not None else st.local == "modified"
     discard = args.overwrite and local_mod
     if st.strict and local_mod and not discard:
+        rel = path_arg(repo, st.rel)
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
-                      f"'git filesync diff {st.rel}'; discard adaptations with "
-                      f"'git filesync pull --overwrite {st.rel}', uncommitted changes with "
-                      f"'git restore {cmd_arg(st.rel)}'; or allow them with "
-                      f"'git filesync set --no-strict {cmd_arg(st.rel)}'")
+                      f"'git filesync diff {rel}'; discard adaptations with "
+                      f"'git filesync pull --overwrite {rel}', uncommitted changes with "
+                      f"'git restore {rel}'; or allow them with "
+                      f"'git filesync set --no-strict {rel}'")
     if new_blob == st.old_blob and path == link.path and st.worktree != "missing" \
             and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
@@ -2121,7 +2135,7 @@ def pull_one(repo, reg, st, args):
     if dirty and stash is None:
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
                       "commit or stash them first, or use --autostash "
-                      f"('git restore {cmd_arg(st.rel)}' discards them)")
+                      f"('git restore {path_arg(repo, st.rel)}' discards them)")
     check_other_entries(reg, [st.rel], args)
     for w in st.warnings:
         warn(f"{st.rel}: {w}")
@@ -2157,7 +2171,7 @@ def pull_one(repo, reg, st, args):
         print(f"{st.rel}: would {verb} to {link.name}@{src.short(new)}"
               + (f" ({'; '.join(notes)})" if notes else ""))
         if conflicts:
-            rel = cmd_arg(st.rel)
+            rel = path_arg(repo, st.rel)
             print(f"hint: compare the adaptations ('git filesync diff {rel}') with the "
                   f"upstream changes ('git filesync diff --upstream{target_opts(args)} {rel}')")
         return EXIT_OK
@@ -2176,10 +2190,10 @@ def pull_one(repo, reg, st, args):
         if stash is not None:
             stashfile = repo.state_file("FILESYNC_STASH_", st.rel)
             stashfile.write_bytes(repo.to_worktree(stash, st.rel))
-            print(f"{st.rel}: autostash kept in {stashfile} (not re-applied because of the conflicts)")
+            print(f"{st.rel}: autostash kept in {shown_path(repo, stashfile)} (not re-applied because of the conflicts)")
         cmd, note = commit_hint(repo, st.rel, msg)
         print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}. "
-              f"Resolve them, then run:\n    git add {cmd_arg(st.rel)}\n    {cmd}\n({note})")
+              f"Resolve them, then run:\n    git add {path_arg(repo, st.rel)}\n    {cmd}\n({note})")
         return EXIT_PENDING
     repo.git(["add", "--", lit(st.rel)])
     rc = commit_staged(repo, st.rel, msg, args, "synced and staged")
@@ -2668,8 +2682,7 @@ def cmd_add(ctx, repo, args):
     _, problem = src.tag_info(ref[1], source_line(spec), newer=False)
     if problem:
         warn(f"{problem}; newer tags can't be found there")
-    path = (args.path or ("" if rel == "." else rel)).strip("/")
-    path = "" if path == "." else path
+    path = upstream_path(args.path if args.path else rel)
     patterns = args.include or args.exclude
     upstream_file = bool(path) and not patterns and bool(src.blob_at(head, path))
     if target.is_dir() and upstream_file:       # like cp: into the directory
@@ -2872,7 +2885,7 @@ def cmd_set(ctx, repo, args):
         head = src.resolve()
         if not head:
             raise FsError(ref_missing(lk.ref, src))
-        path = args.path.strip("/")
+        path = upstream_path(args.path)
         commit, blob, _, modified = find_base(repo, src, head, None, lk.rel, path, lk.target)
         if (path, commit, blob) != (lk.path, lk.commit, lk.blob):
             print(f"{would}{lk.rel}: path {lk.path} -> {path}, based on {src.short(commit)}"
@@ -3381,6 +3394,14 @@ def cmd_uninstall_hooks(repo, args):
 
 # --------------------------------------------------------------------------
 
+def add_command(sub, name, **kw):
+    """A (sub)command whose -h repeats its summary from the command list."""
+    hlp = kw.get("help")
+    if hlp:
+        kw.setdefault("description", hlp[0].upper() + hlp[1:] + ".")
+    return sub.add_parser(name, **kw)
+
+
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         # LF line ends like git's output, also on Windows (no CRLF translation);
@@ -3407,7 +3428,7 @@ def main(argv=None):
     ap.add_argument("--version", action="version", version=f"git-filesync {__version__}")
     sub = ap.add_subparsers(dest="cmd")
 
-    p = sub.add_parser("status", parents=[common], help="show sync state of linked files")
+    p = add_command(sub, "status", parents=[common], help="show sync state of linked files")
     p.add_argument("paths", nargs="*", help="files or directories (default: all)")
     p.add_argument("-s", "--short", action="store_true",
                    help="short format: upstream / committed / working tree columns")
@@ -3416,7 +3437,7 @@ def main(argv=None):
     p.add_argument("--exit-code", action="store_true",
                    help="exit with 1 if something is to sync or a strict file is modified")
 
-    p = sub.add_parser("pull", parents=[common], help="sync file(s) from upstream")
+    p = add_command(sub, "pull", parents=[common], help="sync file(s) from upstream")
     p.add_argument("files", nargs="*", help="files or directories")
     p.add_argument("--all", action="store_true", help="sync all files with something to sync")
     p.add_argument("--commit", metavar="REV", help="sync to this upstream revision (exactly one file)")
@@ -3435,7 +3456,7 @@ def main(argv=None):
 
     for name, hlp in (("diff", "show local modifications against the synced upstream version"),
                       ("difftool", "same in the configured difftool")):
-        p = sub.add_parser(name, parents=[common], help=hlp,
+        p = add_command(sub, name, parents=[common], help=hlp,
                            epilog="Options after '--' are passed to git " + name + ".")
         p.add_argument("files", nargs="*", help="files or directories (default: all)")
         g = p.add_mutually_exclusive_group()
@@ -3457,7 +3478,7 @@ def main(argv=None):
             p.add_argument("--prompt", action="store_true",
                            help="ask before each file even if files are given")
 
-    p = sub.add_parser("add", parents=[common], help="link a file (or all files of a directory) "
+    p = add_command(sub, "add", parents=[common], help="link a file (or all files of a directory) "
                                                      "to the upstream repository")
     p.add_argument("file", metavar="FILE|DIR",
                    help="file in this repository (fetched from upstream if missing), or a "
@@ -3479,7 +3500,7 @@ def main(argv=None):
     p.add_argument("--strict", action="store_true",
                    help="file must stay an exact copy (no local modifications)")
 
-    p = sub.add_parser("set", parents=[common], help="change the link of linked files: source, "
+    p = add_command(sub, "set", parents=[common], help="change the link of linked files: source, "
                                                      "upstream path, strict")
     p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
     p.add_argument("--source", metavar="URL|SOURCE",
@@ -3497,19 +3518,19 @@ def main(argv=None):
                    help="allow local adaptations again")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
 
-    sub.add_parser("edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then check "
+    add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then check "
                                                   "and stage it")
 
-    p = sub.add_parser("unlink", parents=[colorp], help="remove links (the files are kept)")
+    p = add_command(sub, "unlink", parents=[colorp], help="remove links (the files are kept)")
     p.add_argument("files", nargs="+", help="files or directories")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be unlinked")
 
-    p = sub.add_parser("mv", parents=[colorp], help="move a linked file, keeping its link")
+    p = add_command(sub, "mv", parents=[colorp], help="move a linked file, keeping its link")
     p.add_argument("src", metavar="OLD", help="linked file")
     p.add_argument("dst", metavar="NEW", help="new path or existing directory")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be moved")
 
-    p = sub.add_parser("source", parents=[common], help="list or change the [source]s "
+    p = add_command(sub, "source", parents=[common], help="list or change the [source]s "
                                                         "(like 'git remote')")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="list with URL, branch or tag (and newest tag), and file count")
@@ -3522,7 +3543,7 @@ def main(argv=None):
                            ("set-tag", "TAG", "pin to TAG (a branch stays the one to look "
                                               "for newer tags on); --unset: follow the "
                                               "branch again")):
-        a = actions.add_parser(name, parents=[colorp], help=hlp)
+        a = add_command(actions, name, parents=[colorp], help=hlp)
         a.add_argument("name", metavar="NAME" if name != "rename" else "OLD",
                        help="key of the [source]")
         if name in ("set-tag", "set-branch"):
@@ -3534,7 +3555,7 @@ def main(argv=None):
         else:
             a.add_argument("value", metavar=arg)
 
-    p = sub.add_parser("map", parents=[colorp], help="use a local checkout for an upstream URL "
+    p = add_command(sub, "map", parents=[colorp], help="use a local checkout for an upstream URL "
                                                      "(this repo's config; --global for all repos)")
     p.add_argument("url", nargs="?", metavar="URL|SOURCE",
                    help="upstream URL, or the name of a [source] for its URL "
@@ -3544,12 +3565,12 @@ def main(argv=None):
     p.add_argument("--global", dest="glob", action="store_true",
                    help="use the global git config instead of this repository's")
 
-    p = sub.add_parser("cache", parents=[colorp],
+    p = add_command(sub, "cache", parents=[colorp],
                        help="show, list or clean up the cache of upstream clones")
     actions = p.add_subparsers(dest="action", metavar="ACTION")
-    actions.add_parser("list", parents=[colorp],
+    add_command(actions, "list", parents=[colorp],
                        help="the clones, most recently used first: size, last used, URL")
-    a = actions.add_parser("prune", parents=[colorp],
+    a = add_command(actions, "prune", parents=[colorp],
                            help="remove clones not used for a while (default: the configured "
                                 "limits, filesync.cacheMaxAge / cacheMaxSize)")
     a.add_argument("--older-than", type=int, metavar="DAYS",
@@ -3557,13 +3578,13 @@ def main(argv=None):
     a.add_argument("--max-size", metavar="SIZE",
                    help="then the least recently used, down to SIZE (e.g. 500M, 2G)")
     a.add_argument("-n", "--dry-run", action="store_true", help="only show what would be removed")
-    a = actions.add_parser("clear", parents=[colorp], help="remove all clones")
+    a = add_command(actions, "clear", parents=[colorp], help="remove all clones")
     a.add_argument("-n", "--dry-run", action="store_true", help="only show what would be removed")
-    actions.add_parser("dir", parents=[colorp], help="print the cache's directory")
+    add_command(actions, "dir", parents=[colorp], help="print the cache's directory")
 
-    sub.add_parser("install-hooks", parents=[colorp], help="install the pre-push/post-merge hooks")
-    sub.add_parser("uninstall-hooks", parents=[colorp], help="remove the hooks again")
-    p = sub.add_parser("hook", parents=[colorp], help="what the installed hooks run")
+    add_command(sub, "install-hooks", parents=[colorp], help="install the pre-push/post-merge hooks")
+    add_command(sub, "uninstall-hooks", parents=[colorp], help="remove the hooks again")
+    p = add_command(sub, "hook", parents=[colorp], help="what the installed hooks run")
     p.add_argument("name", choices=list(HOOKS))
     p.add_argument("hook_args", nargs=argparse.REMAINDER, help="the hook's arguments")
 
