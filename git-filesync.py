@@ -57,13 +57,10 @@ follow the command.
         --all                   all files with something to sync
         --commit REV            sync to this upstream revision (one file;
                                 also backwards)
-        -b, --branch BRANCH     switch the files to following BRANCH, and sync
-        --tag TAG               switch the files to (pin them to) TAG, and
-                                sync; the source's branch (or -b) stays the
-                                one to look for newer tags on; a source whose
-                                files are all given is changed itself,
-                                otherwise the given files move to a source
-                                with that URL, branch and tag
+        -b, --branch BRANCH     sync to the head of BRANCH, once: the files
+                                keep following their own branch or tag
+                                (to switch: set -b/--tag, source set-*)
+        --tag TAG               sync to TAG, once (as -b)
         --overwrite             discard local adaptations instead of merging
         --autostash             set uncommitted changes aside, re-apply after
         --no-edit               commit without opening the editor
@@ -133,8 +130,13 @@ follow the command.
                                 [source]; a source whose files are all given
                                 is changed itself
         -b, --branch BRANCH     as for add; without --source: follow BRANCH
+                                from now on (sync with pull)
         --tag TAG               as for add; without --source: pin to TAG
-                                (like pull -b/--tag, without syncing)
+                                from now on; the source's branch (or -b)
+                                stays the one to look for newer tags on;
+                                a source whose files are all given is
+                                changed itself, otherwise the files move to
+                                a source with that URL, branch and tag
         -p, --path PATH         another upstream path (one file); its
                                 current version becomes the base, as for add
         --strict, --no-strict   mark as strict / allow adaptations again
@@ -1613,7 +1615,8 @@ class FileState:
     changed: bool = False     # upstream version differs from the base
     pending: bool = False     # something for pull to do
     violation: bool = False   # strict file modified
-    repinned: Optional[str] = None  # pull -b/--tag: the previous branch or tag
+    once: Optional[str] = None  # pull -b/--tag: the branch or tag synced to, once
+    target: Optional[str] = None    # ... and its commit
 
 
 def prefetch(ctx, repo, links):
@@ -1984,8 +1987,9 @@ def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, dis
              f"Upstream: {link.url} ({link.ref[1]}:{path})"]
     if path != old_path:
         lines += ["", f"Renamed upstream: {old_path} -> {path}"]
-    if st.repinned:
-        lines += ["", f"Switched from {st.repinned} to {spec_text(link.source)}."]
+    if st.once:
+        lines += ["", f"Synced to {st.once} once; the link still follows "
+                      f"{spec_text(link.source)}."]
     if new == st.old:
         pass
     elif st.has_old:
@@ -2106,8 +2110,26 @@ def check_target_args(args, links):
     """--commit / -b / --tag (pull, diff --upstream): the upstream version to sync to."""
     if args.commit and (args.branch or args.tag):
         raise FsError("--commit cannot be combined with -b or --tag")
+    if args.branch and args.tag:
+        raise FsError("-b and --tag cannot be combined")
     if args.commit and len(links) != 1:
         raise FsError("--commit requires exactly one file")
+
+
+def target_rev(ctx, link, args):
+    """-b / --tag (pull, diff --upstream): the upstream commit to sync to
+    once - the head of that branch, or the tag. The link keeps its own."""
+    ref = ("tag", args.tag) if args.tag else ("branch", args.branch)
+    src = ctx.source(link.url, ref, link.name)
+    rev = src.resolve()
+    if not rev:
+        raise FsError(ref_missing(ref, src))
+    return rev
+
+
+def once_text(args):
+    """The branch or tag of pull -b/--tag."""
+    return f"tag {args.tag}" if args.tag else f"branch {args.branch}"
 
 
 def target_opts(args):
@@ -2120,8 +2142,8 @@ def pull_one(repo, reg, st, args):
     link, src = st.link, st.src
     path = st.new_path                   # differs from link.path if renamed upstream
     new, new_blob = st.new, st.new_blob
-    if args.commit:
-        new, new_blob, path = commit_target(st, args.commit)
+    if args.commit or st.once:
+        new, new_blob, path = commit_target(st, args.commit or st.target)
     elif st.moved and st.moved[0] == "deleted":
         rel = path_arg(repo, st.rel)
         raise FsError(f"{st.rel}: '{st.moved[1]}' was deleted in {src.label} "
@@ -2179,7 +2201,7 @@ def pull_one(repo, reg, st, args):
         content = theirs
 
     if args.dry_run:
-        notes = ([f"from {st.repinned}"] if st.repinned else []) + \
+        notes = ([f"{st.once} once"] if st.once else []) + \
             ([f"renamed upstream: {link.path} -> {path}"] if path != link.path else []) + \
             (["discarding adaptations"] if discard else []) + \
             ([paint(f"{conflicts} merge conflict(s)", "boldred") if conflicts else
@@ -2231,7 +2253,7 @@ def pull_one(repo, reg, st, args):
 
 
 def switch_spec(source, args):
-    """The ref keys pull -b/--tag switch a [source] to: --tag pins, keeping
+    """The ref keys set -b/--tag switch a [source] to: --tag pins, keeping
     the branch the source has (or -b) as the one to look for newer tags on;
     -b alone follows that branch."""
     if not args.tag:
@@ -2272,44 +2294,9 @@ def move_to_source(reg, name, lks, url, spec, named=None):
     return desc + (f"; {name} keeps {plural(rest, 'other file')}" if rest else "")
 
 
-def retarget(ctx, reg, links, args, report=True):
-    """Point links at another branch or tag (pull -b/--tag; diff --upstream
-    -b/--tag with a dry-run registry) before they are evaluated. A source
-    whose files are all selected is changed itself; otherwise the selected
-    files move to the source with the same URL and ref keys (found or
-    created) - the source is split. Returns ({rel: previous ref as text},
-    descriptions of the changes, rels left out); files whose upstream lacks
-    the branch or tag are reported and left out."""
-    groups = {}
-    for lk in links:
-        groups.setdefault(lk.name, []).append(lk)
-    repinned, descs, failed = {}, [], set()
-    for name, lks in groups.items():
-        source = reg.sources.get(name)
-        if not source or not source_ref(source):
-            continue                      # broken entry: evaluate reports it
-        old, spec = source_spec(source), switch_spec(source, args)
-        if old == spec:
-            continue
-        url, ref = source.get("url", ""), source_ref(spec)
-        src = ctx.source(url, ref, name)
-        if not src.resolve():
-            error(f"{ref_missing(ref, src)}; not switching {', '.join(lk.rel for lk in lks)}")
-            failed |= {lk.rel for lk in lks}
-            continue
-        desc = move_to_source(reg, name, lks, url, spec)
-        repinned.update({lk.rel: spec_text(old) for lk in lks})
-        descs.append(desc)
-        if report:
-            print(("would: " if reg.dry_run else "") + desc)
-    if repinned and not reg.dry_run:
-        reg.finish()
-    return repinned, descs, failed
-
-
 def newest_hint(name, tag, line, newest):
     """Hint after pull at newer tags of a pinned source."""
-    switch = "'git filesync pull --tag {} <file>...' to switch"
+    switch = f"'git filesync source set-tag {name} {{}}' and pull to switch"
     if len(newest) > 1:
         return (f"hint: {name} is pinned to tag {tag}; newer tags: {newest_text(newest)} "
                 f"(use {switch.format('TAG')}, 'git filesync source set-branch {name} "
@@ -2329,12 +2316,8 @@ def cmd_pull(ctx, repo, args):
     else:
         raise FsError("specify file(s) or --all")
     check_target_args(args, links)
-    rc, done = EXIT_OK, 0
-    switch = args.tag or args.branch
-    repinned, descs, failed = retarget(ctx, reg, links, args) if switch else ({}, [], set())
-    if failed:
-        rc = EXIT_ERROR
-        links = [lk for lk in links if lk.rel not in failed]
+    rc, done, moved = EXIT_OK, 0, False
+    once = args.branch or args.tag      # sync to another branch or tag, once
     prefetch(ctx, repo, links)
     newest = {}
     for link in links:
@@ -2343,24 +2326,24 @@ def cmd_pull(ctx, repo, args):
             report_error(st)
             rc = EXIT_ERROR
             continue
-        st.repinned = repinned.get(st.rel)
-        if st.newest:
+        if st.newest and not once:
             newest.setdefault(link.name, (link.ref[1], link.line, st.newest))
-        if args.all and not st.pending:
+        if args.all and not st.pending and not once:
             continue
         done += 1
         try:
+            if once:
+                st.target, st.once = target_rev(ctx, link, args), once_text(args)
+            before = link.commit
             rc = max(rc, pull_one(repo, reg, st, args))
+            moved = moved or once and Link(reg, link.rel).commit != before
         except FsError as e:   # report and carry on with the other files
-            error(str(e))
+            error(str(e) if str(e).startswith(st.rel) else f"{st.rel}: {e}")
             rc = EXIT_ERROR
-    # a switch that no sync commit took along (files unchanged): own commit
-    if descs and not (args.dry_run or args.no_commit) and not reg.uncommitted() and \
-            repo.git(["diff", "--quiet", "HEAD", "--", REGISTRY], check=False).returncode == 1:
-        to = f"tag {args.tag}" if args.tag else f"branch {args.branch}"
-        msg = MSG_PREFIX + (descs[0] if len(descs) == 1 else f"Switch sources to {to}\n\n"
-                            + "\n".join(f"- {d}" for d in descs)) + "\n"
-        rc = max(rc, commit_staged(repo, "sources", msg, args, "staged", rels=[]))
+    if moved and not args.dry_run:
+        opt = f"--tag {args.tag}" if args.tag else f"-b {args.branch}"
+        print(f"hint: the links still follow their own branch or tag, so a plain pull goes "
+              f"back; to stay on {once_text(args)}, use 'git filesync set {opt} <file>...'")
     if args.all and not done and rc == EXIT_OK:
         print(paint("everything up to date", "green"))
     for name, (tag, line, new) in sorted(newest.items()):
@@ -2379,14 +2362,8 @@ def diff_pairs(ctx, repo, args):
     rc = EXIT_OK
     pairs = []
     reg = Registry(repo)
-    reg.dry_run = True                   # -b/--tag: switch the sources in memory only
     links = select_links(repo, reg, args.files)
     check_target_args(args, links)
-    if args.branch or args.tag:
-        _, _, failed = retarget(ctx, reg, links, args, report=False)
-        if failed:
-            rc = EXIT_ERROR
-            links = [lk for lk in links if lk.rel not in failed]
     prefetch(ctx, repo, links)
     for link in links:
         st = evaluate(ctx, repo, link)
@@ -2395,9 +2372,10 @@ def diff_pairs(ctx, repo, args):
             rc = EXIT_ERROR
             continue
         if args.upstream:
-            if args.commit:
+            if args.commit or args.branch or args.tag:
                 try:
-                    st.new, st.new_blob, st.new_path = commit_target(st, args.commit)
+                    rev = args.commit or target_rev(ctx, link, args)
+                    st.new, st.new_blob, st.new_path = commit_target(st, rev)
                 except FsError as e:
                     error(f"{st.rel}: {e}")
                     rc = EXIT_ERROR
@@ -3503,9 +3481,9 @@ def main(argv=None):
     p.add_argument("files", nargs="*", help="files or directories")
     p.add_argument("--all", action="store_true", help="sync all files with something to sync")
     p.add_argument("--commit", metavar="REV", help="sync to this upstream revision (exactly one file)")
-    p.add_argument("-b", "--branch", help="switch to following this upstream branch, and sync; "
-                                          "with --tag: the branch to look for newer tags on")
-    p.add_argument("--tag", help="switch to (pin to) this upstream tag, and sync")
+    p.add_argument("-b", "--branch", help="sync to the head of this upstream branch, once (the "
+                                          "files keep following their own branch or tag)")
+    p.add_argument("--tag", help="sync to this upstream tag, once (as -b)")
     p.add_argument("--no-edit", action="store_true", help="commit without opening the editor")
     p.add_argument("--no-commit", action="store_true",
                    help="only stage; a plain 'git commit' offers the proposed message")
