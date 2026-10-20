@@ -1906,7 +1906,7 @@ def print_long(repo, sts, verbose):
     adapted = [st for st in ok if st.committed == "adapted"]
     section("Locally adapted files:",
             ['use "git filesync diff --committed <file>..." to see the adaptations']
-            + (['use "git filesync restore <file>..." to discard them']
+            + (['use "git filesync restore -SW <file>..." to discard them']
                if any(st.strict for st in adapted) else []),
             [("adapted", st.rel) + (strict_note if st.strict else (None, None)) for st in adapted],
             "cyan")
@@ -2745,13 +2745,14 @@ def plan_dir(repo, reg, src, args, at, rel, path, target):
     return plan, any(r in reg.files for r, _ in todo)
 
 
-def index_mode(repo, rel):
-    """File mode of rel in the index, else in HEAD, else a plain file's."""
-    for cmd in (["ls-files", "-s", "--"], ["ls-tree", "HEAD", "--"]):
-        mode = out(repo.git(cmd + [lit(rel)], check=False)).split(" ")[0]
-        if mode:
-            return mode
-    return "100644"
+def index_entry(repo, rel):
+    """(mode, blob) of rel in the index; (mode in HEAD or a plain file's, None)
+    if it isn't there."""
+    entry = out(repo.git(["ls-files", "-s", "--", lit(rel)], check=False)).split(" ")
+    if len(entry) > 1:
+        return entry[0], entry[1]
+    mode = out(repo.git(["ls-tree", "HEAD", "--", lit(rel)], check=False)).split(" ")[0]
+    return mode or "100644", None
 
 
 def cmd_restore(ctx, repo, args):
@@ -2770,13 +2771,18 @@ def cmd_restore(ctx, repo, args):
             base = local_equiv(repo, src, link.blob, link.rel, link.path)
             if not base:
                 raise FsError(f"{link.rel}: base version {link.blob[:12]} unavailable")
-            if worktree:
+            fix_tree = worktree and repo.worktree_blob(link.target) != base
+            mode, staged = index_entry(repo, link.rel) if args.staged else (None, None)
+            fix_index = args.staged and staged != base
+            if not (fix_tree or fix_index):
+                print(f"{link.rel}: nothing to restore")
+                continue
+            if fix_tree:
                 link.target.parent.mkdir(parents=True, exist_ok=True)
                 link.target.write_bytes(repo.to_worktree(repo.read_content(base, link.rel),
                                                          link.rel))
-            if args.staged:
-                repo.git(["update-index", "--add", "--cacheinfo",
-                          f"{index_mode(repo, link.rel)},{base},{link.rel}"])
+            if fix_index:
+                repo.git(["update-index", "--add", "--cacheinfo", f"{mode},{base},{link.rel}"])
         except FsError as e:   # report and carry on with the other files
             error(str(e))
             rc = EXIT_ERROR

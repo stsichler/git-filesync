@@ -122,7 +122,7 @@ For a strict file, adaptations as well as uncommitted changes are reported
 as a violation: `status` marks them `NOT ALLOWED: strict` (`-s`: `(strict!)`,
 `--exit-code`: 1), the hooks report it, and `pull` refuses to merge (other
 files of `pull --all` are still synced). Inspect with `diff`, then go back
-to the synced upstream version with [`restore`](#restore) (or sync and
+to the synced upstream version with [`restore -SW`](#restore) (or sync and
 discard in one step with `pull --overwrite`), discard only uncommitted
 changes with `git restore`, or lift the restriction (`git filesync set
 --no-strict FILE`).
@@ -195,7 +195,7 @@ Upstream changes to sync:
 
 Locally adapted files:
   (use "git filesync diff --committed <file>..." to see the adaptations)
-  (use "git filesync restore <file>..." to discard them)
+  (use "git filesync restore -SW <file>..." to discard them)
 	adapted:    include/x.h  (NOT ALLOWED: strict)
 	adapted:    src/foo.c
 
@@ -415,6 +415,10 @@ newer upstream version.
 |---|---|
 | `-S`, `--staged` | restore the index (what is staged) instead of the working tree |
 | `-W`, `--worktree` | restore the working tree – the default; with `-S`: both |
+
+`restore -SW` is the way to discard committed adaptations: the file is
+back at the synced version and staged, ready to commit. Files that are at
+the synced version already are reported with `nothing to restore`.
 
 `git restore FILE` (without `filesync`) discards uncommitted changes as
 usual, back to the committed state, adaptations included.
