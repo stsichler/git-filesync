@@ -729,7 +729,7 @@ either order, both before `git lfs pre-push`:
 ```sh
 #!/bin/sh
 # git-filesync: …
-git_filesync_refs=$(cat)
+git_filesync_refs=$([ $# -eq 0 ] || cat)
 printf '%s\n' "$git_filesync_refs" | git filesync hook pre-push "$@" || [ $? -ne 3 ] || exit 1
 [ -z "$git_filesync_refs" ] || exec <<git_filesync_refs_end
 $git_filesync_refs

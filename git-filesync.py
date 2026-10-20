@@ -227,7 +227,7 @@ HOOK_MARKER = "git-filesync"
 REFS_VAR = "git_filesync_refs"
 HOOKS = {
     "pre-push": "\n".join([
-        f"{REFS_VAR}=$(cat)",
+        f"{REFS_VAR}=$([ $# -eq 0 ] || cat)",     # no arguments: run by hand, no stdin
         f"printf '%s\\n' \"${REFS_VAR}\" | git filesync hook pre-push \"$@\""
         f" || [ $? -ne {EXIT_REFUSED} ] || exit 1",
         f"[ -z \"${REFS_VAR}\" ] || exec <<{REFS_VAR}_end",
