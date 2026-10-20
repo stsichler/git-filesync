@@ -972,7 +972,7 @@ jobs:
 ```
 
 This uses the latest release. To pin a version, download
-`https://github.com/stsichler/git-filesync/releases/download/v0.9.0/git-filesync.py`
+`https://github.com/stsichler/git-filesync/releases/download/v0.9.1/git-filesync.py`
 instead. (For private upstream repositories the job needs a token with read
 access.)
 
@@ -1022,7 +1022,7 @@ the same version without installing it:
 
 ```sh
 git filesync add tools/git-filesync.py https://github.com/stsichler/git-filesync.git \
-    -p git-filesync.py --tag v0.9.0 --strict
+    -p git-filesync.py --tag v0.9.1 --strict
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
 ```
 
