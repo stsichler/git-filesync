@@ -72,6 +72,13 @@ follow the command.
         --dry-run               only report what would happen (incl.
                                 merge conflicts); change nothing
 
+    restore PATH...             restore files to the synced upstream version
+                                (the base), like `git restore`; e.g. to
+                                discard adaptations of a strict file
+        -S, --staged            restore the index instead of the working tree
+        -W, --worktree          restore the working tree (default; with -S:
+                                both)
+
     diff [PATH...] [-- OPTS]    local changes vs. the synced upstream version
                                 (one `git diff`, OPTS passed to it)
         --committed             only committed adaptations (synced -> HEAD)
@@ -1890,7 +1897,7 @@ def print_long(repo, sts, verbose):
     adapted = [st for st in ok if st.committed == "adapted"]
     section("Locally adapted files:",
             ['use "git filesync diff --committed <file>..." to see the adaptations']
-            + (['use "git filesync pull --overwrite <file>..." to discard them']
+            + (['use "git filesync restore <file>..." to discard them']
                if any(st.strict for st in adapted) else []),
             [("adapted", st.rel) + (strict_note if st.strict else (None, None)) for st in adapted],
             "cyan")
@@ -2754,6 +2761,47 @@ def plan_dir(repo, reg, src, args, at, rel, path, target):
     return plan, any(r in reg.files for r, _ in todo)
 
 
+def index_mode(repo, rel):
+    """File mode of rel in the index, else in HEAD, else a plain file's."""
+    for cmd in (["ls-files", "-s", "--"], ["ls-tree", "HEAD", "--"]):
+        mode = out(repo.git(cmd + [lit(rel)], check=False)).split(" ")[0]
+        if mode:
+            return mode
+    return "100644"
+
+
+def cmd_restore(ctx, repo, args):
+    """Like `git restore`, with the synced upstream version (the base the
+    entry records) as the source: the working tree files (default), with -S
+    their index entries instead, with -S -W both. .git-filesync stays as it is."""
+    reg = Registry(repo)
+    links = select_links(repo, reg, args.files)
+    worktree = args.worktree or not args.staged
+    done = "restored and staged" if worktree and args.staged else \
+        "restored in the index" if args.staged else "restored"
+    rc = EXIT_OK
+    for link in links:
+        try:
+            src = ctx.source(link.url, link.ref, link.name)
+            base = local_equiv(repo, src, link.blob, link.rel, link.path)
+            if not base:
+                raise FsError(f"{link.rel}: base version {link.blob[:12]} unavailable")
+            if worktree:
+                link.target.parent.mkdir(parents=True, exist_ok=True)
+                link.target.write_bytes(repo.to_worktree(repo.read_content(base, link.rel),
+                                                         link.rel))
+            if args.staged:
+                repo.git(["update-index", "--add", "--cacheinfo",
+                          f"{index_mode(repo, link.rel)},{base},{link.rel}"])
+        except FsError as e:   # report and carry on with the other files
+            error(str(e))
+            rc = EXIT_ERROR
+            continue
+        at = src.short(link.commit) if link.commit else link.blob[:8]
+        print(f"{link.rel}: {paint(done, 'green')} ({link.name}@{at})")
+    return rc
+
+
 def cmd_unlink(ctx, repo, args):
     reg = Registry(repo)
     links = select_links(repo, reg, args.files)
@@ -3504,6 +3552,14 @@ def main(argv=None):
     add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then check "
                                                   "and stage it")
 
+    p = add_command(sub, "restore", parents=[common],
+                    help="restore files to the synced upstream version, like 'git restore'")
+    p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
+    p.add_argument("-S", "--staged", action="store_true",
+                   help="restore the index instead of the working tree")
+    p.add_argument("-W", "--worktree", action="store_true",
+                   help="restore the working tree (the default; with -S: both)")
+
     p = add_command(sub, "unlink", parents=[colorp], help="remove links (the files are kept)")
     p.add_argument("files", nargs="+", help="files or directories")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be unlinked")
@@ -3602,7 +3658,7 @@ def main(argv=None):
         ctx = Context(args, repo)
         return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
                 "edit": cmd_edit,
-                "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
+                "restore": cmd_restore, "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
                 "diff": cmd_diff, "difftool": cmd_difftool,
                 "hook": cmd_hook}[args.cmd](ctx, repo, args)
     except FsError as e:

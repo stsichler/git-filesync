@@ -12,7 +12,7 @@ For motivation and installation see the [README](README.md).
   - [Strict files](#strict-files)
 - [Commands](#commands)
   - [Common options](#common-options)
-  - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool)
+  - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool) · [`restore`](#restore)
   - [`add`](#add) · [`set`](#set) · [`edit`](#edit) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`map`](#map) · [`cache`](#cache)
   - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
 - [Further topics](#further-topics)
@@ -121,9 +121,11 @@ git config, a bare `strict` without a value means true).
 For a strict file, adaptations as well as uncommitted changes are reported
 as a violation: `status` marks them `NOT ALLOWED: strict` (`-s`: `(strict!)`,
 `--exit-code`: 1), the hooks report it, and `pull` refuses to merge (other
-files of `pull --all` are still synced). Inspect with `diff`, then discard
-adaptations with `pull --overwrite`, uncommitted changes with `git restore`,
-or lift the restriction (`git filesync set --no-strict FILE`).
+files of `pull --all` are still synced). Inspect with `diff`, then go back
+to the synced upstream version with [`restore`](#restore) (or sync and
+discard in one step with `pull --overwrite`), discard only uncommitted
+changes with `git restore`, or lift the restriction (`git filesync set
+--no-strict FILE`).
 
 ## Commands
 
@@ -193,7 +195,7 @@ Upstream changes to sync:
 
 Locally adapted files:
   (use "git filesync diff --committed <file>..." to see the adaptations)
-  (use "git filesync pull --overwrite <file>..." to discard them)
+  (use "git filesync restore <file>..." to discard them)
 	adapted:    include/x.h  (NOT ALLOWED: strict)
 	adapted:    src/foo.c
 
@@ -401,6 +403,23 @@ Like `git difftool`, `difftool` without file arguments asks before each file
 (`Viewing (1/3): 'src/foo.c'` / `Launch 'meld' [Y/n/q]?`; Enter = yes,
 `q` = stop). `-y` / `--no-prompt` or `difftool.prompt = false` skip the
 questions, `--prompt` asks even for explicitly given files.
+
+### `restore`
+
+`restore PATH…` – like `git restore`, but from the synced upstream version
+(the base recorded in `.git-filesync`) instead of the index: the files get
+that version back, e.g. to discard the adaptations of a strict file.
+`.git-filesync` stays as it is, nothing is committed – commit the result
+like any change. Unlike `pull --overwrite`, `restore` doesn't bring in a
+newer upstream version.
+
+| Option | Effect |
+|---|---|
+| `-S`, `--staged` | restore the index (what is staged) instead of the working tree |
+| `-W`, `--worktree` | restore the working tree – the default; with `-S`: both |
+
+`git restore FILE` (without `filesync`) discards uncommitted changes as
+usual, back to the committed state, adaptations included.
 
 ### `add`
 

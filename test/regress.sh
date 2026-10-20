@@ -614,6 +614,28 @@ check "pull --all continues after strict error" "$(git filesync pull --all --no-
 check "non-strict file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
 git commit -qm "adapt bar" src/bar.h
 check "strict violation (committed)" "$(git filesync status -s src/bar.h)" " A  src/bar.h  (strict!)"
+check "status: restore hint for a strict file" \
+  "$(git filesync status src/bar.h | grep -c 'use "git filesync restore <file>..." to discard them')" "1"
+
+# restore: back to the synced upstream version, like git restore (default:
+# working tree; -S: the index; -S -W: both); nothing committed
+OUT=$(git filesync restore src/bar.h)
+check "restore: said so" "$(echo "$OUT" | grep -c '^src/bar.h: restored (nowhere/m4@')" "1"
+check "restore: working tree is the base" "$(git filesync diff src/bar.h)" ""
+check "restore: index untouched" "$(git status --porcelain src/bar.h)" " M src/bar.h"
+git checkout -q -- src/bar.h
+quiet git filesync restore -S src/bar.h
+check "restore -S: only the index" "$(git status --porcelain src/bar.h)" "MM src/bar.h"
+check "restore -S: staged is the base" "$(git diff --cached HEAD~1 -- src/bar.h)" ""
+git reset -q --hard
+quiet git filesync restore -S -W src/bar.h
+check "restore -S -W: both" "$(git status --porcelain src/bar.h)" "M  src/bar.h"
+git reset -q --hard
+rm src/bar.h
+quiet git filesync restore src
+check "restore DIR: deleted file back" "$(git filesync diff src/bar.h) $(ls src/bar.h)" " src/bar.h"
+git reset -q --hard
+check "restore: not linked" "$(rc git filesync restore README)" "2"
 
 # pull --overwrite restores the upstream version, in strict and other files
 quiet git filesync pull --no-edit --overwrite src/bar.h
