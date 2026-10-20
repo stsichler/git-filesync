@@ -2163,9 +2163,9 @@ def pull_one(repo, reg, st, args):
     if st.strict and local_mod and not discard:
         rel = path_arg(repo, st.rel)
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
-                      f"'git filesync diff {rel}'; discard adaptations with "
-                      f"'git filesync pull --overwrite {rel}', uncommitted changes with "
-                      f"'git restore {rel}'; or allow them with "
+                      f"'git filesync diff {rel}'; discard them with "
+                      f"'git filesync restore -SW {rel}', or sync anyway with "
+                      f"'git filesync pull --overwrite {rel}'; or allow them with "
                       f"'git filesync set --no-strict {rel}'")
     if new_blob == st.old_blob and path == link.path and st.worktree != "missing" \
             and not discard:

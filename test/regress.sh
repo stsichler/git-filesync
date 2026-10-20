@@ -610,6 +610,8 @@ check "strict violation in long format" \
 check "strict violation exit code" "$(rc git filesync status --exit-code src/bar.h)" "1"
 check "strict violation in hook output" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'NOT ALLOWED')" "1"
 check "pull refuses strict merge" "$(rc git filesync pull --no-edit src/bar.h)" "2"
+check "strict refusal: how to go on" \
+  "$(git filesync pull --no-edit src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or sync anyway with 'git filesync pull --overwrite src/bar.h'")" "1"
 check "pull --all continues after strict error" "$(git filesync pull --all --no-edit 2>&1 | grep -c '^error:')" "0"
 check "non-strict file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
 git commit -qm "adapt bar" src/bar.h
