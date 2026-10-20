@@ -238,7 +238,7 @@ that checkout's branch), or at its [tag](#pinning-to-a-tag). Recorded is the ups
 file. The editor opens with the proposed commit message:
 
 ```
-Sync src/foo.c from owner/lib@a1b2c3d
+[filesync] Sync src/foo.c from owner/lib@a1b2c3d
 
 Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
 
@@ -443,7 +443,7 @@ directory (see [below](#linking-a-directory)).
   messages](#proposed-commit-messages)):
 
   ```
-  Add src/foo.c from owner/lib@a1b2c3d
+  [filesync] Add src/foo.c from owner/lib@a1b2c3d
 
   Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
   ```
@@ -472,7 +472,7 @@ into it, like `cp`.) Each file gets its own ordinary `[file]` entry – after
 are staged together, with one proposed message:
 
 ```
-Add 2 files from owner/backend@a1b2c3d
+[filesync] Add 2 files from owner/backend@a1b2c3d
 
 Upstream: https://github.com/owner/backend.git (main:api/)
 
@@ -864,6 +864,9 @@ file as the message of the next plain `git commit` (as after `git merge
 --squash`); `git commit --no-edit` takes it as it is. IDEs such as VS Code
 fill their commit message box with it. Git removes it after the next commit,
 whatever its message, and on `git reset`.
+
+Every proposed message starts with `[filesync] `, so commits made with
+git-filesync are easy to find later (`git log --grep='^\[filesync\]'`).
 
 - Several commands in a row (e.g. `add` for some files and `pull
   --no-commit` for others, then one commit for all of them) collect their

@@ -219,6 +219,7 @@ REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_REFUSED = 3          # hook pre-push: refuse the push (filesync.pushCheck = error)
 HOOK_MARKER = "git-filesync"
+MSG_PREFIX = "[filesync] "    # subject of every proposed commit message
 # What the installed hooks run. Only EXIT_REFUSED blocks a push - any other
 # failure (e.g. git-filesync not installed) never does. git passes the refs to
 # push on pre-push's stdin once: the block reads them into a variable and
@@ -1962,7 +1963,7 @@ def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, dis
     paths = dict.fromkeys((old_path, path))       # old and (if renamed) new path
     # content goes back to the synced upstream version -> restore, not a sync
     verb = "Restore" if new_blob == st.old_blob and discarded else "Sync"
-    lines = [f"{verb} {st.rel} from {link.name}@{src.short(new)}", "",
+    lines = [f"{MSG_PREFIX}{verb} {st.rel} from {link.name}@{src.short(new)}", "",
              f"Upstream: {link.url} ({link.ref[1]}:{path})"]
     if path != old_path:
         lines += ["", f"Renamed upstream: {old_path} -> {path}"]
@@ -2340,8 +2341,8 @@ def cmd_pull(ctx, repo, args):
     if descs and not (args.dry_run or args.no_commit) and not reg.uncommitted() and \
             repo.git(["diff", "--quiet", "HEAD", "--", REGISTRY], check=False).returncode == 1:
         to = f"tag {args.tag}" if args.tag else f"branch {args.branch}"
-        msg = (descs[0] if len(descs) == 1 else f"Switch sources to {to}\n\n"
-               + "\n".join(f"- {d}" for d in descs)) + "\n"
+        msg = MSG_PREFIX + (descs[0] if len(descs) == 1 else f"Switch sources to {to}\n\n"
+                            + "\n".join(f"- {d}" for d in descs)) + "\n"
         rc = max(rc, commit_staged(repo, "sources", msg, args, "staged", rels=[]))
     if args.all and not done and rc == EXIT_OK:
         print(paint("everything up to date", "green"))
@@ -2649,7 +2650,7 @@ def build_add_message(plan, src, name, url, ref, mpath, relink, strict, at):
         path = mpath.rstrip("/") + "/" if mpath else "/"
         what = f"Add {len(plan)} files from" if fetched else f"Link {len(plan)} files to"
         subject_ref = f"{name}@{src.short(at)}"
-    lines = [f"{what} {subject_ref}", "", f"Upstream: {url} ({ref[1]}:{path})"]
+    lines = [f"{MSG_PREFIX}{what} {subject_ref}", "", f"Upstream: {url} ({ref[1]}:{path})"]
     if len(plan) > 1:
         lines.append("")
         for p in plan:

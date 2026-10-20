@@ -172,7 +172,7 @@ git commit -q --no-edit
 check "add + commit: status clean" "$(st)" ""
 check "add + commit: file and entry" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync src/lib.c "
 check "add: proposed commit message" "$(git log -1 --format=%B | sed '/^$/d' | sed 's/@[0-9a-f]*$/@X/' | oneline)" \
-  "Add src/lib.c from $(basename "$T")/upstream@X Upstream: $URL (main:lib.c) "
+  "[filesync] Add src/lib.c from $(basename "$T")/upstream@X Upstream: $URL (main:lib.c) "
 
 # the blobless cache fetches missing file contents lazily, which needs
 # protocol v2 - git-filesync asks for it even if v0 is configured
@@ -205,11 +205,11 @@ up 's/^e$/E-up/' "Change E"
 check "conflict rc" "$(rc git filesync pull src/lib.c)" "1"
 check "conflict markers" "$(grep -c '^<<<<<<<' src/lib.c)" "1"
 check "conflict: message prepared for git commit" \
-  "$(head -1 "$(git rev-parse --git-dir)/SQUASH_MSG" | grep -c '^Sync src/lib.c from')" "1"
+  "$(head -1 "$(git rev-parse --git-dir)/SQUASH_MSG" | grep -c '^\[filesync\] Sync src/lib.c from')" "1"
 git checkout -q src/lib.c 2>/dev/null
 git reset -q --hard
 check "git reset drops the prepared message" "$(ls "$(git rev-parse --git-dir)/SQUASH_MSG" 2>/dev/null)" ""
-check "... but the copy stays" "$(head -1 .git/FILESYNC_SQUASH_MSG | cut -d' ' -f1-2)" "Sync src/lib.c"
+check "... but the copy stays" "$(head -1 .git/FILESYNC_SQUASH_MSG | cut -d' ' -f1-3)" "[filesync] Sync src/lib.c"
 
 # mapped to the local checkout, unpushed upstream commits are seen and warned
 git filesync map "$URL" "$T/upstream" >/dev/null
@@ -619,7 +619,7 @@ check "strict violation (committed)" "$(git filesync status -s src/bar.h)" " A  
 quiet git filesync pull --no-edit --overwrite src/bar.h
 check "pull --overwrite restores" "$(cat src/bar.h)" "x"
 check "overwrite commit message" "$(git log -1 --format=%s)" \
-  "Restore src/bar.h from nowhere/m4@$(git -C ../m4 log -1 --format=%h -- lib/bar.h)"
+  "[filesync] Restore src/bar.h from nowhere/m4@$(git -C ../m4 log -1 --format=%h -- lib/bar.h)"
 check "after overwrite clean" "$(st src/bar.h)" ""
 sedi 's/^a$/A-local/' src/foo.c
 git commit -qm 'adapt a' src/foo.c
@@ -643,14 +643,14 @@ check "add by source name" "$?" "0"
 check "add by source name: same source" "$(git config -f .git-filesync file.include/new.h.source)" "$SRC"
 check "add: staged, not committed" "$(git status --porcelain | oneline)" "M  .git-filesync A  include/new.h "
 check "add: message prepared for git commit" \
-  "$(head -1 "$(git rev-parse --git-dir)/SQUASH_MSG" | grep -c "^Add include/new.h from $SRC@")" "1"
+  "$(head -1 "$(git rev-parse --git-dir)/SQUASH_MSG" | grep -c "^\[filesync\] Add include/new.h from $SRC@")" "1"
 
 # pull commits .git-filesync, so it refuses while another entry is uncommitted
 check "pull refused while other entry uncommitted" "$(rc git filesync pull --no-edit src/foo.c)" "2"
 check "refusal names the entry" \
   "$(git filesync pull --no-edit src/foo.c 2>&1 | grep -c 'uncommitted changes for include/new.h')" "1"
 git commit -q
-check "add: plain git commit takes the message" "$(git log -1 --format=%s | grep -c '^Add include/new.h from')" "1"
+check "add: plain git commit takes the message" "$(git log -1 --format=%s | grep -c '^\[filesync\] Add include/new.h from')" "1"
 check "commit drops the prepared message" "$(ls "$(git rev-parse --git-dir)/SQUASH_MSG" 2>/dev/null)" ""
 check "registry committed with link" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync include/new.h "
 
@@ -696,7 +696,7 @@ check "status -v: source key as label" \
   "$(git filesync status -v | grep -c 'src/foo.c *(from mylib:lib/foo.c (main)')" "1"
 quiet git filesync pull --no-edit src/foo.c
 check "pull: source key in commit message" \
-  "$(git log -1 --format=%s)" "Sync src/foo.c from mylib@$(git -C ../m4 log -1 --format=%h -- lib/foo.c)"
+  "$(git log -1 --format=%s)" "[filesync] Sync src/foo.c from mylib@$(git -C ../m4 log -1 --format=%h -- lib/foo.c)"
 addc include/x.h file:///nowhere/m4.git -p lib/bar.h
 check "add finds the source by URL, not by key" \
   "$(git config -f .git-filesync file.include/x.h.source)" "mylib"
@@ -705,7 +705,7 @@ check "add by URL: no new source" "$(git config -f .git-filesync --get-regexp '^
 # add over an existing, different file: message notes modifications and strict
 echo mine > include/y.h
 addc --strict include/y.h mylib -p lib/bar.h
-check "add existing file: subject" "$(git log -1 --format=%s | sed 's/@[0-9a-f]*$//')" "Link include/y.h to mylib"
+check "add existing file: subject" "$(git log -1 --format=%s | sed 's/@[0-9a-f]*$//')" "[filesync] Link include/y.h to mylib"
 check "add existing file: notes" \
   "$(git log -1 --format=%B | grep -cE '^(Contains local modifications|Strict:)')" "2"
 check "add existing file: committed as is" "$(git show HEAD:include/y.h)" "mine"
@@ -794,7 +794,7 @@ check "pull --no-commit: staged, not committed" "$(git status --porcelain a.c .g
 check "pull --no-commit: says how to commit" "$(echo "$OUT" | grep -cx '    git commit')" "1"
 git commit -q
 check "pull --no-commit: plain git commit takes the message" \
-  "$(git log -1 --format=%B | grep -cE '^(Sync a\.c from |- up \()')" "2"
+  "$(git log -1 --format=%B | grep -cE '^(\[filesync\] Sync a\.c from |- up \()')" "2"
 
 # diff --committed: without uncommitted changes; diff exit code passed on
 check "diff --committed: adaptations only" \
@@ -1159,7 +1159,7 @@ check "add by URL, default branch: branch source reused" "$(git config -f .git-f
 quiet git filesync add b.c "$URL9" -p t.c --tag v1
 check "add by URL + tag: first source with that tag" "$(git config -f .git-filesync file.b.c.source)" "$SRC9B"
 check "two adds: both messages prepared" \
-  "$(grep -cE '^Add (a|b)\.c from' "$(git rev-parse --git-dir)/SQUASH_MSG")" "2"
+  "$(grep -cE '^\[filesync\] Add (a|b)\.c from' "$(git rev-parse --git-dir)/SQUASH_MSG")" "2"
 quiet git filesync add c.c "$URL9" -p t.c --tag v2 -b main
 SRC9C=$(git config -f .git-filesync file.c.c.source)
 check "add by URL, other tag: new source" "$(echo "$SRC9C" | grep -cvE "^(lib9|$SRC9B|dup)$")" "1"
@@ -1196,7 +1196,7 @@ check "plain pull refused while another entry is uncommitted" "$(rc git filesync
 check "pull --no-commit despite another uncommitted entry" "$(rc git filesync pull --no-commit t.c)" "0"
 git commit -q
 check "one commit: files of add and pull" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync t.c u.c "
-check "one commit: both proposals" "$(git log -1 --format=%B | grep -cE '^(Add u\.c|Sync t\.c) from')" "2"
+check "one commit: both proposals" "$(git log -1 --format=%B | grep -cE '^\[filesync\] (Add u\.c|Sync t\.c) from')" "2"
 
 
 # =============================================================================
@@ -1306,7 +1306,7 @@ check "add DIR: content" "$(cat proto/v1/b.proto)" "api/v1/b.proto"
 check "add DIR: one commit" "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" \
   ".git-filesync proto/a.proto proto/v1/b.proto "
 check "add DIR: message" "$(git log -1 --format=%B | sed '/^$/d; s/@[0-9a-f]*$/@X/' | oneline)" \
-  "Add 2 files from nowhere/m11@X Upstream: file:///nowhere/m11.git (main:api/) - proto/a.proto - proto/v1/b.proto "
+  "[filesync] Add 2 files from nowhere/m11@X Upstream: file:///nowhere/m11.git (main:api/) - proto/a.proto - proto/v1/b.proto "
 check "add DIR: status clean" "$(st)" ""
 
 # a new upstream file: the same add links only that one
@@ -1316,7 +1316,7 @@ git commit -q --no-edit
 check "add DIR again: linked ones skipped" "$(echo "$OUT" | grep -c '^2 files already linked, skipped')" "1"
 check "add DIR again: new file committed" "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" \
   ".git-filesync proto/c.proto "
-check "add DIR again: subject" "$(git log -1 --format=%s | sed 's/@.*//')" "Add proto/c.proto from nowhere/m11"
+check "add DIR again: subject" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Add proto/c.proto from nowhere/m11"
 check "add DIR: nothing new" "$(git filesync add proto nowhere/m11 "${PROTO[@]}" 2>&1)" \
   "3 files already linked, skipped (use --force to relink)"
 
@@ -1325,7 +1325,7 @@ mkdir docs && echo mine > docs/x.md
 quiet fsd add docs nowhere/m11 --include /x.md && git commit -q --no-edit
 check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
 check "add DIR: existing file adapted" "$(st docs)" " A"
-check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "Link docs/x.md to nowhere/m11"
+check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Link docs/x.md to nowhere/m11"
 
 # pattern forms
 check "pattern '**/v1/*'" "$(git filesync add -n all nowhere/m11 -p api --include '**/v1/*' | lines)" "2"
@@ -1416,7 +1416,7 @@ check "partial switch: old source unchanged" \
   "$(git config -f .git-filesync source.$SRC12.tag) $(git config -f .git-filesync file.b.c.source)" "v1.0 $SRC12"
 check "partial switch: merged" "$(oneline < a.c)" "1-local 2 3 4 5-v11 "
 check "partial switch: message" \
-  "$(git log -1 --format=%B | grep -cE '^(Sync a.c from |Switched from tag v1.0 on main to tag v1.1 on main.$)')" "2"
+  "$(git log -1 --format=%B | grep -cE '^(\[filesync\] Sync a.c from |Switched from tag v1.0 on main to tag v1.1 on main.$)')" "2"
 check "partial switch: all committed" "$(git status --porcelain)" ""
 
 # the remaining files join the source that already has v1.1; the emptied
@@ -1430,7 +1430,7 @@ check "switch rest: all committed" "$(git status --porcelain)" ""
 # all files of a source: the source itself is changed; nothing to sync -> own commit
 quiet git filesync pull --no-edit --all --tag v1.2
 check "whole source switched in place" "$(git config -f .git-filesync source.$SRC12-2.tag)" "v1.2"
-check "switch without sync: own commit" "$(git log -1 --format=%s)" "Switch $SRC12-2 from tag v1.1 on main to tag v1.2 on main"
+check "switch without sync: own commit" "$(git log -1 --format=%s)" "[filesync] Switch $SRC12-2 from tag v1.1 on main to tag v1.2 on main"
 check "switch without sync: committed" "$(git status --porcelain)" ""
 
 # back to the branch
@@ -1507,7 +1507,7 @@ COMMIT13=$(git config -f .git-filesync file.a.c.commit)
 check "set: nothing to change" "$(rc git filesync set a.c)" "2"
 check "set --strict" "$(git filesync set a.c --strict | head -1)" "a.c: strict"
 check "set --strict: entry" "$(git config -f .git-filesync file.a.c.strict)" "true"
-check "set: only staged" "$(git status --porcelain | oneline) $(git log -1 --format=%s | cut -c1-5)" "M  .git-filesync  Add b"
+check "set: only staged" "$(git status --porcelain | oneline) $(git log -1 --format=%s | cut -c1-16)" "M  .git-filesync  [filesync] Add b"
 check "set --strict again: nothing" "$(git filesync set a.c --strict)" "nothing to change"
 check "set --no-strict" "$(git filesync set a.c --no-strict | head -1) $(git config -f .git-filesync file.a.c.strict)" "a.c: not strict "
 quiet git filesync set a.c --strict

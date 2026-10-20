@@ -150,7 +150,7 @@ git filesync pull src/foo.c
 Proposed commit message:
 
 ```
-Sync src/foo.c from owner/lib@a1b2c3d
+[filesync] Sync src/foo.c from owner/lib@a1b2c3d
 
 Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
 
