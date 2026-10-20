@@ -92,11 +92,12 @@ follow the command.
                                 (SOURCE: exactly that [source]; URL: the
                                 source with that URL and branch/tag, else a
                                 new one named 'owner/repo' after the URL, with
-                                a number appended if taken); an existing FILE's
-                                upstream version is detected, a missing FILE
-                                is fetched; FILE and .git-filesync are
-                                staged like `git add` - a plain `git commit`
-                                offers the proposed message
+                                a number appended if taken); the base is the
+                                upstream head (or --commit): an existing FILE
+                                is kept, its differences count as adaptations;
+                                a missing FILE is fetched; FILE and
+                                .git-filesync are staged like `git add` - a
+                                plain `git commit` offers the proposed message
     add DIR URL|SOURCE          link every file below an upstream directory
                                 (-p, default: same as DIR) as DIR/...; files
                                 already linked are skipped
@@ -109,7 +110,10 @@ follow the command.
         --include PATTERN       DIR: only files matching (gitignore-like,
                                 relative to the upstream directory; repeatable)
         --exclude PATTERN       DIR: skip files matching (repeatable)
-        --commit REV            upstream revision FILE corresponds to
+        --commit REV            upstream revision to base FILE on instead
+                                of the head
+        --overwrite             replace an existing FILE with the upstream
+                                version
         --strict                FILE must stay an exact copy
         --force                 relink an already linked file
         -n, --dry-run           only show what would be linked
@@ -124,8 +128,8 @@ follow the command.
         -b, --branch BRANCH     as for add; without --source: follow BRANCH
         --tag TAG               as for add; without --source: pin to TAG
                                 (like pull -b/--tag, without syncing)
-        -p, --path PATH         another upstream path (one file); the
-                                synced version is looked up as for add
+        -p, --path PATH         another upstream path (one file); its
+                                current version becomes the base, as for add
         --strict, --no-strict   mark as strict / allow adaptations again
         -n, --dry-run           only show what would change
 
@@ -2516,29 +2520,6 @@ def cmd_difftool(ctx, repo, args):
     return rc
 
 
-def find_matching_commit(repo, src, cur, rel, path, target, max_equiv=100):
-    """Newest upstream commit that introduced the content of the local file.
-    Exact blob match first; then the most recent versions compared by content
-    (different eol normalization, LFS in only one of the repos)."""
-    hist = src.path_history(path, 5000)
-    for rev, oid in hist:
-        if oid == cur:
-            return rev
-    data = target.read_bytes()
-    local_hash = (hashlib.sha256(data).hexdigest(), len(data))
-    seen = {}
-    for rev, oid in hist[:max_equiv]:
-        if oid not in seen:
-            ptr = lfs_pointer(src.read_blob(oid))
-            if ptr:        # LFS upstream: compare hashes, no download needed
-                seen[oid] = ptr in (local_hash, lfs_pointer(data))
-            else:
-                seen[oid] = local_equiv(repo, src, oid, rel, path) == cur
-        if seen[oid]:
-            return rev
-    return None
-
-
 def glob_regex(pattern):
     """Regex for a gitignore-like pattern, matched against a path relative to
     the upstream directory: without a '/' it matches a name at any depth, a
@@ -2598,50 +2579,37 @@ def spec_desc(spec):
     return f"is pinned to {spec['tag']}" + (f" on {spec['branch']}" if spec.get("branch") else "")
 
 
-def find_base(repo, src, head, given, rel, path, target):
-    """Base of a file to link: (commit, blob, content to write or None,
-    modified). An existing file's upstream version is looked up (or given:
-    --commit); a missing file gets the version at head."""
-    cur = repo.worktree_blob(target)
-    modified = None          # unknown: compared below
-    if given:
-        commit = given
-    elif cur:
-        commit = find_matching_commit(repo, src, cur, rel, path, target)
-        modified = not commit
-        if commit:
-            print(f"{rel} matches upstream {src.short(commit)}")
-        else:
-            commit = head
-            warn(f"{rel} matches no upstream version of '{path}'; differences to "
-                 f"upstream {src.short(head)} count as local modifications "
-                 "(use --commit to choose a better base)")
-    else:
-        commit = head
-    blob = src.blob_at(commit, path)
+def find_base(repo, src, rev, rel, path, target, overwrite=False):
+    """Base of a file to link: upstream path's version at rev (the branch
+    head, or --commit). Returns (commit, blob, content to write or None,
+    modified, replaced): a missing file gets that version, an existing one
+    keeps its content - its differences count as adaptations - unless
+    overwrite."""
+    blob = src.blob_at(rev, path)
     if not blob:
-        raise FsError(f"no file '{path}' in {src.label} at {src.short(commit)}")
-    commit = src.last_change(commit, path)
-    if cur is None:
-        return commit, blob, src.read_content(blob, path), False
-    if modified is None:
-        try:
-            modified = not matches_base(repo, src, SimpleNamespace(blob=blob, path=path, rel=rel),
-                                        cur, target.read_bytes)
-        except BaseUnavailable:
-            modified = False
-    return commit, blob, None, modified
+        raise FsError(f"no file '{path}' in {src.label} at {src.short(rev)}")
+    commit = src.last_change(rev, path)
+    cur = repo.worktree_blob(target)
+    if cur is None or overwrite:
+        return commit, blob, src.read_content(blob, path), False, cur is not None
+    try:
+        modified = not matches_base(repo, src, SimpleNamespace(blob=blob, path=path, rel=rel),
+                                    cur, target.read_bytes)
+    except BaseUnavailable:
+        modified = False
+    return commit, blob, None, modified, False
 
 
 # a file to link: its path here, upstream path, base commit and blob, content to
-# write (None: the file exists), whether it differs from the base
-Planned = namedtuple("Planned", "rel path commit blob content modified")
+# write (None: the existing file is kept), whether it differs from the base,
+# whether an existing file is replaced (--overwrite)
+Planned = namedtuple("Planned", "rel path commit blob content modified replaced")
 
 
 def build_add_message(plan, src, name, url, ref, mpath, relink, strict, at):
     """Commit message for add; plan: [Planned]; at: the upstream revision a
     directory was linked at."""
-    fetched = all(p.content is not None for p in plan)
+    fetched = all(p.content is not None and not p.replaced for p in plan)
     subject_ref = f"{name}@{src.short(plan[0].commit)}"
     if len(plan) == 1:
         rel, path = plan[0].rel, plan[0].path
@@ -2654,11 +2622,13 @@ def build_add_message(plan, src, name, url, ref, mpath, relink, strict, at):
     if len(plan) > 1:
         lines.append("")
         for p in plan:
-            notes = ([] if p.content is not None else ["existing"]) + \
-                (["local modifications"] if p.modified else [])
+            notes = (["replaced"] if p.replaced else [] if p.content is not None else
+                     ["existing"]) + (["local modifications"] if p.modified else [])
             lines.append(f"- {p.rel}" + (f" ({', '.join(notes)})" if notes else ""))
     if len(plan) == 1 and plan[0].modified:
         lines += ["", "Contains local modifications of this repository."]
+    if len(plan) == 1 and plan[0].replaced:
+        lines += ["", "The existing file was replaced by the upstream version."]
     if strict:
         lines += ["", "Strict: must stay an exact copy of the upstream version."]
     return "\n".join(lines) + "\n"
@@ -2699,13 +2669,22 @@ def cmd_add(ctx, repo, args):
             raise FsError(f"'{rel}' is already linked (use --force to relink)")
         if target.is_dir():
             raise FsError(f"cannot link '{rel}': is a directory")
-        plan = [Planned(rel, path, *find_base(repo, src, head, at, rel, path, target))]
+        plan = [Planned(rel, path, *find_base(repo, src, at or head, rel, path, target,
+                                              args.overwrite))]
+    modified = [p for p in plan if p.modified]
+    if modified:
+        what = modified[0].rel if len(plan) == 1 else \
+            plural(len(modified), "existing file") + (f" below {rel}" if rel != "." else "")
+        warn(f"{what} differ{'s' if len(modified) == 1 else ''} from upstream "
+             f"{src.short(at or head)}; the differences count as local adaptations (use "
+             "--overwrite to take the upstream version, or --commit to choose another one)")
     rels = [p.rel for p in plan]
     name = named or reg.source_name(url, spec, any_line)
     shown_ref = ref_text(ref, source_line(reg.sources.get(name) or spec))
     if args.dry_run:
         for p in plan:
-            note = "fetched" if p.content is not None else \
+            note = "replacing the existing file" if p.replaced else \
+                "fetched" if p.content is not None else \
                 "with local modifications" if p.modified else "existing file"
             print(f"would link {p.rel} -> {name}:{p.path} ({shown_ref}), "
                   f"{note}, based on {src.short(p.commit)}")
@@ -2770,8 +2749,8 @@ def plan_dir(repo, reg, src, args, at, rel, path, target):
         if not skipped:
             print(f"no files to link below '{path or '/'}' in {src.label}")
         return [], False
-    given = at if args.commit else None
-    plan = [Planned(r, p, *find_base(repo, src, at, given, r, p, repo.top / r)) for r, p in todo]
+    plan = [Planned(r, p, *find_base(repo, src, at, r, p, repo.top / r, args.overwrite))
+            for r, p in todo]
     return plan, any(r in reg.files for r, _ in todo)
 
 
@@ -2887,7 +2866,7 @@ def cmd_set(ctx, repo, args):
         if not head:
             raise FsError(ref_missing(lk.ref, src))
         path = upstream_path(args.path)
-        commit, blob, _, modified = find_base(repo, src, head, None, lk.rel, path, lk.target)
+        commit, blob, _, modified, _ = find_base(repo, src, head, lk.rel, path, lk.target)
         if (path, commit, blob) != (lk.path, lk.commit, lk.blob):
             print(f"{would}{lk.rel}: path {lk.path} -> {path}, based on {src.short(commit)}"
                   + (", with local modifications" if modified else ""))
@@ -3496,7 +3475,10 @@ def main(argv=None):
     p.add_argument("--exclude", metavar="PATTERN", action="append",
                    help="directory: skip files matching PATTERN (repeatable)")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be linked")
-    p.add_argument("--commit", metavar="REV", help="upstream revision the local file corresponds to")
+    p.add_argument("--commit", metavar="REV", help="upstream revision to base the file on "
+                                                    "instead of the head")
+    p.add_argument("--overwrite", action="store_true",
+                   help="replace an existing file with the upstream version")
     p.add_argument("--force", action="store_true", help="relink an already linked file")
     p.add_argument("--strict", action="store_true",
                    help="file must stay an exact copy (no local modifications)")
@@ -3510,8 +3492,8 @@ def main(argv=None):
                                           "switch to following it, without syncing")
     p.add_argument("--tag", help="pin to this upstream tag (as for add); without --source: "
                                  "switch to it, without syncing")
-    p.add_argument("-p", "--path", help="another upstream path (one file); the synced "
-                                        "version is looked up as for add")
+    p.add_argument("-p", "--path", help="another upstream path (one file); its current "
+                                        "version becomes the base, as for add")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--strict", action="store_const", const=True,
                    help="the files must stay exact copies")

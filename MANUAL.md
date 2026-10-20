@@ -427,14 +427,21 @@ directory (see [below](#linking-a-directory)).
 | `-p`, `--path PATH` | upstream path; default: the same as FILE or DIR (`/`: the upstream root). Backslashes count as `/`, e.g. in a path copied from a checkout on Windows |
 | `--include PATTERN` | directory: only files matching PATTERN; repeatable |
 | `--exclude PATTERN` | directory: skip files matching PATTERN; repeatable, beats `--include` |
-| `--commit REV` | upstream revision FILE corresponds to, instead of looking it up |
+| `--commit REV` | upstream revision to base FILE on, instead of the head of the branch (or the tag) |
+| `--overwrite` | replace an existing FILE (for DIR: existing files) with the upstream version |
 | `--strict` | the file must stay an exact copy (see [Strict files](#strict-files)) |
 | `--force` | relink a file that is already linked |
 | `-n`, `--dry-run` | change nothing, only show what would be linked and on which upstream version it would be based |
 
-- If FILE exists, the upstream version it matches is looked up and recorded
-  as its base. If none matches, the branch head is taken (with a warning) and
-  the differences count as adaptations; `--commit` chooses a better base.
+- The base is always the upstream version `pull` would sync to: the head of
+  the branch (or the tag), or the revision given with `--commit`.
+- If FILE exists, it is kept as it is. If it differs from the base, a
+  warning says so, and the differences count as
+  [adaptations](#local-modifications-on-top-of-the-upstream-version) – which `pull` keeps. If FILE is an older
+  copy of the upstream file, that means: the upstream changes since then
+  would be kept reverted. Use `--overwrite` to take the upstream version
+  instead, or `--commit` to name the upstream version FILE is a copy of (then
+  `pull` brings the changes since).
 - If FILE doesn't exist, it is fetched from upstream.
 - Like `git add`, `add` stages FILE (as it is in the working tree) and its
   entry in `.git-filesync`, but doesn't commit. A plain `git commit` then
@@ -523,10 +530,9 @@ it still applies, so adaptations stay adaptations:
   same version of the file (e.g. a copy with a history of its own).
   Otherwise there is a warning, and the previous sync point counts as
   unknown;
-- **another path** (`-p`): looked up as for `add` – the upstream version the
-  file matches; if none matches, the branch head, with a warning, and the
-  differences count as adaptations. (A file renamed upstream doesn't
-  need this: [`pull`](#pull) follows renames.)
+- **another path** (`-p`): as for `add` – the version of that path at the
+  head of the branch (or the tag); differences count as adaptations. (A file
+  renamed upstream doesn't need this: [`pull`](#pull) follows renames.)
 
 ```sh
 git filesync set src/foo.c --strict

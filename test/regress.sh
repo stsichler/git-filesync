@@ -709,6 +709,16 @@ check "add existing file: subject" "$(git log -1 --format=%s | sed 's/@[0-9a-f]*
 check "add existing file: notes" \
   "$(git log -1 --format=%B | grep -cE '^(Contains local modifications|Strict:)')" "2"
 check "add existing file: committed as is" "$(git show HEAD:include/y.h)" "mine"
+check "add existing file: warned" \
+  "$(git filesync add -n --force include/y.h mylib -p lib/bar.h 2>&1 | grep -c '^warning: include/y.h differs from upstream .*--overwrite')" "1"
+# --overwrite replaces it with the upstream version; --force: it is linked already
+check "add --overwrite of a linked file needs --force" "$(rc git filesync add --overwrite include/y.h mylib -p lib/bar.h)" "2"
+quiet git filesync add --force --overwrite include/y.h mylib -p lib/bar.h
+git commit -q --no-edit
+check "add --overwrite: upstream content" "$(cat include/y.h)" "$(git -C ../m4 show main:lib/bar.h)"
+check "add --overwrite: unmodified" "$(st include/y.h)" ""
+check "add --overwrite: message" \
+  "$(git log -1 --format=%B | sed 's/@[0-9a-f]*$//' | grep -cE '^(\[filesync\] Relink include/y.h to mylib|The existing file was replaced by the upstream version\.)$')" "2"
 
 # a commit aborted in the editor leaves the changes staged (pull: rc 1)
 (cd ../m4 && sedi 's/^D-up$/D-up2/' lib/foo.c && git commit -qam "foo up2")
@@ -986,15 +996,26 @@ if git lfs version >/dev/null 2>&1; then
         check "$tag: committed storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
         check "$tag: after merge (adapted, clean worktree)" "$(st) $(git status --porcelain)" " A "
 
-        # add over an existing file that equals an older upstream version
+        # add over an existing file: an older upstream version differs from
+        # the base (the head), the same content doesn't (LFS or not);
+        # --overwrite takes the upstream version, stored as configured here
         cd ..; rm -rf sl2; git init -q sl2; cd sl2
         [ $dlfs = yes ] && git lfs track d.txt >/dev/null && git add .gitattributes
         printf 'l1\nl2\nl3\nl4\nl5\n' > d.txt
         git add .
         git commit -qm i
         [ $via = map ] && git filesync map "$TURL/ml.git" "$T/ml" >/dev/null
-        check "$tag: add detects older version" \
-          "$(git filesync add d.txt "$TURL/ml.git" 2>&1 | grep -c 'matches upstream')" "1"
+        check "$tag: add over an older version: differs from the head" \
+          "$(git filesync add d.txt "$TURL/ml.git" 2>&1 | grep -c 'd.txt differs from upstream')" "1"
+        git reset -q --hard
+        quiet git filesync add --overwrite d.txt "$TURL/ml.git"
+        git commit -q --no-edit
+        check "$tag: add --overwrite: upstream content" "$(oneline < d.txt)" "l1 l2 l3 l4 L5-up "
+        check "$tag: add --overwrite: storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
+        check "$tag: add --overwrite: clean" "$(st)" ""
+        quiet git filesync unlink d.txt; git commit -qam unlink
+        check "$tag: add over the same content: no warning" \
+          "$(git filesync add d.txt "$TURL/ml.git" 2>&1 | grep -c 'differs')" "0"
         cd ..
 
         # reset the upstream for the next combination
@@ -1326,6 +1347,8 @@ quiet fsd add docs nowhere/m11 --include /x.md && git commit -q --no-edit
 check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
 check "add DIR: existing file adapted" "$(st docs)" " A"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Link docs/x.md to nowhere/m11"
+check "add DIR --overwrite: existing file replaced" \
+  "$(git filesync add -n --force --overwrite docs nowhere/m11 --include /x.md | grep -c 'replacing the existing file')" "1"
 
 # pattern forms
 check "pattern '**/v1/*'" "$(git filesync add -n all nowhere/m11 -p api --include '**/v1/*' | lines)" "2"
