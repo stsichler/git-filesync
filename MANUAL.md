@@ -146,12 +146,22 @@ changes with `git restore`, or lift the restriction (`git filesync set
 | [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks) | hooks: reminders, push check |
 
 Commands named like a Git command behave like it (`status`, `pull`, `diff`,
-`difftool`, `add`, `mv`; `source` like `git remote`): same kind of output,
-same exit codes, same caution with uncommitted changes. Like in Git, only
-`pull` commits; `add`, `set`, `mv`, `unlink` and `source` stage their changes, and
-`add` prepares a proposed commit message that a plain `git commit` offers
-(see [Proposed commit messages](#proposed-commit-messages)). `git filesync`
-without a command runs `status`.
+`difftool`, `restore`, `add`, `rm`, `mv`; `source` like `git remote`): same
+kind of output, same exit codes, same caution with uncommitted changes.
+
+**Only `pull` commits**, like `git pull` – and for the same reason: it
+brings in changes from elsewhere, and its commit message comes from there
+(the upstream commits since the last sync), one commit per file, so `git log
+FILE` shows every sync. All other commands carry out a decision of yours,
+often together with changes of your own, so – like `git add`, `git rm`,
+`git mv`, `git restore` – they only change the working tree or stage, and
+you commit: `add`, `rm`, `mv`, `set`, `unlink`, `edit` and `source` stage,
+`restore` (without `-S`) leaves the index alone. `pull --no-commit` only
+stages, like `git merge --no-commit`. `add` and `pull --no-commit` prepare a
+proposed commit message that a plain `git commit` offers (see [Proposed
+commit messages](#proposed-commit-messages)).
+
+`git filesync` without a command runs `status`.
 
 Paths are relative to the current directory – the ones you give, and the
 ones in the output and in suggested commands. Where `PATH…` is accepted, a
