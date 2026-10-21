@@ -16,7 +16,7 @@ For motivation and installation see the [README](README.md).
   - [`add`](#add) · [`rm`](#rm) · [`unlink`](#unlink) · [`mv`](#mv)
 - [Advanced commands](#advanced-commands)
   - [`set`](#set) · [`edit`](#edit) · [`source`](#source) · [`source map`](#source-map) · [`cache`](#cache)
-  - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
+  - [`hooks`](#hooks)
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted upstream](#files-renamed-or-deleted-upstream)
   - [Git LFS](#git-lfs) · [Line endings](#line-endings) · [Offline operation](#offline-operation)
@@ -154,7 +154,7 @@ Basic commands – what you need day to day:
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
 | [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear |
-| [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks) | hooks: reminders, push check |
+| [`hooks [ACTION]`](#hooks) | the hooks: show, install, remove; reminders, push check |
 
 Commands named like a Git command behave like it (`status`, `pull`, `diff`,
 `difftool`, `restore`, `add`, `rm`, `mv`; `source` like `git remote`): same
@@ -789,24 +789,35 @@ parallel doesn't lose its clone. A removed clone is simply cloned again
 when it is needed; only the offline fallback ("using cached state") needs
 it to be there.
 
-### `install-hooks`, `uninstall-hooks`
+### `hooks`
 
-`install-hooks` adds a `pre-push` hook (fetches) and a `post-merge` hook
+`hooks install` adds a `pre-push` hook (fetches) and a `post-merge` hook
 (cached state only). Both report pending syncs, errors and strict
 violations on stderr. If a hook of another tool already exists, the lines
-to add are printed instead; `install-hooks --force` adds them itself, right
+to add are printed instead; `hooks install --force` adds them itself, right
 after the `#!` line – before anything else, as needed for `git lfs
 pre-push` (see below) and for hooks that end with `exec` or `exit`. Hooks
 installed by an older version are updated in place. With
 `core.hooksPath` set, the hooks go there (with a warning, as other
 repositories may share that directory).
 
+`hooks` without an action shows the state of each hook – `installed`,
+`outdated` (installed by an older version: run `hooks install` again), `not
+installed`, or a hook of another tool without our lines – and the
+directory, if `core.hooksPath` sets it:
+
+```
+$ git filesync hooks
+pre-push: installed
+post-merge: not installed (install with 'git filesync hooks install')
+```
+
 **Sharing `pre-push` with Git LFS (or git-assetsync):** git passes the refs
 being pushed to the hook on stdin, once – whichever command reads them
 first gets them. The git-filesync block reads them and hands them on to
 the commands after it; it can't get them back from a command before it.
-So put it **before** `git lfs pre-push` (as `install-hooks` says when the
-hook exists, and `install-hooks --force` does). Otherwise Git LFS works, but the push check sees nothing to
+So put it **before** `git lfs pre-push` (as `hooks install` says when the
+hook exists, and `hooks install --force` does). Otherwise Git LFS works, but the push check sees nothing to
 check. git-assetsync's block works the same way; the two can come in
 either order, both before `git lfs pre-push`:
 
@@ -824,7 +835,7 @@ git lfs pre-push "$@"
 
 Before 0.9.1 the block was a single line that kept the refs to itself: put
 first, it left Git LFS without them – the push went through, but no LFS
-objects were uploaded. Run `git filesync install-hooks` again: it replaces
+objects were uploaded. Run `git filesync hooks install` again: it replaces
 the old line by the block, in the same place – in a shared hook, check that
 the block comes before `git lfs pre-push`.
 
@@ -860,12 +871,15 @@ A server that can't be reached is reported, but never refuses the push.
 Apart from `error`, the hooks never block – not even if git-filesync itself
 fails or is missing.
 
-The hooks run `git filesync hook pre-push` / `hook post-merge`, which are
-not meant to be run by hand (without the arguments git passes, `hook
-pre-push` checks `HEAD`).
+The hooks run `git filesync hook pre-push` / `hook post-merge` (not in the
+command list), which are not meant to be run by hand (without the arguments
+git passes, `hook pre-push` checks `HEAD`).
 
-`uninstall-hooks` deletes hook files that only contain the git-filesync
+`hooks uninstall` deletes hook files that only contain the git-filesync
 lines; from other hooks it removes just those lines.
+
+Until 0.11, the commands were `install-hooks` and `uninstall-hooks`; hooks
+installed by them keep working.
 
 ## Further topics
 

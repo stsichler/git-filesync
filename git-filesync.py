@@ -198,8 +198,11 @@ Advanced commands:
     cache clear [-n]            remove all clones
     cache dir                   print its directory (e.g. for CI caching)
 
-    install-hooks               install pre-push/post-merge hooks (or update
-                                them): reminders about pending syncs, strict
+    hooks                       the state of the pre-push/post-merge hooks:
+                                installed, outdated, not installed, or
+                                hooks of other tools without our lines
+    hooks install               install the hooks (or update them):
+                                reminders about pending syncs, strict
                                 violations, errors; pre-push also warns if a
                                 pushed file is synced to an upstream commit
                                 that isn't on the upstream server
@@ -209,8 +212,9 @@ Advanced commands:
         --force                 add our lines to existing hooks of other
                                 tools, right after the #! line (default:
                                 show the lines to add)
-    uninstall-hooks             remove them again
-    hook pre-push|post-merge    what the installed hooks run
+    hooks uninstall             remove them again (only our lines from hooks
+                                of other tools)
+    hook pre-push|post-merge    what the installed hooks run (internal)
 
     Common options:
         --no-fetch              use the cached state, don't fetch (status,
@@ -3472,14 +3476,17 @@ def cmd_hook(ctx, repo, args):
     return EXIT_OK
 
 
-def hook_dir(repo, action):
+def hook_dir(repo, action=None):
+    """The directory of the hooks; with core.hooksPath set, a warning that
+    action (e.g. 'installing into') may affect other repositories too."""
     hp = out(repo.git(["config", "core.hooksPath"], check=False))
     if hp:
         hookdir = Path(os.path.expanduser(hp))
         if not hookdir.is_absolute():
             hookdir = repo.top / hookdir
-        warn(f"core.hooksPath is set; {action} {hookdir} "
-             "(may affect other repositories using it)")
+        if action:
+            warn(f"core.hooksPath is set; {action} {hookdir} "
+                 "(may affect other repositories using it)")
     else:
         hookdir = Path(out(repo.git(["rev-parse", "--git-path", "hooks"])))
         if not hookdir.is_absolute():
@@ -3497,6 +3504,28 @@ def is_our_hook_line(line):
     s = line.strip()
     return REFS_VAR in s or s.startswith((f"# {HOOK_MARKER}:", "git filesync hook ",
                                           "git filesync status --hook"))  # the latter: before 0.7
+
+
+def cmd_hooks(repo, args):
+    """hooks without an action: the state of each of our hooks."""
+    hookdir = hook_dir(repo)
+    if out(repo.git(["config", "core.hooksPath"], check=False)):
+        print(f"hooks directory: {hookdir} (core.hooksPath)")
+    for name, cmd in HOOKS.items():
+        f = hookdir / name
+        text = f.read_bytes().decode("utf-8", "replace") if f.is_file() else None
+        if text is None:
+            state = paint("not installed", "dim") + " (install with 'git filesync hooks install')"
+        elif hook_snippet(cmd) in text:
+            state = paint("installed", "green")
+        elif any(is_our_hook_line(ln) for ln in text.splitlines()):
+            state = paint("outdated", "yellow") + \
+                " (update with 'git filesync hooks install')"
+        else:
+            state = paint("hook of another tool, without our lines", "yellow") + \
+                " (add them with 'git filesync hooks install --force')"
+        print(f"{name}: {state}")
+    return EXIT_OK
 
 
 def cmd_install_hooks(repo, args):
@@ -3521,7 +3550,7 @@ def cmd_install_hooks(repo, args):
                          "(e.g. git lfs pre-push)") if name == "pre-push" else ""
                 print(f"{name}: {paint('hook exists', 'yellow')}, add these lines to {f}"
                       f"{where}:\n{snippet}"
-                      "(or run 'git filesync install-hooks --force' to add them)")
+                      "(or run 'git filesync hooks install --force' to add them)")
                 continue
             rest = [ln for ln in lines if not is_our_hook_line(ln)]
             if all(ln.strip() in ("", "#!/bin/sh", "exit 0") for ln in rest):
@@ -3603,7 +3632,8 @@ class MainParser(argparse.ArgumentParser):
     def format_help(self):
         t = self.theme()
         width = max(shutil.get_terminal_size().columns - 2, 40)
-        helps = {a.dest: a.help for a in self.sub._choices_actions}
+        helps = {a.dest: a.help for a in self.sub._choices_actions
+                 if a.help != argparse.SUPPRESS}
 
         def group(title, names):
             lines = [f"{t.heading}{title}:{t.reset}"]
@@ -3833,13 +3863,17 @@ def main(argv=None):
     a.add_argument("-n", "--dry-run", action="store_true", help="only show what would be removed")
     add_command(actions, "dir", parents=[colorp], help="print the cache's directory")
 
-    p = add_command(sub, "install-hooks", parents=[colorp],
-                    help="install the pre-push/post-merge hooks")
-    p.add_argument("--force", action="store_true",
-                   help="add our lines to existing hooks (right after the #! line)")
-    add_command(sub, "uninstall-hooks", parents=[colorp], help="remove the hooks again",
-                description="Remove the pre-push/post-merge hooks of git-filesync.")
-    p = add_command(sub, "hook", parents=[colorp], help="what the installed hooks run",
+    p = add_command(sub, "hooks", parents=[colorp],
+                    help="show, install or remove the pre-push/post-merge hooks")
+    actions = p.add_subparsers(dest="action", metavar="ACTION")
+    a = add_command(actions, "install", parents=[colorp],
+                    help="install the hooks, or update them")
+    a.add_argument("--force", action="store_true",
+                   help="add our lines to existing hooks of other tools (right after the #! line)")
+    add_command(actions, "uninstall", parents=[colorp],
+                help="remove the hooks (only our lines from hooks of other tools)")
+    # what the installed hooks run - not in the command list
+    p = add_command(sub, "hook", parents=[colorp], help=argparse.SUPPRESS,
                     description="Run the checks of an installed hook (called by the hooks).")
     p.add_argument("name", choices=list(HOOKS))
     p.add_argument("hook_args", nargs=argparse.REMAINDER, help="the hook's arguments")
@@ -3867,10 +3901,9 @@ def main(argv=None):
             return cmd_cache(args)
         if repo is None:
             raise FsError("not inside a Git working tree")
-        if args.cmd == "install-hooks":
-            return cmd_install_hooks(repo, args)
-        if args.cmd == "uninstall-hooks":
-            return cmd_uninstall_hooks(repo, args)
+        if args.cmd == "hooks":
+            return {None: cmd_hooks, "install": cmd_install_hooks,
+                    "uninstall": cmd_uninstall_hooks}[args.action](repo, args)
         if args.cmd == "hook":
             args.no_fetch = args.name == "post-merge"    # pre-push: online anyway
         ctx = Context(args, repo)

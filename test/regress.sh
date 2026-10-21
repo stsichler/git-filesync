@@ -165,8 +165,8 @@ up() { (cd "$T/upstream" && sedi "$1" lib.c && git commit -qam "$2" && git push 
 new_repo downstream
 OUT=$(git filesync add src/lib.c "$URL" -p lib.c 2>&1)
 check "--help: basic and advanced commands" \
-  "$(git filesync -h | grep -E '^(basic commands|advanced commands):$|^  (status|mv|set|hook) ' | cut -c1-8 | oneline)" \
-  "basic co   status   mv     advanced   set      hook   "
+  "$(git filesync -h | grep -E '^(basic commands|advanced commands):$|^  (status|mv|set|hooks?) ' | cut -c1-8 | oneline)" \
+  "basic co   status   mv     advanced   set      hooks  "
 check "command help repeats the summary" "$(git filesync add -h | grep -c '^Link a file (or all files of a directory) to the upstream repository\.$')" "1"
 check "add stages, like git add" "$(git status --porcelain | oneline)" "A  .git-filesync A  src/lib.c "
 check "add: says how to commit" "$(echo "$OUT" | grep -cxE '    git commit|\(it offers the proposed commit message; a copy stays in \.git/FILESYNC_SQUASH_MSG\)')" "2"
@@ -237,60 +237,65 @@ check "pull --all leaves locally deleted file alone" \
   "$([ -e src/lib.c ] && echo restored || echo deleted)" "deleted"
 git restore src/lib.c
 
-# hooks: install and remove our own hook files
-git filesync install-hooks >/dev/null
+# hooks: install and remove our own hook files; 'hooks' shows their state
+check "hooks: none yet" "$(git filesync hooks | cut -d' ' -f1-3 | oneline)" "pre-push: not installed post-merge: not installed "
+git filesync hooks install >/dev/null
 check "hooks installed" "$(ls .git/hooks/pre-push .git/hooks/post-merge 2>/dev/null | lines)" "2"
-git filesync uninstall-hooks >/dev/null
+check "hooks: installed" "$(git filesync hooks | oneline)" "pre-push: installed post-merge: installed "
+git filesync hooks uninstall >/dev/null
 check "own hooks removed" "$(ls .git/hooks/pre-push .git/hooks/post-merge 2>/dev/null | lines)" "0"
+check "install-hooks is 'hooks install' now" "$(rc git filesync install-hooks)" "2"
 
-# foreign hooks: install-hooks leaves them alone and prints the lines to add.
+# foreign hooks: hooks install leaves them alone and prints the lines to add.
 # pre-push gets these lines added by hand, post-merge stays without them;
-# uninstall-hooks must remove only our lines.
+# hooks uninstall must remove only our lines.
 printf '#!/bin/sh\necho mine\n' > .git/hooks/pre-push
 chmod +x .git/hooks/pre-push
-OUT=$(git filesync install-hooks 2>/dev/null)
+check "hooks: a foreign hook" "$(git filesync hooks | grep -c "^pre-push: hook of another tool, without our lines (add them with 'git filesync hooks install --force')$")" "1"
+OUT=$(git filesync hooks install 2>/dev/null)
 check "foreign pre-push: put our lines before git lfs" \
   "$(echo "$OUT" | grep -c '^pre-push: hook exists, add these lines to .*, before commands that read the pushed refs from stdin (e.g. git lfs pre-push):$')" "1"
 echo "$OUT" | sed -n '/^# git-filesync/,/^git_filesync_refs_end$/p' >> .git/hooks/pre-push
 printf '#!/bin/sh\necho other\n' > .git/hooks/post-merge
-git filesync uninstall-hooks >/dev/null
+git filesync hooks uninstall >/dev/null
 check "foreign hook: own lines removed" "$(cat .git/hooks/pre-push)" "$(printf '#!/bin/sh\necho mine')"
 check "foreign hook: still executable" "$([ -x .git/hooks/pre-push ] && echo yes)" "yes"
 check "foreign hook without snippet untouched" "$(cat .git/hooks/post-merge)" "$(printf '#!/bin/sh\necho other')"
 rm -f .git/hooks/pre-push .git/hooks/post-merge
 
-# install-hooks --force adds our lines to a foreign hook, right after the #!
+# hooks install --force adds our lines to a foreign hook, right after the #!
 # line (before git lfs pre-push, which reads the refs from stdin)
 printf '#!/bin/sh\ngit lfs pre-push "$@"\n' > .git/hooks/pre-push
 chmod +x .git/hooks/pre-push
 check "foreign hook: --force suggested" \
-  "$(git filesync install-hooks 2>/dev/null | grep -c "^(or run 'git filesync install-hooks --force' to add them)$")" "1"
-OUT=$(git filesync install-hooks --force 2>/dev/null)
-check "install-hooks --force: lines added" "$(echo "$OUT" | grep -c '^pre-push: lines added to the existing hook$')" "1"
-check "install-hooks --force: our block first, the rest kept" \
+  "$(git filesync hooks install 2>/dev/null | grep -c "^(or run 'git filesync hooks install --force' to add them)$")" "1"
+OUT=$(git filesync hooks install --force 2>/dev/null)
+check "hooks install --force: lines added" "$(echo "$OUT" | grep -c '^pre-push: lines added to the existing hook$')" "1"
+check "hooks install --force: our block first, the rest kept" \
   "$(head -2 .git/hooks/pre-push | cut -c1-14 | oneline)| $(tail -1 .git/hooks/pre-push)" "#!/bin/sh # git-filesync | git lfs pre-push \"\$@\""
-check "install-hooks --force again: nothing to do" "$(git filesync install-hooks --force 2>/dev/null | grep -c 'already installed')" "2"
-git filesync uninstall-hooks >/dev/null
+check "hooks install --force again: nothing to do" "$(git filesync hooks install --force 2>/dev/null | grep -c 'already installed')" "2"
+git filesync hooks uninstall >/dev/null
 check "uninstall after --force: foreign lines kept" "$(cat .git/hooks/pre-push)" "$(printf '#!/bin/sh\ngit lfs pre-push "$@"')"
 rm -f .git/hooks/pre-push
 
 # hooks of an older version are updated in place, other lines kept
 printf '#!/bin/sh\necho mine\n# git-filesync: old\ngit filesync status --hook </dev/null || true\nexit 0\n' \
   > .git/hooks/post-merge
-check "install-hooks: old hook updated" "$(git filesync install-hooks 2>/dev/null | grep -c '^post-merge: updated')" "1"
+check "hooks: an old hook of ours is outdated" "$(git filesync hooks | grep -c '^post-merge: outdated')" "1"
+check "hooks install: old hook updated" "$(git filesync hooks install 2>/dev/null | grep -c '^post-merge: updated')" "1"
 check "updated hook: new command, rest kept" "$(sed -n '2p;4,5p' .git/hooks/post-merge | oneline)" \
   "echo mine git filesync hook post-merge \"\$@\" </dev/null || true exit 0 "
-check "install-hooks again: nothing to do" "$(git filesync install-hooks 2>/dev/null | grep -c 'already installed')" "2"
-git filesync uninstall-hooks >/dev/null
+check "hooks install again: nothing to do" "$(git filesync hooks install 2>/dev/null | grep -c 'already installed')" "2"
+git filesync hooks uninstall >/dev/null
 
 # a hook file we wrote (before 0.9.1: ending in exit 0) is rewritten without
 # exit 0, so lines appended later (git lfs install's) run
 printf '#!/bin/sh\n# git-filesync: old\ngit filesync hook pre-push "$@" || [ $? -ne 3 ] || exit 1\nexit 0\n' \
   > .git/hooks/pre-push
-quiet git filesync install-hooks
+quiet git filesync hooks install
 check "own old hook: exit 0 dropped" "$(head -1 .git/hooks/pre-push) $(grep -c '^exit 0' .git/hooks/pre-push)" "#!/bin/sh 0"
 check "own old hook: refs block" "$(grep -c git_filesync_refs .git/hooks/pre-push)" "5"
-git filesync uninstall-hooks >/dev/null
+git filesync hooks uninstall >/dev/null
 
 # pre-push: a pushed file synced to an upstream commit that isn't on the
 # server (pulled from an unpushed commit of the mapped checkout)
@@ -321,7 +326,7 @@ check "pre-push: entries of the replaced commit skipped" \
 # the installed hook: refuses with pushCheck=error, otherwise never blocks
 git init -q --bare "$T/downstream-remote.git"
 git remote add origin "$T/downstream-remote.git"
-git filesync install-hooks >/dev/null
+git filesync hooks install >/dev/null
 check "new hook: no exit 0" "$(grep -c '^exit 0' .git/hooks/pre-push)" "0"
 check "installed hook refuses the push" "$(rc git push -q origin HEAD:main)" "1"
 check "push --no-verify skips the hook" "$(rc git push -q --no-verify origin HEAD:main)" "0"
@@ -344,7 +349,7 @@ check "pre-push: commands after our block get the refs" \
   "$(lines < "$T/after-refs") $(cut -d' ' -f2-3 "$T/after-refs")" "1 $(git rev-parse HEAD) refs/heads/main"
 quiet .git/hooks/pre-push origin x </dev/null
 check "pre-push: nothing in, nothing restored" "$(wc -c < "$T/after-refs" | tr -d ' ')" "0"
-git filesync uninstall-hooks >/dev/null
+git filesync hooks uninstall >/dev/null
 git remote remove origin
 git filesync source map "$URL" --unset >/dev/null
 
@@ -540,7 +545,7 @@ git commit -q --no-edit
 (cd "$T/coA" && echo v3 > x.c && git commit -qam v3)
 git init -q --bare "$T/sOff-remote.git"
 git remote add origin "$T/sOff-remote.git"
-git filesync install-hooks >/dev/null
+git filesync hooks install >/dev/null
 ERR=$(
   export GIT_ALLOW_PROTOCOL=file
   {
@@ -1101,7 +1106,7 @@ if git lfs version >/dev/null 2>&1; then
   check "lfs unavailable: add fails" "$(echo "$ERR" | grep -c 'stored in Git LFS')" "1"
   check "lfs unavailable: no pointer file written" "$([ -e d.txt ] && echo written || echo none)" "none"
 
-  # pre-push hook shared with git lfs: our block first (as install-hooks
+  # pre-push hook shared with git lfs: our block first (as hooks install
   # says) - LFS must still get the pushed refs and upload its objects
   cd "$T"
   git init -q --bare lfsremote.git
@@ -1112,7 +1117,7 @@ if git lfs version >/dev/null 2>&1; then
   git add . && git commit -qm lfs
   git remote add origin "$T/lfsremote.git"
   { echo '#!/bin/sh'
-    git filesync install-hooks 2>/dev/null | sed -n '/^# git-filesync/,/^git_filesync_refs_end$/p'
+    git filesync hooks install 2>/dev/null | sed -n '/^# git-filesync/,/^git_filesync_refs_end$/p'
     tail -n +2 .git/hooks/pre-push; } > hook.new
   mv hook.new .git/hooks/pre-push && chmod +x .git/hooks/pre-push
   quiet git push origin main

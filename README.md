@@ -185,7 +185,7 @@ Advanced commands:
 | `source [ACTION …]` | list sources; rename, change URL, branch or tag |
 | `source map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
 | `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear |
-| `install-hooks`, `uninstall-hooks` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |
+| `hooks [install\|uninstall]` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |
 
 `git filesync <command> -h` describes a command and lists its options. The
 **[manual](MANUAL.md)** describes all commands and options in detail,
