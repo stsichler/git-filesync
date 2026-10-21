@@ -3518,10 +3518,11 @@ def cmd_uninstall_hooks(repo, args):
 # --------------------------------------------------------------------------
 
 def add_command(sub, name, **kw):
-    """A (sub)command whose -h repeats its summary from the command list."""
+    """A (sub)command whose -h repeats its summary from the command list
+    (unless it has a description of its own)."""
     hlp = kw.get("help")
     if hlp:
-        kw.setdefault("description", hlp[0].upper() + hlp[1:] + ".")
+        kw["description"] = kw.get("description") or hlp[0].upper() + hlp[1:] + "."
     return sub.add_parser(name, **kw)
 
 
@@ -3597,11 +3598,14 @@ def main(argv=None):
     p.add_argument("-v", "--verbose", action="store_true",
                    help="before each file: where it comes from and the version synced so far")
 
-    for name, hlp in (("diff", "show local modifications against the synced upstream version"),
-                      ("difftool", "show local modifications against the synced upstream "
-                                   "version in the configured difftool")):
-        p = add_command(sub, name, parents=[common], help=hlp,
-                           epilog="Options after '--' are passed to git " + name + ".")
+    for name, hlp, desc in (
+            ("diff", "show local modifications against the synced upstream version", None),
+            # in the command list right after diff; on its own (-h) it needs to say more
+            ("difftool", "same in the configured difftool",
+             "Show local modifications against the synced upstream version in the "
+             "configured difftool.")):
+        p = add_command(sub, name, parents=[common], help=hlp, description=desc,
+                        epilog="Options after '--' are passed to git " + name + ".")
         p.add_argument("files", nargs="*", help="files or directories (default: all)")
         g = p.add_mutually_exclusive_group()
         g.add_argument("--upstream", action="store_true",
