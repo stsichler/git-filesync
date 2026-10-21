@@ -126,7 +126,7 @@ your `PATH`. Either way the tool is invoked as `git filesync …`; check with
 changes of each version.
 
 You can also clone the repository and point the alias at the script in
-it: `main` is the current development state, a tag like `v0.12.0` a
+it: `main` is the current development state, a tag like `v0.13.0` a
 release. Or let git-filesync keep a copy of itself in your project, so
 everyone has the same version – see
 [Shipping git-filesync with your repository](MANUAL.md#shipping-git-filesync-with-your-repository).
