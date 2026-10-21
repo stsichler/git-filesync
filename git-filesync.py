@@ -3738,7 +3738,9 @@ def main(argv=None):
                        help="show, list or clean up the cache of upstream clones")
     actions = p.add_subparsers(dest="action", metavar="ACTION")
     add_command(actions, "list", parents=[colorp],
-                       help="list the clones, most recently used first: size, last used, URL")
+                help="the clones, most recently used first: size, last used, URL",
+                description="List the cached clones, most recently used first: size, "
+                            "last used, URL.")
     a = add_command(actions, "prune", parents=[colorp],
                            help="remove clones not used for a while (default: the configured "
                                 "limits, filesync.cacheMaxAge / cacheMaxSize)")
@@ -3755,8 +3757,10 @@ def main(argv=None):
                     help="install the pre-push/post-merge hooks")
     p.add_argument("--force", action="store_true",
                    help="add our lines to existing hooks (right after the #! line)")
-    add_command(sub, "uninstall-hooks", parents=[colorp], help="remove the pre-push/post-merge hooks of git-filesync")
-    p = add_command(sub, "hook", parents=[colorp], help="run the checks of an installed hook (called by the hooks)")
+    add_command(sub, "uninstall-hooks", parents=[colorp], help="remove the hooks again",
+                description="Remove the pre-push/post-merge hooks of git-filesync.")
+    p = add_command(sub, "hook", parents=[colorp], help="what the installed hooks run",
+                    description="Run the checks of an installed hook (called by the hooks).")
     p.add_argument("name", choices=list(HOOKS))
     p.add_argument("hook_args", nargs=argparse.REMAINDER, help="the hook's arguments")
 
