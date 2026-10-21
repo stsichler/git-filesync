@@ -1248,8 +1248,8 @@ check "add --tag -b: both recorded" \
   "$(git config -f .git-filesync source.$SRC9C.tag) $(git config -f .git-filesync source.$SRC9C.branch)" "v2 main"
 quiet git filesync add d.c "$URL9" -p t.c --tag v2
 check "add by URL + tag, no -b: source with a branch reused" "$(git config -f .git-filesync file.d.c.source)" "$SRC9C"
-check "add --tag -b: tag not on the branch" \
-  "$(git filesync add e.c "$URL9" -p t.c --tag v2 -b nope 2>&1 | grep -c "branch 'nope' not found")" "1"
+check "add --tag -b: a missing branch is an error" \
+  "$(git filesync add e.c "$URL9" -p t.c --tag v2 -b nope 2>&1 | grep -c "^error: branch 'nope' not found")-$(rc git filesync add e.c "$URL9" -p t.c --tag v2 -b nope)" "1-2"
 git reset -q --hard
 
 # a SQUASH_MSG of git's own (e.g. merge --squash) is left alone
@@ -1477,6 +1477,11 @@ git filesync source set-tag "$SRC12" v1.0.1 >/dev/null
 check "newest tag pinned: no newer" "$(git filesync source -v | grep -c newest)" "0"
 git filesync source set-branch "$SRC12" main >/dev/null
 check "tag not on the branch: warning (per file)" "$(git filesync status -v 2>&1 | grep -c "tag v1.0.1 is not on branch 'main'")" "3"
+check "tag not on the branch: no error" "$(rc git filesync status)" "0"
+git filesync source set-branch "$SRC12" nope >/dev/null
+check "a missing branch of a pinned source: an error" \
+  "$(git filesync status 2>&1 | grep -c "^error: .*branch 'nope' not found")-$(rc git filesync status)" "3-2"
+git filesync source set-branch "$SRC12" main >/dev/null
 git filesync source set-tag "$SRC12" v1.0 >/dev/null
 git commit -qm "pinned to v1.0 on main"
 

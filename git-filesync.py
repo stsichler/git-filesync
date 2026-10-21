@@ -985,10 +985,11 @@ class Context:
 
     def source(self, url, ref, name=None, line=None):
         """Source for url and ref (('branch' | 'tag', name)); name is its key
-        in .git-filesync (used as label). For a tag pattern, line is the
-        branch of the source: the pattern is resolved to the newest matching
-        tag on it."""
-        key = (norm_url(url), ref, line if ref[0] == "tag" and is_tag_pattern(ref[1]) else None)
+        in .git-filesync (used as label). For a tag, line is the branch of
+        the source: a pattern is resolved to the newest matching tag on it.
+        A branch that doesn't exist is an error (a tag not on it isn't: see
+        tag_info)."""
+        key = (norm_url(url), ref, line if ref[0] == "tag" else None)
         if key not in self._sources:
             try:
                 self._sources[key] = self._make(url, ref, name, line)
@@ -1066,6 +1067,8 @@ class Context:
                 if not src.tag_names:
                     raise FsError(f"no tag matching '{branch}' on branch '{line}' of {src.label}")
                 src.ref = f"refs/tags/{src.tag_names[0]}"
+            elif line and line not in src.branch_refs():
+                raise FsError(f"branch '{line}' not found in {src.label}")
             return src
         if local:
             # the link's branch as it is in the checkout (incl. unpushed

@@ -258,7 +258,16 @@ Like `git status`, the exit code is 0 (2 on errors); `--exit-code` makes it
 `pull PATH…`, `pull --all` – sync to the current upstream version of the
 file: the version on the source's branch (with a [local checkout](#source-map):
 that checkout's branch), or at its [tag](#pinning-to-a-tag). Recorded is the upstream commit that last changed the
-file. The editor opens with the proposed commit message:
+file.
+
+What `pull` syncs to follows simple rules: `--commit REV` – exactly that
+commit; a tag – exactly that tag; a [tag pattern](#tag-patterns) – the
+newest matching tag on the source's branch; otherwise the head of the
+branch. A branch, tag or commit that is given but can't be found upstream
+is an error (there is nothing to sync to); settings that merely don't fit
+together, like a tag that isn't on the source's branch, give a warning.
+
+The editor opens with the proposed commit message:
 
 ```
 [filesync] Sync src/foo.c from owner/lib@a1b2c3d
@@ -868,7 +877,8 @@ git filesync add cfg/x.yml https://github.com/owner/lib.git --tag v1.2.0
 compares against the version at the tag – commits on the upstream branches
 don't matter – and `pull` syncs to it. A `branch` in a pinned source (`add
 --tag v1.2.0 -b main`, or kept when a source following `main` is pinned)
-only says where to look for [newer tags](#newer-tags).
+only says where to look for [newer tags](#newer-tags). A branch that
+doesn't exist upstream is an error; a tag that isn't on it, a warning.
 
 Tags are taken as immutable, like Git does: once the tag is in the cache,
 `status` (and the hooks) fetch nothing for it, so they need no network for
