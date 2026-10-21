@@ -635,6 +635,27 @@ def lfs_smudge(run, data, path, where):
 # upstream side
 # --------------------------------------------------------------------------
 
+def batch_read(git_cmd, blobs, memo):
+    """Contents of blobs not in memo yet (keys ('raw', oid)), read with one
+    `cat-file --batch`: [(key, content)]. Missing or odd ones are left
+    out - reading them one by one reports the error."""
+    blobs = [b for b in dict.fromkeys(blobs) if b and ("raw", b) not in memo]
+    if not blobs:
+        return []
+    p = git_cmd(["cat-file", "--batch"], data="".join(b + "\n" for b in blobs).encode(),
+                check=False)
+    data, pos, found = p.stdout, 0, []
+    for b in blobs:
+        end = data.find(b"\n", pos)
+        head = data[pos:end].split() if end >= 0 else []
+        if len(head) != 3 or head[1] != b"blob":
+            break
+        size = int(head[2])
+        found.append((("raw", b), data[end + 1:end + 1 + size]))
+        pos = end + 1 + size + 1
+    return found
+
+
 class Source:
     """A Git repository providing the upstream versions of synced files."""
 
@@ -749,24 +770,19 @@ class Source:
             for x in part:
                 self._memo[("blob", commit, x)] = found.get(x)
 
+    def read_blobs(self, blobs):
+        """Read these blobs with one `cat-file --batch` (see read_blob)."""
+        self._memo.update(batch_read(self.git, blobs, self._memo))
+
     def check_plain(self, blobs):
         """Find out with one `cat-file --batch` which of these blobs hold
         plain content: no CR and no LFS pointer (see is_plain)."""
         blobs = [b for b in dict.fromkeys(blobs) if b and ("plain", b) not in self._memo]
-        if not blobs:
-            return
-        p = self.git(["cat-file", "--batch"], data="".join(b + "\n" for b in blobs).encode(),
-                     check=False)
-        data, pos = p.stdout, 0
+        self.read_blobs(blobs)
         for b in blobs:
-            end = data.find(b"\n", pos)
-            head = data[pos:end].split() if end >= 0 else []
-            if len(head) != 3 or head[1] != b"blob":
-                return            # missing or odd: is_plain() says "don't know"
-            size = int(head[2])
-            content = data[end + 1:end + 1 + size]
-            self._memo[("plain", b)] = b"\r" not in content and not lfs_pointer(content)
-            pos = end + 1 + size + 1
+            content = self._memo.get(("raw", b))
+            if content is not None:   # missing or odd: is_plain() says "don't know"
+                self._memo[("plain", b)] = b"\r" not in content and not lfs_pointer(content)
 
     def is_plain(self, blob):
         """Plain content (see check_plain), None if not known."""
@@ -804,17 +820,39 @@ class Source:
 
     def read_blob(self, oid):
         """Raw blob - an LFS pointer for files stored in LFS."""
-        return self.git(["cat-file", "blob", oid]).stdout
+        key = ("raw", oid)
+        if key not in self._memo:
+            self._memo[key] = self.git(["cat-file", "blob", oid]).stdout
+        return self._memo[key]
 
     def read_content(self, oid, path):
         """Actual file content of a blob: LFS pointers are resolved."""
         data = self.read_blob(oid)
         if lfs_pointer(data):
-            data = lfs_smudge(self.git, data, path, self.label)
+            key = ("lfs", oid)
+            if key not in self._memo:
+                self._memo[key] = lfs_smudge(self.git, data, path, self.label)
+            data = self._memo[key]
         return data
 
     def short(self, oid):
-        return out(self.git(["rev-parse", "--short", oid]))
+        """Abbreviated commit id (asked at once for many: shorts)."""
+        if ("short", oid) not in self._memo:
+            self.shorts([oid])
+        return self._memo[("short", oid)]
+
+    def shorts(self, revs):
+        """Abbreviated ids of these revisions with one `rev-parse --short`."""
+        revs = [r for r in dict.fromkeys(revs) if r and ("short", r) not in self._memo]
+        if not revs:
+            return
+        p = self.git(["rev-parse", "--short"] + revs, check=False)
+        lines = out(p).splitlines()
+        if p.returncode or len(lines) != len(revs):
+            for r in revs:      # one by one, so that a bad one fails on its own
+                self._memo[("short", r)] = out(self.git(["rev-parse", "--short", r]))
+            return
+        self._memo.update((("short", r), x) for r, x in zip(revs, lines))
 
     def is_ancestor(self, a, b):
         key = ("ancestor", a, b)
@@ -929,8 +967,11 @@ class Source:
         return out(self.git(["rev-list", "-1", rev, "--", lit(path)])) or rev
 
     def count(self, old, new, *paths):
-        return int(out(self.git(["rev-list", "--count", f"{old}..{new}", "--"]
-                                + [lit(p) for p in paths])))
+        key = ("count", old, new, paths)
+        if key not in self._memo:
+            self._memo[key] = int(out(self.git(["rev-list", "--count", f"{old}..{new}", "--"]
+                                               + [lit(p) for p in paths])))
+        return self._memo[key]
 
     def log(self, rng, *paths):
         return out(self.git(["log", "--reverse", "--format=- %s (%h)", rng, "--"]
@@ -1193,6 +1234,8 @@ class Repo:
         self._head = {}           # rel -> blob id in HEAD (None: not there)
         self._dirty = {}          # rel -> differs between HEAD and working tree
         self._plain = {}          # rel -> no content-changing attributes
+        self._raw = {}            # blob id -> content (read_blob)
+        self._local = {}          # (rel, content hash, size) -> blob id (as_local)
 
     def git(self, args, **kw):
         return git(args, cwd=self.top, **kw)
@@ -1298,7 +1341,9 @@ class Repo:
         return out(self.git(args))
 
     def read_blob(self, oid):
-        return self.git(["cat-file", "blob", oid]).stdout
+        if oid not in self._raw:
+            self._raw[oid] = self.git(["cat-file", "blob", oid]).stdout
+        return self._raw[oid]
 
     def read_content(self, oid, rel):
         """Actual content of a blob of this repo: LFS pointers are resolved."""
@@ -1326,14 +1371,49 @@ class Repo:
         """Blob id that upstream `content` gets when stored in this repo, i.e.
         after this repo's checkout and checkin conversion (eol normalization,
         LFS). Equals the upstream blob id unless the repos store it differently."""
-        work = self.to_worktree(content, rel)
-        return out(self.git(["hash-object", "-w", f"--path={rel}", "--stdin"], data=work))
+        key = (rel, hashlib.sha1(content).digest(), len(content))
+        if key not in self._local:
+            work = self.to_worktree(content, rel)
+            self._local[key] = out(self.git(["hash-object", "-w", f"--path={rel}", "--stdin"],
+                                            data=work))
+        return self._local[key]
 
     def normalize(self, content, rel):
         """Upstream content as this repo stores it, LFS resolved: the form all
         comparisons and merges use, whatever the eol conventions and LFS use
-        upstream and here."""
+        upstream and here. Plain content (no CR, no LFS pointer) of a file
+        without content-changing attributes is stored as it is (see
+        check_plain): no conversion needed."""
+        if self.is_plain(rel) and b"\r" not in content and not lfs_pointer(content):
+            return content
         return self.read_content(self.as_local(content, rel), rel)
+
+    def stage_and_check_out(self, files):
+        """Stage these [(rel, content)] - content in the form stored here -
+        and write them to the working tree, converted as on any checkout
+        (eol, attributes): three git commands for all of them, instead of
+        storing, converting and adding each file."""
+        if not files:
+            return
+        with tempfile.TemporaryDirectory(prefix="git-filesync-") as d:
+            paths = []
+            for i, (_, content) in enumerate(files):
+                paths.append(os.path.join(d, str(i)))
+                Path(paths[-1]).write_bytes(content)
+            oids = out(self.git(["hash-object", "-w", "--no-filters", "--stdin-paths"],
+                                data="".join(p + "\n" for p in paths).encode())).split()
+        rels = [rel for rel, _ in files]
+        modes = {}
+        p = self.git(["ls-files", "-s", "-z", "--"] + [lit(r) for r in rels], check=False)
+        for entry in p.stdout.decode("utf-8", "replace").split("\0"):
+            info, _, name = entry.partition("\t")
+            if name:
+                modes[name] = info.split(" ")[0]
+        info = "".join(f"{modes.get(rel, '100644')} {oid}\t{rel}\0"
+                       for rel, oid in zip(rels, oids))
+        self.git(["update-index", "-z", "--add", "--index-info"], data=info.encode())
+        self.git(["checkout-index", "-f", "-u", "-z", "--stdin"],
+                 data="".join(r + "\0" for r in rels).encode())
 
     def state_file(self, prefix, name):
         """.git/<prefix><name> for state kept between commands (name made
@@ -1352,6 +1432,70 @@ class Repo:
 # --------------------------------------------------------------------------
 # .git-filesync
 # --------------------------------------------------------------------------
+
+def config_value(value):
+    """value as written in a git config file: as it is if that's safe, else
+    quoted."""
+    if re.fullmatch(r'[^\s"\\#;](?:[^"\\#;\n]*[^\s"\\#;])?', value):
+        return value
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+
+
+def edit_registry(data, pending):
+    """The registry's bytes with pending ({(rel, key): value}) written into
+    the [file "rel"] sections: a value replaced in its `key = value` line,
+    a new key added at the end of its section, a new section appended.
+    None if the file isn't laid out simply enough for that (a section or key
+    twice, a value with quotes or a comment, keys on the header line)."""
+    lines = data.splitlines(keepends=True)
+    if lines and not lines[-1].endswith(b"\n"):
+        lines[-1] += b"\n"
+    sections, current, keys = {}, None, {}     # rel -> [first, last line]; (rel, key) -> line
+    for i, raw in enumerate(lines):
+        line = raw.decode("utf-8", "replace").rstrip("\r\n")
+        m = re.fullmatch(r'\s*\[\s*(?i:file)\s+"((?:[^"\\]|\\.)*)"\s*\]\s*', line)
+        if m:
+            current = re.sub(r"\\(.)", r"\1", m.group(1))
+            if current in sections:
+                return None
+            sections[current] = [i, i]
+            continue
+        if re.match(r"\s*\[", line):
+            current = None
+            continue
+        if current is None or not line.strip() or re.match(r"\s*[#;]", line):
+            continue
+        m = re.fullmatch(r"\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*?))?\s*", line)
+        if not m:
+            return None
+        key = (current, m.group(1).lower())
+        if key in keys or key in pending and m.group(2) is not None \
+                and m.group(2) != config_value(m.group(2)):
+            return None      # twice, or a value we wouldn't write like that
+        keys[key] = i
+        sections[current][1] = i
+    after, appended = {}, {}
+    for (rel, k), v in pending.items():
+        text = f"\t{k} = {config_value(v)}\n".encode()
+        if (rel, k) in keys:
+            i = keys[(rel, k)]
+            raw = lines[i]
+            lines[i] = raw[:len(raw) - len(raw.lstrip())] + text.lstrip(b"\t")[:-1] + \
+                raw[len(raw.rstrip(b"\r\n")):]
+        elif rel in sections:
+            after.setdefault(sections[rel][1], []).append(text)
+        else:
+            appended.setdefault(rel, []).append(text)
+    out_lines = []
+    for i, raw in enumerate(lines):
+        out_lines.append(raw)
+        out_lines += after.get(i, [])
+    for rel, texts in appended.items():
+        name = rel.replace("\\", "\\\\").replace('"', '\\"')
+        out_lines.append(f'[file "{name}"]\n'.encode())
+        out_lines += texts
+    return b"".join(out_lines)
+
 
 def parse_registry(raw):
     """({source: {key: value}}, {file: {key: value}}) from `git config --list -z`."""
@@ -1457,6 +1601,7 @@ class Registry:
         self.path = repo.top / REGISTRY
         self.sources, self.files = {}, {}
         self.dry_run = False      # only change the in-memory state
+        self._pending = {}        # (rel, key) -> new commit/blob id, see set_file
         if self.path.exists():
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
             if p.returncode:
@@ -1470,12 +1615,19 @@ class Registry:
     def _cfg(self, *args):
         if self.dry_run:
             return
+        self.flush()
         if not self.path.exists():
             self.path.write_bytes(REGISTRY_HEADER.encode())
         git(["config", "-f", self.path] + list(args))
 
     def set_file(self, rel, name, value):
-        """Set (value None: remove) a key of a [file]."""
+        """Set (value None: remove) a key of a [file]. Values are written
+        later, all at once (see flush) - pull, add and set change several
+        keys of many files."""
+        if value is not None and not self.dry_run:
+            self._pending[(rel, name)] = value
+            self.files.setdefault(rel, {})[name] = value
+            return
         if value is None:
             if name in self.files.get(rel, {}):
                 self._cfg("--unset-all", f"file.{rel}.{name}")
@@ -1564,8 +1716,29 @@ class Registry:
         self._cfg("--rename-section", f"file.{old}", f"file.{new}")
         self.files[new] = self.files.pop(old)
 
+    def flush(self):
+        """Write the pending [file] values (see set_file) at once, editing the
+        file directly instead of one `git config` per value - checked by
+        reading it back with git, which must give exactly the state here;
+        otherwise (an unusual layout of the file) value by value with git."""
+        pending, self._pending = self._pending, {}
+        if not pending:
+            return
+        original = self.path.read_bytes() if self.path.exists() \
+            else REGISTRY_HEADER.encode()
+        edited = edit_registry(original, pending)
+        if edited is not None:
+            self.path.write_bytes(edited)
+            p = git(["config", "-f", self.path, "--list", "-z"], check=False)
+            if p.returncode == 0 and parse_registry(p.stdout) == (self.sources, self.files):
+                return
+        self.path.write_bytes(original)
+        for (rel, k), v in pending.items():
+            git(["config", "-f", self.path, f"file.{rel}.{k}", v])
+
     def finish(self):
         """Fix line endings and stage the registry (or its removal when empty)."""
+        self.flush()
         if self.path.exists():
             if not self.sources and not self.files:
                 self.path.unlink()
@@ -1704,8 +1877,9 @@ class FileState:
     src: object = None        # Source of the upstream repository
     new: Optional[str] = None  # upstream commit and blob a pull would sync to
     new_blob: Optional[str] = None
-    count: int = 0            # upstream commits touching the file since the sync
-    behind: int = 0           # ... or by how many the branch went back
+    count_args: tuple = ()    # Source.count(*count_args): upstream commits touching
+    behind_args: tuple = ()   # the file since the sync, or by how many the branch
+                              # went back - counted only when shown (see count)
     has_old: bool = False     # synced commit exists upstream
     diverged: bool = False
     moved: Optional[tuple] = None   # ('renamed' | 'deleted', path, commit)
@@ -1719,6 +1893,16 @@ class FileState:
     violation: bool = False   # strict file modified
     once: Optional[str] = None  # pull -b/--tag: the branch or tag synced to, once
     target: Optional[str] = None    # ... and its commit
+
+
+def commits_since(st):
+    """Upstream commits touching the file since the sync (see evaluate)."""
+    return st.src.count(*st.count_args) if st.count_args else 0
+
+
+def commits_behind(st):
+    """By how many commits touching the file the branch went back."""
+    return st.src.count(*st.behind_args) if st.behind_args else 0
 
 
 def prefetch(ctx, repo, links):
@@ -1846,9 +2030,9 @@ def evaluate(ctx, repo, link):
         if st.new == st.old:
             pass
         elif src.is_ancestor(st.new, st.old):
-            st.behind = src.count(st.new, st.old, path)   # branch older than last sync
+            st.behind_args = (st.new, st.old, path)   # branch older than last sync
         else:
-            st.count = src.count(st.old, st.new, *dict.fromkeys((link.path, path)))
+            st.count_args = (st.old, st.new, *dict.fromkeys((link.path, path)))
             st.diverged = not src.is_ancestor(st.old, st.new)
     else:
         st.warnings.append(f"last synced commit {st.old[:12] or '-'} not found in "
@@ -1881,13 +2065,15 @@ def upstream_state(st):
         kind, path, commit = st.moved
         if kind == "deleted":
             return "deleted", f"upstream, by {st.src.short(commit)}"
-        return "renamed", f"{st.link.path} -> {path}" + (f", {plural(st.count, 'commit')}" if st.count else "")
+        n = commits_since(st)
+        return "renamed", f"{st.link.path} -> {path}" + (f", {plural(n, 'commit')}" if n else "")
     if st.changed:
-        if st.behind:
+        behind = commits_behind(st)
+        if behind:
             what = "upstream branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
-            return "older", f"{what} is {plural(st.behind, 'commit')} older than last sync"
+            return "older", f"{what} is {plural(behind, 'commit')} older than last sync"
         if st.has_old and not st.diverged:
-            return "pending", plural(st.count, "commit")
+            return "pending", plural(commits_since(st), "commit")
         return "changed", "history diverged" if st.has_old else "previous sync point unknown"
     if st.worktree == "missing":
         return "new", "not in the working tree yet"
@@ -2287,12 +2473,12 @@ def pull_one(repo, reg, st, args, check_entries):
     theirs = repo.normalize(src.read_content(new_blob, path), st.rel)
     merged, conflicts = False, 0
     if local_mod and not discard:
-        base = local_equiv(repo, src, st.old_blob, st.rel, link.path)
-        if not base:
+        try:
+            base = repo.normalize(src.read_content(st.old_blob, link.path), st.rel)
+        except FsError:
             raise FsError(f"{st.rel}: base version {st.old_blob[:12]} unavailable; "
                           "cannot merge local modifications")
-        base = repo.read_content(base, st.rel)
-        ours = repo.read_content(repo.worktree_blob(link.target, write=True), st.rel)
+        ours = repo.read_content(st.head_blob, st.rel)   # no uncommitted changes here
         old_label = src.short(st.old) if st.has_old else st.old_blob[:8]
         conflicts, content = merge3(ours, base, theirs,
                                     [f"{st.rel} (local)", f"upstream {old_label}",
@@ -2317,8 +2503,6 @@ def pull_one(repo, reg, st, args, check_entries):
         return None
 
     old_path = link.path
-    link.target.parent.mkdir(parents=True, exist_ok=True)
-    link.target.write_bytes(repo.to_worktree(content, st.rel))
     if path != old_path:
         link.set("path", path)
     link.set("commit", new)
@@ -2326,11 +2510,11 @@ def pull_one(repo, reg, st, args, check_entries):
     if conflicts:
         print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}")
     else:
-        repo.git(["add", "--", lit(st.rel)])
         print(f"{st.rel}: {paint('synced', 'green')}"
               + (" (adaptations merged)" if merged else ""))
+    # the file itself is written (and staged) with the others: write_synced
     return build_message(st, src, new, new_blob, old_path, path, merged, conflicts,
-                         discard), conflicts
+                         discard), conflicts, content
 
 
 def pull_message(parts, names):
@@ -2398,6 +2582,24 @@ def newest_hint(name, tag, line, newest):
             f"{newest_text(newest, line)} (use {switch.format(newest[0][0][0])})")
 
 
+def write_synced(repo, contents, conflicted):
+    """Write the synced files ({rel: content in this repository's stored
+    form}) to the working tree and stage them - those with merge conflicts
+    only written. Files without content-changing attributes go all at once
+    (see Repo.stage_and_check_out), the others one by one."""
+    at_once = [(rel, c) for rel, c in contents.items()
+               if rel not in conflicted and repo.is_plain(rel)]
+    repo.stage_and_check_out(at_once)
+    rest = [rel for rel in contents if rel not in dict(at_once)]
+    for rel in rest:
+        target = repo.top / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(repo.to_worktree(contents[rel], rel))
+    staged = [rel for rel in rest if rel not in conflicted]
+    if staged:
+        repo.git(["add", "--"] + [lit(r) for r in staged])
+
+
 def commit_pull(repo, reg, synced, args):
     """One commit for all files a pull synced, with their entries - none if
     a file has merge conflicts: then everything stays staged, and a plain
@@ -2430,8 +2632,17 @@ def cmd_pull(ctx, repo, args):
     once = args.branch or args.tag      # sync to another branch or tag, once
     prefetch(ctx, repo, links)
     newest, synced = {}, []             # synced: (rel, source, message, conflicts)
+    contents = {}                       # rel -> synced content (normalized form)
     selected = [lk.rel for lk in links]
     checked = []
+    states = [evaluate(ctx, repo, link) for link in links]
+    # what syncing needs, asked at once: upstream contents, short commit ids,
+    # attributes of the files here
+    repo.check_plain(selected)
+    for st in states:
+        if st.src and not st.error:
+            st.src.read_blobs([st.old_blob, st.new_blob])
+            st.src.shorts([st.old, st.new])
 
     def check_entries():
         """The commit takes .git-filesync along: other uncommitted entries
@@ -2439,8 +2650,7 @@ def cmd_pull(ctx, repo, args):
         if not checked:
             check_other_entries(reg, selected, args)
             checked.append(True)
-    for link in links:
-        st = evaluate(ctx, repo, link)
+    for link, st in zip(links, states):
         if st.error:
             report_error(st)
             rc = EXIT_ERROR
@@ -2459,12 +2669,14 @@ def cmd_pull(ctx, repo, args):
             before = link.commit
             result = pull_one(repo, reg, st, args, check_entries)
             if result:
-                synced.append((st.rel, link.name) + result)
+                synced.append((st.rel, link.name) + result[:2])
+                contents[st.rel] = result[2]
             moved = moved or once and Link(reg, link.rel).commit != before
         except FsError as e:   # report and carry on with the other files
             error(str(e) if str(e).startswith(st.rel) else f"{st.rel}: {e}")
             rc = EXIT_ERROR
     if synced:
+        write_synced(repo, contents, {rel for rel, _, _, c in synced if c})
         rc = max(rc, commit_pull(repo, reg, synced, args))
     if moved and not args.dry_run:
         opt = f"--tag {args.tag}" if args.tag else f"-b {args.branch}"
