@@ -1806,6 +1806,19 @@ else
   git commit -qam "adapt 9"
   check "status: adapted files cost no git calls each" "$([ "$(calls status)" -le "$((C60 + 3))" ] && echo yes)" "yes"
   check "status: adapted files reported" "$(git filesync status -s | grep -c '^ A ')" "9"
+  # diff, restore and pull compare, convert and write all files at once:
+  # 9 files cost (almost) no more git calls than one
+  D1=$(calls diff src/f1.c); D9=$(calls diff src)
+  check "diff: no git calls per file ($D1 / $D9)" "$([ "$D9" -le "$((D1 + 2))" ] && echo yes)" "yes"
+  R1=$(calls restore -SW src/f1.c); git reset -q --hard
+  R9=$(calls restore -SW src); git reset -q --hard
+  check "restore: no git calls per file ($R1 / $R9)" "$([ "$R9" -le "$((R1 + 2))" ] && echo yes)" "yes"
+  # pull: per file only what its upstream history needs (last change, log)
+  git reset -q --hard HEAD~1
+  (cd ../m21 && for i in $(seq 1 60); do echo "w$i" >> lib/f$i.c; done && git commit -qam w)
+  CP=$(calls pull --all --no-edit)
+  check "pull: few git calls per file ($CP for 60)" "$([ "$CP" -le $((60 * 3 + 30)) ] && echo yes)" "yes"
+  check "pull: all in one commit" "$(git log -1 --format=%s)" "[filesync] Sync 60 files from nowhere/m21"
 fi
 
 

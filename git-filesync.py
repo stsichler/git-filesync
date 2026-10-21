@@ -1378,42 +1378,180 @@ class Repo:
                                             data=work))
         return self._local[key]
 
+    def as_local_many(self, items):
+        """as_local() for many [(content, rel)] at once (see as_local): stored
+        as they are with one command, checked out into a temporary work
+        tree - with this repository's .gitattributes along the paths - and
+        added from there into a temporary index that holds this index's
+        entries (git's rule for CRLF already in the index), so that each
+        file is converted exactly as on a checkout and checkin here. Some
+        commands for all of them instead of three per file; whatever goes
+        wrong is left to as_local() one by one."""
+        todo, seen = [], set()
+        for content, rel in items:
+            key = (rel, hashlib.sha1(content).digest(), len(content))
+            if key not in self._local and key not in seen:
+                seen.add(key)
+                todo.append((key, content, rel))
+        while len(todo) > 1:
+            batch, rest, rels = [], [], set()     # a path only once per batch
+            for item in todo:
+                (rest if item[2] in rels else batch).append(item)
+                rels.add(item[2])
+            todo = rest
+            try:
+                self._as_local_batch(batch)
+            except (FsError, OSError):
+                return
+
+    def _as_local_batch(self, batch):
+        oids = self.store_many([content for _, content, _ in batch])
+        rels = [rel for _, _, rel in batch]
+        names = "".join(r + "\0" for r in rels).encode()
+        with tempfile.TemporaryDirectory(prefix="git-filesync-") as d:
+            wt = Path(d) / "wt"
+            wt.mkdir()
+            for rel in rels:      # the attributes that apply to rel
+                for parent in [Path(rel).parents[i] for i in range(len(Path(rel).parents))]:
+                    attrs = self.top / parent / ".gitattributes"
+                    if attrs.is_file() and not (wt / parent / ".gitattributes").exists():
+                        (wt / parent).mkdir(parents=True, exist_ok=True)
+                        shutil.copyfile(attrs, wt / parent / ".gitattributes")
+
+            def tmp_git(args, index, data):
+                env = dict(os.environ, GIT_DIR=str(self.gitdir), GIT_WORK_TREE=str(wt),
+                           GIT_INDEX_FILE=os.path.join(d, index))
+                return git(args, cwd=wt, env=env, data=data)
+            tmp_git(["update-index", "-z", "--add", "--index-info"], "checkout",
+                    "".join(f"100644 {o}\t{r}\0" for o, r in zip(oids, rels)).encode())
+            tmp_git(["checkout-index", "-f", "-z", "--stdin"], "checkout", names)
+            current = self.index_entries(rels)
+            if current:
+                tmp_git(["update-index", "-z", "--add", "--index-info"], "add",
+                        "".join(f"{m} {o}\t{r}\0" for r, (m, o) in current.items()).encode())
+            tmp_git(["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], "add",
+                    "".join(lit(r) + "\0" for r in rels).encode())
+            p = tmp_git(["ls-files", "-s", "-z"], "add", None)
+        found = {}
+        for entry in p.stdout.decode("utf-8", "replace").split("\0"):
+            info, _, name = entry.partition("\t")
+            if name:
+                found[name] = info.split(" ")[1]
+        for (key, _, rel) in batch:
+            if rel in found:
+                self._local[key] = found[rel]
+
+    def normalize_many(self, items):
+        """Prepare normalize() for many [(content, rel)] at once: the
+        conversions (as_local_many) and reading the results."""
+        items = [(c, r) for c, r in items if not self.plain_content(r, c)]
+        self.as_local_many(items)
+        self.read_blobs(self._local.get((r, hashlib.sha1(c).digest(), len(c)))
+                        for c, r in items)
+
+    def read_blobs(self, oids):
+        """Read these blobs of this repo with one `cat-file --batch`."""
+        for (_, oid), content in batch_read(self.git, oids, {("raw", o): 1 for o in self._raw}):
+            self._raw[oid] = content
+
     def normalize(self, content, rel):
         """Upstream content as this repo stores it, LFS resolved: the form all
         comparisons and merges use, whatever the eol conventions and LFS use
         upstream and here. Plain content (no CR, no LFS pointer) of a file
         without content-changing attributes is stored as it is (see
         check_plain): no conversion needed."""
-        if self.is_plain(rel) and b"\r" not in content and not lfs_pointer(content):
+        if self.plain_content(rel, content):
             return content
         return self.read_content(self.as_local(content, rel), rel)
 
-    def stage_and_check_out(self, files):
-        """Stage these [(rel, content)] - content in the form stored here -
-        and write them to the working tree, converted as on any checkout
-        (eol, attributes): three git commands for all of them, instead of
-        storing, converting and adding each file."""
-        if not files:
-            return
+    def store_many(self, contents):
+        """Store these contents as blobs, as they are, with one git command:
+        their ids."""
+        if not contents:
+            return []
         with tempfile.TemporaryDirectory(prefix="git-filesync-") as d:
             paths = []
-            for i, (_, content) in enumerate(files):
+            for i, content in enumerate(contents):
                 paths.append(os.path.join(d, str(i)))
                 Path(paths[-1]).write_bytes(content)
             oids = out(self.git(["hash-object", "-w", "--no-filters", "--stdin-paths"],
                                 data="".join(p + "\n" for p in paths).encode())).split()
-        rels = [rel for rel, _ in files]
-        modes = {}
+        if len(oids) != len(contents):
+            raise FsError("git hash-object gave an unexpected answer")
+        return oids
+
+    def index_entries(self, rels):
+        """{rel: (mode, blob id)} of these files in the index, one command."""
+        entries = {}
         p = self.git(["ls-files", "-s", "-z", "--"] + [lit(r) for r in rels], check=False)
         for entry in p.stdout.decode("utf-8", "replace").split("\0"):
             info, _, name = entry.partition("\t")
             if name:
-                modes[name] = info.split(" ")[0]
+                entries[name] = (info.split(" ")[0], info.split(" ")[1])
+        return entries
+
+    def write_files(self, files, stage=True, worktree=True):
+        """Put these [(rel, content)] - content in the form stored here - into
+        the index and/or the working tree, converted for it as on any
+        checkout (eol, attributes): a few git commands for all of them,
+        instead of storing, converting and adding each file. Only for files
+        without content-changing attributes (see check_plain): with LFS etc.
+        the index holds something else than the content."""
+        if files:
+            self.put_blobs(list(zip([rel for rel, _ in files],
+                                    self.store_many([c for _, c in files]))), stage, worktree)
+
+    def put_blobs(self, entries, stage=True, worktree=True):
+        """Put these [(rel, blob id)] - blobs as stored here (LFS pointers
+        too) - into the index and/or the working tree, where git converts
+        them as on any checkout: a few commands for all of them."""
+        if not entries:
+            return
+        rels, oids = [r for r, _ in entries], [o for _, o in entries]
+        modes = {r: e[0] for r, e in self.index_entries(rels).items()}
         info = "".join(f"{modes.get(rel, '100644')} {oid}\t{rel}\0"
-                       for rel, oid in zip(rels, oids))
-        self.git(["update-index", "-z", "--add", "--index-info"], data=info.encode())
-        self.git(["checkout-index", "-f", "-u", "-z", "--stdin"],
-                 data="".join(r + "\0" for r in rels).encode())
+                       for rel, oid in zip(rels, oids)).encode()
+        names = "".join(r + "\0" for r in rels).encode()
+        if stage:
+            self.git(["update-index", "-z", "--add", "--index-info"], data=info)
+        if worktree:
+            if stage:
+                self.git(["checkout-index", "-f", "-u", "-z", "--stdin"], data=names)
+            else:     # through an index of its own, so that this one stays as it is
+                with tempfile.TemporaryDirectory(prefix="git-filesync-") as d:
+                    env = dict(os.environ, GIT_INDEX_FILE=os.path.join(d, "index"))
+                    self.git(["update-index", "-z", "--add", "--index-info"], data=info,
+                             env=env)
+                    self.git(["checkout-index", "-f", "-z", "--stdin"], data=names, env=env)
+
+    def worktree_blobs(self, rels):
+        """{rel: blob id} of these working tree files as git would store them
+        (clean-filtered), via a temporary index - with this index's entries,
+        for git's rule on CRLF already in the index - instead of a
+        hash-object each. Writes the blobs: for reading commands (scratch)."""
+        rels = [r for r in rels if (self.top / r).is_file()]
+        if not rels:
+            return {}
+        with tempfile.TemporaryDirectory(prefix="git-filesync-") as d:
+            env = dict(os.environ, GIT_INDEX_FILE=os.path.join(d, "index"))
+            current = self.index_entries(rels)
+            if current:
+                self.git(["update-index", "-z", "--add", "--index-info"], env=env,
+                         data="".join(f"{m} {o}\t{r}\0" for r, (m, o) in current.items()).encode())
+            self.git(["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], env=env,
+                     data="".join(lit(r) + "\0" for r in rels).encode())
+            p = self.git(["ls-files", "-s", "-z"], env=env)
+        found = {}
+        for entry in p.stdout.decode("utf-8", "replace").split("\0"):
+            info, _, name = entry.partition("\t")
+            if name in rels:
+                found[name] = info.split(" ")[1]
+        return found
+
+    def plain_content(self, rel, data):
+        """Is data, as a file at rel, stored as it is - no content-changing
+        attributes, no CR, no LFS pointer? (see check_plain)"""
+        return bool(self.is_plain(rel)) and b"\r" not in data and not lfs_pointer(data)
 
     def state_file(self, prefix, name):
         """.git/<prefix><name> for state kept between commands (name made
@@ -1933,11 +2071,17 @@ def prefetch(ctx, repo, links):
     if differ:
         repo.check_plain(lk.rel for lk in differ)
         ids = {id(lk) for lk in differ}
+        items = []
         for src, lks in groups.values():
             try:
                 src.check_plain(lk.blob for lk in lks if id(lk) in ids)
+                # those not comparable without git's filters: converted at once
+                items += [(src.read_content(lk.blob, lk.path), lk.rel) for lk in lks
+                          if id(lk) in ids and not (repo.is_plain(lk.rel)
+                                                   and src.is_plain(lk.blob))]
             except FsError:
                 pass
+        repo.as_local_many(items)
 
 
 def evaluate(ctx, repo, link):
@@ -2586,11 +2730,13 @@ def write_synced(repo, contents, conflicted):
     """Write the synced files ({rel: content in this repository's stored
     form}) to the working tree and stage them - those with merge conflicts
     only written. Files without content-changing attributes go all at once
-    (see Repo.stage_and_check_out), the others one by one."""
+    (see Repo.write_files), the others one by one."""
     at_once = [(rel, c) for rel, c in contents.items()
                if rel not in conflicted and repo.is_plain(rel)]
-    repo.stage_and_check_out(at_once)
-    rest = [rel for rel in contents if rel not in dict(at_once)]
+    repo.write_files(at_once)
+    markers = [(rel, c) for rel, c in contents.items() if rel in conflicted and repo.is_plain(rel)]
+    repo.write_files(markers, stage=False)
+    rest = [rel for rel in contents if rel not in dict(at_once) and rel not in dict(markers)]
     for rel in rest:
         target = repo.top / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -2639,10 +2785,18 @@ def cmd_pull(ctx, repo, args):
     # what syncing needs, asked at once: upstream contents, short commit ids,
     # attributes of the files here
     repo.check_plain(selected)
-    for st in states:
-        if st.src and not st.error:
-            st.src.read_blobs([st.old_blob, st.new_blob])
-            st.src.shorts([st.old, st.new])
+    items = []
+    ok = [st for st in states if st.src and not st.error]
+    for src in {id(st.src): st.src for st in ok}.values():
+        src.read_blobs(b for st in ok if st.src is src for b in (st.old_blob, st.new_blob))
+        src.shorts(c for st in ok if st.src is src for c in (st.old, st.new))
+    for st in ok:
+        try:
+            if st.new_blob and st.new_blob != st.old_blob:
+                items.append((st.src.read_content(st.new_blob, st.new_path), st.rel))
+        except FsError:
+            pass
+    repo.normalize_many(items)
 
     def check_entries():
         """The commit takes .git-filesync along: other uncommitted entries
@@ -2703,8 +2857,24 @@ def diff_pairs(ctx, repo, args):
     links = select_links(repo, reg, args.files)
     check_target_args(args, links)
     prefetch(ctx, repo, links)
-    for link in links:
-        st = evaluate(ctx, repo, link)
+    repo.check_plain(lk.rel for lk in links)
+    states = [evaluate(ctx, repo, link) for link in links]
+    if args.upstream and not (args.commit or args.branch or args.tag):
+        items = []
+        for st in states:
+            if st.src and not st.error and st.new_blob and st.new_blob != st.old_blob:
+                try:
+                    items.append((st.src.read_content(st.new_blob, st.new_path), st.rel))
+                except FsError:
+                    pass
+        repo.normalize_many(items)
+    worktree_ids = {}
+    if not (args.upstream or args.committed):     # the working tree files, read at once
+        worktree_ids = repo.worktree_blobs(
+            st.rel for st in states if not st.error and st.local not in ("clean", "missing")
+            and not repo.plain_content(st.rel, st.link.target.read_bytes()))
+        repo.read_blobs(worktree_ids.values())
+    for link, st in zip(links, states):
         if st.error:
             report_error(st)
             rc = EXIT_ERROR
@@ -2725,27 +2895,34 @@ def diff_pairs(ctx, repo, args):
                 continue
         elif st.local == "clean":
             continue
+        # both sides as actual content in this repo's form (LFS resolved),
+        # stored all at once below
         try:
-            base = local_equiv(repo, st.src, st.old_blob, st.rel, link.path)
-            if not base:
+            try:
+                base = repo.normalize(st.src.read_content(st.old_blob, link.path), st.rel)
+            except FsError:
                 raise FsError(f"synced version {st.old_blob[:12]} unavailable")
-            base = repo.content_id(base, st.rel)
             if args.upstream:
-                other = repo.store(repo.normalize(st.src.read_content(st.new_blob,
-                                                                        st.new_path), st.rel))
+                other = repo.normalize(st.src.read_content(st.new_blob, st.new_path), st.rel)
             elif args.committed:
-                other = repo.content_id(st.head_blob, st.rel)
+                other = repo.read_content(st.head_blob, st.rel)
             elif st.local == "missing":
                 other = None
             else:
-                other = repo.content_id(repo.worktree_blob(link.target, write=True), st.rel)
+                data = link.target.read_bytes()
+                other = data if repo.plain_content(st.rel, data) else repo.read_content(
+                    worktree_ids.get(st.rel) or repo.worktree_blob(link.target, write=True),
+                    st.rel)
         except FsError as e:
             error(f"{st.rel}: {e}")
             rc = EXIT_ERROR
             continue
         name = link.path if args.for_upstream else st.rel
         pairs.append((st, name, base, other))
-    return rc, pairs
+    contents = [c for _, _, base, other in pairs for c in (base, other) if c is not None]
+    ids = dict(zip(map(id, contents), repo.store_many(contents)))
+    return rc, [(st, name, ids[id(base)], ids[id(other)] if other is not None else None)
+                for st, name, base, other in pairs]
 
 
 def make_tree(repo, entries):
@@ -3023,6 +3200,9 @@ def cmd_add(ctx, repo, args):
                   f"{note}, based on {src.short(p.commit)}")
         return EXIT_OK
 
+    repo.check_plain(rels)
+    repo.normalize_many([(p.content, p.rel) for p in plan if p.content is not None])
+    fetched = []          # (rel, content in this repository's form) to write
     for p in plan:
         if p.rel in reg.files:
             reg.remove_file(p.rel, keep_source=named)
@@ -3033,11 +3213,19 @@ def cmd_add(ctx, repo, args):
         if args.strict:
             link.set("strict", "true")
         if p.content is not None:
-            link.target.parent.mkdir(parents=True, exist_ok=True)
-            link.target.write_bytes(repo.to_worktree(repo.normalize(p.content, p.rel), p.rel))
-        # the link commit contains the file as it is in the working tree
-        repo.git(["add", "--", lit(p.rel)])
+            fetched.append((p.rel, repo.normalize(p.content, p.rel)))
         print(f"{paint('linked', 'green')} {p.rel} -> {name}:{p.path} ({shown_ref})")
+    # fetched files written and staged at once where possible; the link
+    # commit contains each file as it is in the working tree
+    at_once = [(r, c) for r, c in fetched if repo.is_plain(r)]
+    repo.write_files(at_once)
+    done = {r for r, _ in at_once}
+    for r, c in fetched:
+        if r not in done:
+            (repo.top / r).parent.mkdir(parents=True, exist_ok=True)
+            (repo.top / r).write_bytes(repo.to_worktree(c, r))
+    if any(r not in done for r in rels):
+        repo.git(["add", "--"] + [lit(r) for r in rels if r not in done])
     reg.finish()
     if repo.git(["diff", "--cached", "--quiet", "HEAD", "--"] + [lit(r) for r in rels]
                  + [REGISTRY], check=False).returncode == 0:
@@ -3082,6 +3270,10 @@ def plan_dir(repo, reg, src, args, at, rel, path, target):
         if not skipped:
             print(f"no files to link below '{path or '/'}' in {src.label}")
         return [], False
+    # asked at once: the blobs, and the contents of the files to fetch
+    src.blobs_at(at, [p for _, p in todo])
+    src.read_blobs([src.blob_at(at, p) for r, p in todo
+                    if args.overwrite or not (repo.top / r).is_file()])
     plan = [Planned(r, p, *find_base(repo, src, at, r, p, repo.top / r, args.overwrite))
             for r, p in todo]
     return plan, any(r in reg.files for r, _ in todo)
@@ -3100,37 +3292,87 @@ def index_entry(repo, rel):
 def cmd_restore(ctx, repo, args):
     """Like `git restore`, with the synced upstream version (the base the
     entry records) as the source: the working tree files (default), with -S
-    their index entries instead, with -S -W both. .git-filesync stays as it is."""
+    their index entries instead, with -S -W both. .git-filesync stays as it is.
+    The files are written all at once (see Repo.put_blobs); plain content
+    of files without content-changing attributes is compared without git."""
     reg = Registry(repo)
     links = select_links(repo, reg, args.files)
     worktree = args.worktree or not args.staged
     done = "restored and staged" if worktree and args.staged else \
         "restored in the index" if args.staged else "restored"
     rc = EXIT_OK
+    srcs, bases = {}, {}           # rel -> Source, base content in this repo's form
+    repo.check_plain(lk.rel for lk in links)
     for link in links:
         try:
-            src = ctx.source(link.url, link.ref, link.name, link.line)
-            base = local_equiv(repo, src, link.blob, link.rel, link.path)
-            if not base:
-                raise FsError(f"{link.rel}: base version {link.blob[:12]} unavailable")
-            fix_tree = worktree and repo.worktree_blob(link.target) != base
-            mode, staged = index_entry(repo, link.rel) if args.staged else (None, None)
+            srcs[link.rel] = ctx.source(link.url, link.ref, link.name, link.line)
+        except FsError as e:
+            error(str(e))
+            rc = EXIT_ERROR
+    for src in {id(s): s for s in srcs.values()}.values():
+        src.read_blobs(lk.blob for lk in links if srcs.get(lk.rel) is src)
+        src.shorts(lk.commit for lk in links if srcs.get(lk.rel) is src)
+    for link in links:
+        if link.rel not in srcs:
+            continue
+        try:
+            content = srcs[link.rel].read_content(link.blob, link.path)
+            if repo.plain_content(link.rel, content):
+                bases[link.rel] = content
+        except FsError:
+            pass          # the file goes the long way, which reports it
+    items = []
+    for lk in links:
+        if lk.rel in srcs and lk.rel not in bases:
+            try:
+                items.append((srcs[lk.rel].read_content(lk.blob, lk.path), lk.rel))
+            except FsError:
+                pass
+    repo.as_local_many(items)
+    plain = [lk for lk in links if lk.rel in bases]
+    oids = dict(zip([lk.rel for lk in plain], repo.store_many([bases[lk.rel] for lk in plain])))
+    index = repo.index_entries([lk.rel for lk in links]) if args.staged else {}
+    at_once, said = [], []         # said: what to print, in the order of the files
+    for link in links:
+        if link.rel not in srcs:
+            continue
+        src = srcs[link.rel]
+        try:
+            if link.rel in bases:
+                base = oids[link.rel]
+                data = link.target.read_bytes() if link.target.is_file() else None
+                # differs if not the same without CR (eol conversion aside)
+                cur = None if data is None else base if data == bases[link.rel] else \
+                    "" if repo.plain_content(link.rel, data) else repo.worktree_blob(link.target)
+            else:
+                base = local_equiv(repo, src, link.blob, link.rel, link.path)
+                if not base:
+                    raise FsError(f"{link.rel}: base version {link.blob[:12]} unavailable")
+                cur = repo.worktree_blob(link.target)
+            fix_tree = worktree and cur != base
+            mode, staged = index.get(link.rel, ("100644", None))
             fix_index = args.staged and staged != base
             if not (fix_tree or fix_index):
-                print(f"{link.rel}: nothing to restore")
+                said.append(f"{link.rel}: nothing to restore")
                 continue
-            if fix_tree:
-                link.target.parent.mkdir(parents=True, exist_ok=True)
-                link.target.write_bytes(repo.to_worktree(repo.read_content(base, link.rel),
-                                                         link.rel))
-            if fix_index:
-                repo.git(["update-index", "--add", "--cacheinfo", f"{mode},{base},{link.rel}"])
+            if (fix_tree or not worktree) and (fix_index or not args.staged):
+                at_once.append((link, base))       # written below, all at once
+            else:
+                if fix_tree:
+                    link.target.parent.mkdir(parents=True, exist_ok=True)
+                    link.target.write_bytes(repo.to_worktree(repo.read_content(base, link.rel),
+                                                             link.rel))
+                if fix_index:
+                    repo.git(["update-index", "--add", "--cacheinfo",
+                              f"{mode},{base},{link.rel}"])
+            at = src.short(link.commit) if link.commit else link.blob[:8]
+            said.append(f"{link.rel}: {paint(done, 'green')} ({link.name}@{at})")
         except FsError as e:   # report and carry on with the other files
             error(str(e))
             rc = EXIT_ERROR
-            continue
-        at = src.short(link.commit) if link.commit else link.blob[:8]
-        print(f"{link.rel}: {paint(done, 'green')} ({link.name}@{at})")
+    repo.put_blobs([(lk.rel, oid) for lk, oid in at_once], stage=args.staged, worktree=worktree)
+    for line in said:
+        print(line)
     return rc
 
 
