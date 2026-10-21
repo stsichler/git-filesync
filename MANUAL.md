@@ -172,6 +172,11 @@ stages, like `git merge --no-commit`. `add` and `pull --no-commit` prepare a
 proposed commit message that a plain `git commit` offers (see [Proposed
 commit messages](#proposed-commit-messages)).
 
+The reading commands – `status`, `diff`, `difftool`, `source` (listing) and
+the hooks – change nothing in the repository: even the Git objects they
+need to compare files in this repository's form, or to build the trees for
+`diff`, go into a temporary object directory that is removed afterwards.
+
 `git filesync` without a command runs `status`.
 
 Paths are relative to the current directory – the ones you give, and the

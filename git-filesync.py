@@ -243,6 +243,7 @@ import tempfile
 import textwrap
 import time
 from collections import namedtuple
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path, PureWindowsPath
@@ -337,7 +338,7 @@ def clean_env():
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
         names = set(p.stdout.decode().split()) if p.returncode == 0 else set()
         names |= {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX",
-                  "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY"}
+                  "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES"}
         _clean_env = {k: v for k, v in os.environ.items() if k not in names}
     return _clean_env
 
@@ -1173,6 +1174,32 @@ class Repo:
 
     def git(self, args, **kw):
         return git(args, cwd=self.top, **kw)
+
+    @contextmanager
+    def scratch(self):
+        """For commands that only read (status, diff, hooks): the objects
+        that comparing in this repository's form or building trees for diff
+        writes go to a temporary object directory - the repository's own
+        stay readable as an alternate - which is removed afterwards. So
+        nothing is written into .git/objects."""
+        names = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        saved = {k: os.environ.get(k) for k in names}
+        objects = saved["GIT_OBJECT_DIRECTORY"] or str(
+            self.top / out(self.git(["rev-parse", "--git-path", "objects"])))
+        alternates = [objects] + ([saved["GIT_ALTERNATE_OBJECT_DIRECTORIES"]]
+                                  if saved["GIT_ALTERNATE_OBJECT_DIRECTORIES"] else [])
+        tmp = tempfile.mkdtemp(prefix="git-filesync-objects-")
+        os.environ["GIT_OBJECT_DIRECTORY"] = tmp
+        os.environ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = os.pathsep.join(alternates)
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            rmtree(tmp)
 
     def prefetch(self, rels):
         """Ask at once, for many files, what head_blob() and is_modified()
@@ -3800,11 +3827,14 @@ def main(argv=None):
         if args.cmd == "hook":
             args.no_fetch = args.name == "post-merge"    # pre-push: online anyway
         ctx = Context(args, repo)
-        return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
-                "edit": cmd_edit,
-                "restore": cmd_restore, "rm": cmd_rm, "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
-                "diff": cmd_diff, "difftool": cmd_difftool,
-                "hook": cmd_hook}[args.cmd](ctx, repo, args)
+        reading = args.cmd in ("status", "diff", "difftool", "hook") or \
+            args.cmd == "source" and not args.action
+        with repo.scratch() if reading else nullcontext():
+            return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
+                    "edit": cmd_edit, "restore": cmd_restore, "rm": cmd_rm,
+                    "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
+                    "diff": cmd_diff, "difftool": cmd_difftool,
+                    "hook": cmd_hook}[args.cmd](ctx, repo, args)
     except FsError as e:
         error(str(e))
         return EXIT_ERROR

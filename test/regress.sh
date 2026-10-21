@@ -392,6 +392,15 @@ for mode in autocrlf textauto plain; do
   check "$mode: merged content" "$(git show HEAD:w.c | tr -d '\r' | oneline)" "A B c D-local "
   check "$mode: worktree clean" "$(git status --porcelain)" ""
 
+  # status, diff and the hooks only read: they leave .git/objects alone, also
+  # where they compare in this repository's form - checked in a fresh clone,
+  # which lacks that form of the synced version (merged above)
+  git clone -q --no-local . ../s2 && cd ../s2
+  OBJ=$(git count-objects | cut -d' ' -f1)
+  quiet git filesync status; quiet git filesync diff; quiet git filesync hook post-merge 0
+  check "$mode: status, diff, hook write no objects" "$(git count-objects | cut -d' ' -f1)" "$OBJ"
+  cd ../s; rm -rf ../s2
+
   # reset the upstream for the next mode
   cd ..
   git -C m reset -q --hard HEAD~2
