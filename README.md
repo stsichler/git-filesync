@@ -81,7 +81,7 @@ afterwards.
   `.git-filesync`, at its root (git-config format, like `.gitmodules`)
 - Self-contained repositories: linked files are committed copies, so a clone is
   complete without fetching anything from other repositories
-- Follows an upstream branch, or is pinned to a tag (e.g. a release) –
+- Follows an upstream branch, or is pinned to a tag per file (e.g. a release) –
   with a hint at newer tags – or follows the newest tag matching a pattern
   (`v1.*`); `pull --tag` tries another tag once
 - Proposed commit message lists all upstream commits touching the file since
@@ -183,7 +183,7 @@ Advanced commands:
 |---|---|
 | `set PATH… OPTIONS` | change source, upstream path or strict of linked files |
 | `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
-| `source [ACTION …]` | list sources; rename, change URL, branch or tag |
+| `source [ACTION …]` | list and add sources; rename, change URL or branch |
 | `source map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
 | `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear |
 | `hooks [install\|uninstall]` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |

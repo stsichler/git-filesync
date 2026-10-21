@@ -56,24 +56,27 @@ file. Git-config format:
 	strict = true          # optional, see below
 	commit = …
 	blob = …
-[source "owner/lib-2"]
-	url = https://github.com/owner/lib.git
-	tag = v1.2.0           # pinned to a tag instead of following a branch
-	branch = main          # optional: where newer tags are looked for
+[file "cfg/x.yml"]
+	source = owner/lib
+	path = cfg/x.yml
+	tag = v1.2.0           # optional: pinned to a tag instead of following the branch
+	commit = …
+	blob = …
 ```
 
-- A `[source]` names an upstream repository and either a branch it follows or
-  a tag it is [pinned](#pinning-to-a-tag) to – the latter optionally with
-  the branch on which [newer tags](#newer-tags) are looked for. `add` with
-  a URL reuses an existing source only if URL *and* branch/tag match (with
-  `--tag` but no `-b`: a source pinned to that tag, whatever its branch),
-  and creates one otherwise; `add` with the name of a source uses exactly
-  that source. A new source is
-  named `owner/repo` after its URL; if that name is already taken by another
-  URL, branch or tag, a number is appended (`owner/repo-2`, …). Rename it
-  with [`source rename`](#source); `status`, `add` and the commit messages
-  of `pull` show it.
-- `[file]` sections are keyed by the path in the downstream repository.
+- A `[source]` names an upstream repository and the branch its files follow,
+  like a remote with its branch. `add` with a URL reuses an existing source
+  only if URL *and* branch match, and creates one otherwise; `add` with the
+  name of a source uses exactly that source. A new source is named
+  `owner/repo` after its URL; if that name is already taken by another URL
+  or branch, a number is appended (`owner/repo-2`, …). Rename it with
+  [`source rename`](#source); `status`, `add` and the commit messages of
+  `pull` show it.
+- `[file]` sections are keyed by the path in the downstream repository. A
+  `tag` in one [pins](#pinning-to-a-tag) that file to an upstream tag (or
+  the newest tag matching a pattern); the source's branch is then where
+  [newer tags](#newer-tags) are looked for. Up to 0.13 the tag was a key of
+  the `[source]`; such an entry is now an error, to be fixed by hand.
 - `commit` and `blob` are maintained by the tool: `blob` is the synced
   version of the upstream file, `commit` the upstream commit that last changed
   it (not the branch tip at sync time). One file version thus always gives
@@ -82,7 +85,8 @@ file. Git-config format:
 - Everything else may be edited by hand – with [`edit`](#edit), or e.g.
   `git config -f .git-filesync file.src/foo.c.path lib/new_name.c` (a file
   renamed upstream is [followed by `pull`](#files-renamed-or-deleted-upstream)
-  anyway). [`source`](#source) changes URL, branch and tag of a source.
+  anyway). [`source`](#source) changes URL and branch of a source,
+  [`set`](#set) the source and tag of files.
 - When the last link is removed, the file is deleted.
 - File paths must lie inside the working tree. Entries pointing outside it
   (`..`, absolute paths) or into a `.git` directory are reported as errors
@@ -151,7 +155,7 @@ Basic commands – what you need day to day:
 |---|---|
 | [`set PATH… OPTIONS`](#set) | change the link of linked files: source, upstream path, strict |
 | [`edit`](#edit) | edit `.git-filesync` in the editor |
-| [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
+| [`source [ACTION …]`](#source) | list and add sources, rename them, change URL or branch |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
 | [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear |
 | [`hooks [ACTION]`](#hooks) | the hooks: show, install, remove; reminders, push check |
@@ -199,7 +203,7 @@ the command and lists them.
 | Option | Effect |
 |---|---|
 | `-s`, `--short` | short format, three columns |
-| `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one also the [newer tags](#newer-tags) of upstream |
+| `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one also the [newer tags](#newer-tags) on the source's branch |
 | `--exit-code` | exit with 1 if something is to sync or a strict file is modified |
 
 `status` looks at each linked file in three independent respects:
@@ -327,11 +331,11 @@ therefore refuses to commit while `.git-filesync` has uncommitted changes
 for other files – commit those first (e.g. after [`add`](#add)), or use
 `--no-commit` to stage everything and commit it together.
 
-For files of a source [pinned to a tag](#pinning-to-a-tag), `pull` ends with
-a hint if upstream has [newer tags](#newer-tags):
+For files [pinned to a tag](#pinning-to-a-tag), `pull` ends with a hint if
+upstream has [newer tags](#newer-tags) on the source's branch:
 
 ```
-hint: owner/lib is pinned to tag v1.2.0; the newest tag on branch main is v1.4.0 (use 'git filesync source set-tag owner/lib v1.4.0' and pull to switch)
+hint: 3 files pinned to tag v1.2.0; the newest tag on branch main is v1.4.0 (use 'git filesync set --tag v1.4.0 <file>...' and pull to switch)
 ```
 
 A file **renamed upstream** is followed: `pull` takes the new path into
@@ -354,9 +358,10 @@ hint: the links still follow their own branch or tag, so a plain pull goes back;
 
 `status` then shows the files as `older` (their own tag is older than the
 synced version) or `pending`, and a plain `pull` syncs them back. To switch
-for good, change what the files follow – [`set -b` / `--tag`](#set) for
-some files, [`source set-branch` / `set-tag`](#source) for a whole source –
-and then `pull`.
+for good, change what the files follow, then `pull`: their tag with
+[`set --tag`](#set); their branch with [`source set-branch`](#source) for
+all files of a source, or by moving files to a source on that branch
+(`set FILE… --source NAME`, after `source add NAME URL -b BRANCH` if needed).
 
 With `--all`, every file is synced, also those up to date with their own
 branch or tag. A branch or tag that doesn't exist upstream is refused; `-b`
@@ -462,22 +467,23 @@ usual, back to the committed state, adaptations included.
 its URL or by the name of a `[source]` already in `.git-filesync`:
 
 - **URL**: the file joins an existing source only if the URL and the
-  branch or tag (`-b`, `--tag`, default: the upstream default branch) both
-  match – with `--tag` but no `-b`, a source pinned to that tag is taken
-  whatever branch it looks for newer tags on; otherwise a new source is
-  created.
-- **Name of a source**: the file joins exactly this source, whether it
-  follows a branch or is pinned to a tag. `-b` / `--tag` are not needed; if
-  given, they must match the source (otherwise `add` refuses – give the URL
-  to link to another branch or tag).
+  branch (`-b`, default: the upstream default branch) both match;
+  otherwise a new source is created.
+- **Name of a source**: the file joins exactly this source. `-b` is not
+  needed; if given, it must be the source's branch (otherwise `add` refuses
+  – give the URL to link to another branch).
+
+With `--tag`, the file is [pinned](#pinning-to-a-tag) to that tag (the tag
+goes into its `[file]` entry); the source and its branch are found as
+above.
 
 `add DIR URL|SOURCE` – the same for every file below an upstream
 directory (see [below](#linking-a-directory)).
 
 | Option | Effect |
 |---|---|
-| `-b`, `--branch BRANCH` | upstream branch; default: the upstream default branch, or the branch/tag of the given `[source]`. With `--tag`: the branch to look for [newer tags](#newer-tags) on (a warning if the tag isn't on it) |
-| `--tag TAG` | [pin](#pinning-to-a-tag) to an upstream tag instead of following a branch |
+| `-b`, `--branch BRANCH` | the source's upstream branch; default: the upstream default branch, or the branch of the given `[source]`. For a pinned file the branch to look for [newer tags](#newer-tags) on (a warning if the tag isn't on it) |
+| `--tag TAG` | [pin](#pinning-to-a-tag) the file to an upstream tag instead of following the branch; a [pattern](#tag-patterns): the newest matching tag on the branch |
 | `-p`, `--path PATH` | upstream path; default: the same as FILE or DIR (`/`: the upstream root). Backslashes count as `/`, e.g. in a path copied from a checkout on Windows |
 | `--include PATTERN` | directory: only files matching PATTERN; repeatable |
 | `--exclude PATTERN` | directory: skip files matching PATTERN; repeatable, beats `--include` |
@@ -585,30 +591,27 @@ what would be moved.
 ### `set`
 
 `set PATH… OPTIONS` – change the link of linked files: their source, their
-upstream path, whether they are strict. It does for files what
+tag, their upstream path, whether they are strict. It does for files what
 [`source`](#source) does for sources: only `.git-filesync` is changed (and
 staged); `status` then shows what changes, and `pull` syncs.
 
 | Option | Effect |
 |---|---|
-| `--source URL\|SOURCE` | link to another upstream repository – a fork, a moved repository – or to another `[source]`. URL, name and `-b` / `--tag` are taken as for [`add`](#add). If the files are all files of their source and there is no source with that URL and branch or tag yet, the source itself is changed; otherwise they move to that source (created if necessary), and a source left without files is removed |
-| `-b`, `--branch BRANCH` | with `--source`: as for `add`; without: the files follow BRANCH from now on (`pull` then syncs them) |
-| `--tag TAG` | with `--source`: as for `add`; without: [pin](#pinning-to-a-tag) the files to TAG from now on; the source's branch (or `-b`) stays the one to look for [newer tags](#newer-tags) on |
+| `--source URL\|SOURCE` | move the files to another `[source]`, or to the one for this URL with its default branch (created if necessary) – a fork, a moved repository. A source left without files is removed. For another branch of the same upstream: `source add NAME URL -b BRANCH`, then `set … --source NAME` |
+| `--tag TAG` | [pin](#pinning-to-a-tag) the files to TAG (or a [pattern](#tag-patterns)) from now on; the source's branch is where [newer tags](#newer-tags) are looked for. A tag that doesn't exist upstream is refused |
+| `--no-tag` | follow the source's branch again |
 | `-p`, `--path PATH` | another upstream path (exactly one file; `\` counts as `/`, as for `add`) |
 | `--strict`, `--no-strict` | mark the files as [strict](#strict-files), or allow adaptations again |
 | `-n`, `--dry-run` | only show what would change |
 
-With `-b` / `--tag` (without `--source`): if the files are all files of
-their source, the source itself is changed, as with [`source
-set-branch` / `set-tag`](#source); otherwise they move to the source with
-the same URL and the new branch or tag – an existing one, or a new one
-(`owner/lib-2`) – and the others stay where they are. A source left without
-files is removed.
+The branch belongs to the source: [`source set-branch`](#source) changes it
+for all of its files.
 
 The synced version the files are based on (`commit` / `blob`) is kept where
 it still applies, so adaptations stay adaptations:
 
-- **another branch or tag** of the same upstream: kept as it is;
+- **another tag, or a source on another branch** of the same upstream:
+  kept as it is;
 - **another upstream** (`--source` with another URL): kept if that one has
   it – the recorded commit, or else the newest commit on its branch with the
   same version of the file (e.g. a copy with a history of its own).
@@ -623,6 +626,7 @@ git filesync set src/foo.c --strict
 git filesync set src/ --source https://github.com/me/lib-fork.git    # all files below src/
 git filesync set src/foo.c -p lib/foo_v2.c
 git filesync set cfg/ --tag v1.3.0      # pin to v1.3.0 from now on; then pull
+git filesync set cfg/ --no-tag          # follow the branch again
 ```
 
 ### `edit`
@@ -634,45 +638,42 @@ checked and staged, like after [`set`](#set):
 - If it can no longer be read, `edit` fails and stages nothing; run it
   again to fix the file.
 - Gaps that `status` would report – a file whose `[source]` doesn't exist,
-  a source without `url` or without branch and tag, a file without `path`,
+  a source without `url` or without branch (or with a tag, as before 0.14), a file without `path`,
   `commit` or `blob`, a source no file uses – are shown as warnings.
 - Without changes, nothing happens.
 
 For the usual changes, the commands that know what they mean are safer:
-[`set`](#set) (source, path, strict of files), [`source`](#source) (URL,
-branch, tag, name of a source), [`rm`](#rm), [`unlink`](#unlink), [`mv`](#mv). `edit`
+[`set`](#set) (source, tag, path, strict of files), [`source`](#source) (URL,
+branch, name of a source), [`rm`](#rm), [`unlink`](#unlink), [`mv`](#mv). `edit`
 keeps whatever you write: a changed `commit` or `blob` changes what counts
 as an adaptation.
 
 ### `source`
 
-`source [ACTION …]` – list and change the `[source]` sections, like
+`source [ACTION …]` – list, add and change the `[source]` sections, like
 `git remote`. Only `.git-filesync` is changed (and staged); commit it on its
 own, or it goes into the next sync commit.
 
 | Command | Effect |
 |---|---|
-| `source` | list the source names (`-v`: with URL, branch or tag – for a tag also the [newer tags](#newer-tags) of upstream – and number of linked files) |
+| `source` | list the source names (`-v`: with URL, branch and number of linked files) |
+| `source add NAME URL [-b BRANCH]` | add a source (default branch: the upstream default branch), e.g. to move files to another branch: `set FILE… --source NAME` |
 | `source rename OLD NEW` | rename a source, including every `source =` line |
 | `source set-url NAME URL` | change the URL, e.g. after upstream moved (its commits must be there) |
-| `source set-branch NAME BRANCH` | follow BRANCH; for a source pinned to a tag only the branch to look for newer tags on (the tag stays) |
-| `source set-branch NAME --unset` | for a pinned source: look for newer tags on all branches |
-| `source set-tag NAME TAG` | [pin](#pinning-to-a-tag) to TAG; a branch stays, as the one to look for newer tags on |
-| `source set-tag NAME --unset` | remove the tag: follow the source's branch again (it needs one) |
+| `source set-branch NAME BRANCH` | follow BRANCH – all files of the source; for [pinned](#pinning-to-a-tag) ones the branch to look for newer tags on |
 
 ```
 $ git filesync source -v
 owner/lib	https://github.com/owner/lib.git (main, 3 files)
-owner/lib-2	https://github.com/owner/lib.git (tag v1.2.0 on main, newest v1.4.0, 1 file)
-owner/lib-3	https://github.com/owner/lib.git (tag v1.2.0, newest v1.2.1 on maint; v1.4.0 on main, 1 file)
+owner/lib-dev	https://github.com/owner/lib.git (dev, 1 file)
 ```
 
-`source -v` accepts `--no-fetch` like `status`.
+`source -v` accepts `--no-fetch` like `status`. Tags are a matter of the
+files: [`set --tag`](#set), and `status -v` shows them.
 
-A change that would make two sources identical (same URL and same branch or
-tag) is refused; move the files with [`set -b` / `--tag`](#set)
-instead. After changing URL, branch or tag, `status`
-shows what is to sync for the source's files.
+A change that would make two sources identical (same URL and branch) is
+refused; move the files with [`set --source`](#set) instead. After changing
+URL or branch, `status` shows what is to sync for the source's files.
 
 ### `source map`
 
@@ -714,7 +715,7 @@ git filesync source map --global URL --unset
 ```
 
 When mapped, `status` and `pull` use the source's branch **as it is in that
-checkout** (for a [pinned source](#pinning-to-a-tag): the tag there) – its local branch, including commits not yet pushed – no matter
+checkout** (for a [pinned file](#pinning-to-a-tag): the tag there) – its local branch, including commits not yet pushed – no matter
 which branch is currently checked out there. Nothing is fetched; all of this
 works offline.
 
@@ -884,49 +885,49 @@ installed by them keep working.
 
 ### Pinning to a tag
 
-Instead of following a branch, a source can be pinned to a tag, e.g. a
-release of upstream:
+Instead of following its source's branch, a file can be pinned to a tag,
+e.g. a release of upstream:
 
 ```sh
 git filesync add cfg/x.yml https://github.com/owner/lib.git --tag v1.2.0
+git filesync set cfg/ --tag v1.2.0          # files already linked
 ```
 
-`.git-filesync` then has `tag = v1.2.0` in the `[source]`. `status`
-compares against the version at the tag – commits on the upstream branches
-don't matter – and `pull` syncs to it. A `branch` in a pinned source (`add
---tag v1.2.0 -b main`, or kept when a source following `main` is pinned)
-only says where to look for [newer tags](#newer-tags). A branch that
+`.git-filesync` then has `tag = v1.2.0` in the file's `[file]` entry; its
+source stays as it is, files following the branch and pinned ones can share
+it. `status` compares against the version at the tag – commits on the
+upstream branches don't matter – and `pull` syncs to it. The source's
+branch is where [newer tags](#newer-tags) are looked for. A branch that
 doesn't exist upstream is an error; a tag that isn't on it, a warning.
 
 Tags are taken as immutable, like Git does: once the tag is in the cache,
 `status` (and the hooks) fetch nothing for it, so they need no network for
-pinned sources. A tag moved on the server is only noticed when the cache is
-fetched for another reason. With a [mapped checkout](#source-map), the tag in that
-checkout is used, whatever is checked out there.
+pinned files. A tag moved on the server is only noticed when the cache is
+fetched for another reason. With a [mapped checkout](#source-map), the tag
+in that checkout is used, whatever is checked out there.
 
 Since a pinned file only changes when the tag does, `pull` usually has
 nothing to do – except to bring a file back to the tag's version (e.g. after
 `pull --commit`) or after the tag was changed. To learn about newer
-releases, `pull`, `status -v` and `source -v` fetch the upstream tags (unless
+releases, `pull` and `status -v` fetch the upstream tags (unless
 `--no-fetch`) and name the [newer tags](#newer-tags).
 
-To move on to a newer release, change the source, then sync:
+To move on to a newer release, change the tag of the files, then sync:
 
 ```sh
-git filesync source set-tag owner/lib v1.3.0   # some files only: set FILE... --tag v1.3.0
-git filesync pull --all
+git filesync set cfg/ --tag v1.3.0
+git filesync pull cfg/
 ```
 
-`source set-tag NAME --unset` (or `set FILE… -b BRANCH`) goes back to
-following a branch. `pull --tag v1.3.0` [tries a tag
-once](#another-branch-or-tag-once) without switching; `pull --commit` syncs a
-single file to any revision.
+`set FILE… --no-tag` goes back to following the branch. `pull --tag v1.3.0`
+[tries a tag once](#another-branch-or-tag-once) without switching;
+`pull --commit` syncs a single file to any revision.
 
 #### Tag patterns
 
 A tag with `*`, `?` or `[…]` is a pattern (as in shell globs, matched
-against the whole tag name): the source follows the **newest matching tag
-on its branch**, so `pull` moves on to a new release by itself:
+against the whole tag name): the file follows the **newest matching tag on
+its source's branch**, so `pull` moves on to a new release by itself:
 
 ```sh
 git filesync add cfg/x.yml https://github.com/owner/lib.git --tag 'v1.*'
@@ -935,16 +936,14 @@ git filesync add cfg/x.yml https://github.com/owner/lib.git --tag 'v1.*'
 - "Newest" is meant as for [newer tags](#newer-tags): by the commit graph,
   not by name or date – the first commit along the branch's first-parent
   line, from its head back, that has a matching tag.
-- A pattern needs the `branch` to look on. Without `-b`, `add`, `set` and
-  `source set-tag` fill in the upstream default branch; `source set-branch
-  --unset` is refused.
 - `status` fetches the upstream tags (unless `--no-fetch`) and shows a new
-  matching tag as `pending`, like a new commit on a branch. `status -v` and
-  `source -v` show which tags the pattern matches now (`tag v1.* = v1.4 on
-  main`; several tags on that commit: `v1.4 = rel-4`). The commit message of
+  matching tag as `pending`, like a new commit on a branch. `status -v`
+  shows which tags the pattern matches now (`tag v1.* = v1.4 on main`;
+  several tags on that commit: `v1.4 = rel-4`). The commit message of
   `pull` names the tag.
 - Tags that don't match are ignored – there is no hint at them.
-- No matching tag on the branch is an error.
+- No matching tag on the branch is an error (`set --tag` refuses such a
+  pattern).
 - `pull --tag PATTERN` [syncs once](#another-branch-or-tag-once) to the
   newest matching tag on the source's branch.
 
@@ -953,26 +952,20 @@ git filesync add cfg/x.yml https://github.com/owner/lib.git --tag 'v1.*'
 Tag names are taken as opaque – `v1.10` and `v1.9`, `release-7` or
 `tool-20261016` are just names – and tags carry no reliable date
 (lightweight tags have none of their own, and a tag may be set on an old
-commit later). So "newer" is defined by the commit graph alone: on a branch,
-the newest tag after the pinned one is on the first tagged commit after it
-along the branch's first-parent line, i.e. the commits the branch itself
-went through. Tags on side branches merged into it don't count.
+commit later). So "newer" is defined by the commit graph alone, on the
+source's branch: the newest tag after the pinned one is on the first tagged
+commit after it along the branch's first-parent line, i.e. the commits the
+branch itself went through. Tags on side branches merged into it don't
+count. So there is at most one newest tag (several names if several tags are
+on that commit: `v1.4.0 = release-7`):
 
-- With a `branch` in the source, only that branch is looked at, so there is
-  at most one newest tag (several names if several tags are on that commit:
-  `v1.4.0 = release-7`):
+```
+hint: 3 files pinned to tag v1.2.0; the newest tag on branch main is v1.4.0 (use 'git filesync set --tag v1.4.0 <file>...' and pull to switch)
+```
 
-  ```
-  hint: owner/lib is pinned to tag v1.2.0; the newest tag on branch main is v1.4.0 (use 'git filesync source set-tag owner/lib v1.4.0' and pull to switch)
-  ```
-
-  If the pinned tag isn't on that branch, `status` warns.
-- Without, every branch containing the pinned tag is looked at, so there
-  may be several – e.g. a maintenance release and the next major one:
-
-  ```
-  hint: owner/lib is pinned to tag v1.2.0; newer tags: v1.2.1 on maint; v1.4.0 on main (use 'git filesync source set-tag owner/lib TAG' and pull to switch, 'git filesync source set-branch owner/lib BRANCH' to look on one branch only)
-  ```
+If the pinned tag isn't on that branch, `status` warns. A maintenance line
+(`maint` with `v1.2.1`) is a source of its own: `source add lib-maint URL -b
+maint`, then `set FILE… --source lib-maint`.
 
 Pre-releases count like any other tag. Branches are those of upstream
 (`origin/…` in the cache); with a [mapped checkout](#source-map) its local branches
@@ -1061,7 +1054,7 @@ store it, and written as a checkout there would produce it – no false
 With a [mapped local checkout](#source-map), all commands work without network
 access (`add` takes the default branch from the checkout's `origin/HEAD`,
 or – with a warning if the checkout has a remote – from the branch checked
-out there). Sources [pinned to a tag](#pinning-to-a-tag) work offline as
+out there). Files [pinned to a tag](#pinning-to-a-tag) work offline as
 soon as the tag is in the cache; `pull`, `status -v` and `source -v`, which
 look for newer tags, then warn that fetching failed and go on. Without a
 mapping, the cache is used after a failed fetch; file versions never read

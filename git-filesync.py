@@ -16,13 +16,13 @@ upstream repository:
 
     [source "owner/lib"]
         url = https://github.com/owner/lib.git
-        branch = main          ; followed - or, with a tag, where newer tags
-        tag = v1.2             ; are looked for; optional: pinned to the tag
-                               ; (with * ? [...]: the newest matching tag
-                               ; on the branch)
+        branch = main          ; followed by its files (pinned ones: where
+                               ; newer tags are looked for)
     [file "src/foo.c"]
         source = owner/lib
         path = lib/foo.c       ; path in the upstream repository
+        tag = v1.2             ; optional: pinned to the tag (with * ? [...]:
+                               ; the newest matching tag on the branch)
         strict = true          ; optional: no local modifications allowed
         commit = <upstream commit of the last sync>
         blob = <blob id of the upstream file at that commit>
@@ -48,9 +48,8 @@ Basic commands:
                                 adapted)
         -v, --verbose           also list all linked files with their sources
                                 (pinned ones with the newest tag: the first
-                                tagged commit after theirs on the branch's
-                                first-parent line - on every branch with
-                                the tag unless the source names one)
+                                tagged commit after theirs on the source
+                                branch's first-parent line)
         --exit-code             exit 1 if something is to sync or a strict
                                 file is modified
 
@@ -66,7 +65,7 @@ Basic commands:
                                 also backwards)
         -b, --branch BRANCH     sync to the head of BRANCH, once: the files
                                 keep following their own branch or tag
-                                (to switch: set -b/--tag, source set-*)
+                                (to switch: set --tag, source set-branch)
         --tag TAG               sync to TAG, once (as -b)
         --overwrite             discard local adaptations instead of merging
         --no-edit               commit without opening the editor
@@ -113,11 +112,11 @@ Basic commands:
     add DIR URL|SOURCE          link every file below an upstream directory
                                 (-p, default: same as DIR) as DIR/...; files
                                 already linked are skipped
-        -b, --branch BRANCH     upstream branch (default: its default
-                                branch or that of SOURCE); with --tag: the
-                                branch to look for newer tags on
-        --tag TAG               pin to an upstream tag instead of a branch
-                                (a pattern: the newest matching tag on -b)
+        -b, --branch BRANCH     the source's upstream branch (default: its
+                                default branch, or that of SOURCE)
+        --tag TAG               pin the file to an upstream tag instead of
+                                following the branch (a pattern: the newest
+                                matching tag on the branch)
         -p, --path PATH         upstream path (default: same as FILE; \\
                                 counts as /)
         --include PATTERN       DIR: only files matching (gitignore-like,
@@ -147,17 +146,13 @@ Advanced commands:
                                 for sources; only .git-filesync is changed
                                 (and staged), the synced version is kept
                                 where it still applies
-        --source URL|SOURCE     another upstream (fork, moved repository) or
-                                [source]; a source whose files are all given
-                                is changed itself
-        -b, --branch BRANCH     as for add; without --source: follow BRANCH
-                                from now on (sync with pull)
-        --tag TAG               as for add; without --source: pin to TAG
-                                from now on; the source's branch (or -b)
-                                stays the one to look for newer tags on;
-                                a source whose files are all given is
-                                changed itself, otherwise the files move to
-                                a source with that URL, branch and tag
+        --source URL|SOURCE     move the files to another [source], or the
+                                one for URL with its default branch (fork,
+                                moved repository; created if needed); a
+                                source left without files is removed
+        --tag TAG               pin to TAG from now on (a pattern: the newest
+                                matching tag on the source's branch)
+        --no-tag                follow the source's branch again
         -p, --path PATH         another upstream path (one file); its
                                 current version becomes the base, as for add
         --strict, --no-strict   mark as strict / allow adaptations again
@@ -167,18 +162,13 @@ Advanced commands:
                                 config --edit`); afterwards it is checked
                                 and staged
 
-    source                      list the [source]s (-v: with URL, ref, newest
-                                tag if pinned, files)
+    source                      list the [source]s (-v: with URL, branch,
+                                files)
+    source add NAME URL [-b BRANCH]  add a [source] (default branch: the
+                                upstream default), to link or move files to
     source rename OLD NEW       rename a [source] and all references to it
     source set-url NAME URL     change the URL of a [source]
-    source set-branch NAME BRANCH  follow BRANCH; if pinned to a tag: look
-                                for newer tags on BRANCH only (--unset
-                                instead of BRANCH: on all branches)
-    source set-tag NAME TAG     pin to TAG (a branch stays, for newer tags);
-                                a tag is taken as immutable: fetched only if
-                                missing; a pattern (* ? [...]) follows the
-                                newest matching tag on the branch
-    source set-tag NAME --unset  remove the tag: follow the branch again
+    source set-branch NAME BRANCH  follow BRANCH, all files of the source
     source map [URL|SOURCE [DIR]]  use the local checkout DIR instead of
                                 fetching URL (SOURCE: the URL of that
                                 [source]); its branch is used, unpushed
@@ -862,13 +852,12 @@ class Source:
                                        check=False).returncode == 0
         return self._memo[key]
 
-    def branch_refs(self, contains=None):
-        """{branch name: ref} of the upstream branches (only those containing
-        commit `contains`, if given): the remote-tracking branches, in a local
-        checkout overridden by its local branches of the same name."""
+    def branch_refs(self):
+        """{branch name: ref} of the upstream branches: the remote-tracking
+        branches, in a local checkout overridden by its local branches of the
+        same name."""
         prefixes = ["refs/remotes/origin/"] + (["refs/heads/"] if self.local else [])
-        refs = out(self.git(["for-each-ref", "--format=%(refname)"]
-                            + (["--contains", contains] if contains else []) + prefixes)).split()
+        refs = out(self.git(["for-each-ref", "--format=%(refname)"] + prefixes)).split()
         result = {}
         for prefix in prefixes:          # refs/heads/ last: wins
             for r in refs:
@@ -923,21 +912,20 @@ class Source:
         return []
 
     def tag_info(self, tag, line, newer=True):
-        """(newer tags, problem) for a source pinned to tag that looks for
-        newer tags on branch line (None: all branches); problem: why they
-        can't be looked for there. newer=False: only check the branch."""
+        """(newer tags, problem) for files pinned to tag, with newer tags
+        looked for on branch line (their source's); problem: why they can't
+        be looked for there. newer=False: only check the branch."""
         problem = line and self.line_problem(tag, line)
         if problem or not newer:
             return [], problem
         return self.newer_tags(tag, line), None
 
-    def newer_tags(self, tag, branch=None):
-        """Tags newer than tag, by their position in the commit graph - tag
-        names are opaque, and tags have no reliable date. On a branch, the
-        newest tag after tag is on the first tagged commit of its first-
-        parent line (a tag on a merged side branch doesn't count). Looked for
-        on branch only, or on every branch containing tag. Returns
-        [(tags of that commit, [branches])], empty if there are none."""
+    def newer_tags(self, tag, branch):
+        """Tags newer than tag on branch, by their position in the commit
+        graph - tag names are opaque, and tags have no reliable date: the
+        newest tag after tag is on the first tagged commit of the branch's
+        first-parent line (a tag on a merged side branch doesn't count).
+        Returns [(tags of that commit, [branch])], empty if there are none."""
         key = ("newer", tag, branch)
         if key in self._memo:
             return self._memo[key]
@@ -946,8 +934,6 @@ class Source:
         if base and branch:
             ref = self.branch_refs().get(branch)
             refs = {branch: ref} if ref and self.is_ancestor(base, ref) else {}
-        elif base:
-            refs = self.branch_refs(contains=base)
         tags, found = self.tags_by_commit(), {}
         for name, ref in sorted(refs.items()):
             # the line down to tag; containing tag is monotonic along it, so
@@ -1654,32 +1640,19 @@ def parse_registry(raw):
     return sources, files
 
 
-def source_spec(source):
-    """The ref keys of a [source] (or of what a command asks for):
-    {'branch': B} follows B, {'tag': T} is pinned to T, {'tag': T,
-    'branch': B} is pinned to T and looks for newer tags on B only."""
-    return {k: source[k] for k in ("branch", "tag") if source.get(k)}
-
-
 def is_tag_pattern(tag):
     """A tag with * ? or [ is a pattern (like fnmatch): the newest matching
     tag on the source's branch counts."""
     return bool(re.search(r"[*?\[]", tag))
 
 
-def source_ref(source):
-    """('branch' | 'tag', name) the files of a [source] are synced to: its tag
-    if it is pinned, else its branch; None if it has neither."""
-    branch, tag = source.get("branch"), source.get("tag")
-    if tag:
-        return ("tag", tag)
-    return ("branch", branch) if branch else None
-
-
-def source_line(source):
-    """Branch of a pinned [source]: the only one newer tags are looked for on
-    (None: all branches). A source that isn't pinned follows its branch."""
-    return source.get("branch") if source.get("tag") else None
+def entry_ref(source, entry):
+    """('branch' | 'tag', name) a [file] entry is synced to: its own tag if
+    it is pinned, else the branch of its [source]; None if the source has no
+    branch (a pinned file needs it too: newer tags are looked for there)."""
+    if not source.get("branch"):
+        return None
+    return ("tag", entry["tag"]) if entry.get("tag") else ("branch", source["branch"])
 
 
 def ref_missing(ref, src):
@@ -1694,13 +1667,6 @@ def ref_text(ref, line=None, names=None):
         return ref[1]
     return f"tag {ref[1]}" + (f" = {' = '.join(names)}" if names else "") + \
         (f" on {line}" if line else "")
-
-
-def spec_text(spec):
-    """'branch main' / 'tag v1.2' / 'tag v1.2 on main' - for messages."""
-    ref = source_ref(spec)
-    assert ref, "a spec has a branch or a tag"
-    return ref_text(ref, source_line(spec)) if ref[0] == "tag" else f"branch {ref[1]}"
 
 
 def and_list(items):
@@ -1775,19 +1741,12 @@ class Registry:
             self._cfg(f"file.{rel}.{name}", value)
             self.files.setdefault(rel, {})[name] = value
 
-    def find_source(self, url, spec, exclude=None, any_line=False):
-        """Key of a [source] with url and exactly the ref keys of spec. With
-        any_line, a source pinned to spec's tag is taken whatever branch it
-        looks for newer tags on (one without a branch first)."""
-        cands = [name for name, s in self.sources.items()
-                 if name != exclude and norm_url(s.get("url", "")) == norm_url(url)]
-        for name in cands:
-            if source_spec(self.sources[name]) == spec:
+    def find_source(self, url, branch, exclude=None):
+        """Key of a [source] with url and branch, None if there is none."""
+        for name, s in self.sources.items():
+            if name != exclude and norm_url(s.get("url", "")) == norm_url(url) \
+                    and s.get("branch") == branch:
                 return name
-        if any_line and spec.get("tag"):
-            for name in cands:
-                if self.sources[name].get("tag") == spec["tag"]:
-                    return name
         return None
 
     def new_source_name(self, url):
@@ -1799,26 +1758,22 @@ class Registry:
             name, n = f"{base}-{n}", n + 1
         return name
 
-    def source_name(self, url, spec, any_line=False):
-        """Key of the [source] for url+spec (found by URL, not by key),
+    def source_name(self, url, branch):
+        """Key of the [source] for url and branch (found by URL, not by key),
         or the key a new one would get."""
-        return self.find_source(url, spec, any_line=any_line) or self.new_source_name(url)
+        return self.find_source(url, branch) or self.new_source_name(url)
 
-    def add_source(self, url, spec, any_line=False):
-        """Key of the [source] for url+spec, created if necessary."""
-        name = self.find_source(url, spec, any_line=any_line)
-        if name:
-            return name
-        name = self.new_source_name(url)
+    def add_source(self, url, branch, name=None):
+        """Key of the [source] for url and branch, created (as name, if
+        given) if necessary."""
+        found = None if name else self.find_source(url, branch)
+        if found:
+            return found
+        name = name or self.new_source_name(url)
         self._cfg(f"source.{name}.url", url)
-        self.sources[name] = {"url": url}
-        self.set_spec(name, spec)
+        self._cfg(f"source.{name}.branch", branch)
+        self.sources[name] = {"url": url, "branch": branch}
         return name
-
-    def set_spec(self, name, spec):
-        """Set the branch/tag keys of a [source] to spec."""
-        for key in ("branch", "tag"):
-            self.set_source(name, key, spec.get(key))
 
     def set_source(self, name, key, value):
         """Set (value None: remove) a key of a [source]."""
@@ -1921,8 +1876,11 @@ class Link:
 
     name = property(lambda self: self.v.get("source", ""))   # key of the [source]
     url = property(lambda self: self.source.get("url", ""))
-    ref = property(lambda self: source_ref(self.source))     # ('branch' | 'tag', name)
-    line = property(lambda self: source_line(self.source))   # branch of a pinned source
+    tag = property(lambda self: self.v.get("tag", ""))        # pinned to it (or a pattern)
+    ref = property(lambda self: entry_ref(self.source, self.v))   # ('branch' | 'tag', name)
+    # a pinned file: the branch of its source, where newer tags (or those
+    # matching a pattern) are looked for
+    line = property(lambda self: self.source.get("branch") if self.tag else None)
     path = property(lambda self: self.v.get("path", ""))
     commit = property(lambda self: self.v.get("commit", ""))
     blob = property(lambda self: self.v.get("blob", ""))
@@ -2103,9 +2061,14 @@ def evaluate(ctx, repo, link):
         st.error = (f"{problem} - entry ignored; remove it with "
                     f"'git config -f {REGISTRY} --remove-section \"file.{link.rel}\"'")
         return st
+    if link.source.get("tag"):
+        st.error = (f'tag in [source "{link.name}"] is no longer supported: pin the files '
+                    f"themselves ('tag' in each [file], with 'git filesync edit'), and give "
+                    "the source its branch")
+        return st
     if not (url and ref and path):
-        st.error = (f"incomplete entry in {REGISTRY} (needs a source with url and "
-                    "either branch or tag, and path)")
+        st.error = (f"incomplete entry in {REGISTRY} (needs a source with url and branch, "
+                    "and path)")
         return st
     try:
         src = st.src = ctx.source(url, ref, link.name, link.line)
@@ -2673,58 +2636,12 @@ def pull_message(parts, names):
         "\n".join(m[len(MSG_PREFIX):] if m.startswith(MSG_PREFIX) else m for m in parts)
 
 
-def switch_spec(source, args):
-    """The ref keys set -b/--tag switch a [source] to: --tag pins, keeping
-    the branch the source has (or -b) as the one to look for newer tags on;
-    -b alone follows that branch."""
-    if not args.tag:
-        return {"branch": args.branch}
-    spec = {"tag": args.tag}
-    branch = args.branch or source.get("branch")
-    if branch:
-        spec["branch"] = branch
-    return spec
-
-
-def move_to_source(reg, name, lks, url, spec, named=None):
-    """Point links lks of [source] name at the source with url and spec -
-    or exactly at [source] named. If lks are all files of the source and no
-    such source exists, the source itself is changed; otherwise they move
-    to it (found or created) and the source is split, or removed when left
-    without files. Returns a description of the change."""
-    source = reg.sources[name]
-    old_url, old = source.get("url", ""), source_spec(source)
-    new_repo = norm_url(url) != norm_url(old_url)
-
-    def text(u, sp):
-        return f"{u} ({spec_text(sp)})" if new_repo else spec_text(sp)
-    target = named or reg.find_source(url, spec, exclude=name)
-    if not target and set(source_files(reg, name)) == {lk.rel for lk in lks}:
-        if new_repo:
-            reg.set_source(name, "url", url)
-        reg.set_spec(name, spec)
-        return f"Switch {name} from {text(old_url, old)} to {text(url, spec)}"
-    target = target or reg.add_source(url, spec)
-    for lk in lks:
-        reg.set_file(lk.rel, "source", target)
-    rest = len(source_files(reg, name))
-    if not rest:
-        reg.remove_source(name)
-    desc = (f"Move {', '.join(lk.rel for lk in lks)} from {name} ({text(old_url, old)}) "
-            f"to {target} ({text(url, spec)})")
-    return desc + (f"; {name} keeps {plural(rest, 'other file')}" if rest else "")
-
-
-def newest_hint(name, tag, line, newest):
-    """Hint after pull at newer tags of a pinned source."""
-    switch = f"'git filesync source set-tag {name} {{}}' and pull to switch"
-    if len(newest) > 1:
-        return (f"hint: {name} is pinned to tag {tag}; newer tags: {newest_text(newest)} "
-                f"(use {switch.format('TAG')}, 'git filesync source set-branch {name} "
-                "BRANCH' to look on one branch only)")
-    where = f" on branch {line}" if line else ""
-    return (f"hint: {name} is pinned to tag {tag}; the newest tag{where} is "
-            f"{newest_text(newest, line)} (use {switch.format(newest[0][0][0])})")
+def newest_hint(rels, tag, line, newest):
+    """Hint after pull at newer tags for the files pinned to tag."""
+    files = rels[0] if len(rels) == 1 else plural(len(rels), "file")
+    return (f"hint: {files} pinned to tag {tag}; the newest tag on branch {line} is "
+            f"{newest_text(newest, line)} (use 'git filesync set --tag "
+            f"{newest[0][0][0]} <file>...' and pull to switch)")
 
 
 def write_synced(repo, contents, conflicted):
@@ -2811,7 +2728,8 @@ def cmd_pull(ctx, repo, args):
             rc = EXIT_ERROR
             continue
         if st.newest and not once:
-            newest.setdefault(link.name, (link.ref[1], link.line, st.newest))
+            newest.setdefault((link.name, link.tag), (link.tag, link.line, st.newest, []))[3] \
+                .append(link.rel)
         if args.all and not st.pending and not once:
             continue
         done += 1
@@ -2834,13 +2752,16 @@ def cmd_pull(ctx, repo, args):
         write_synced(repo, contents, {rel for rel, _, _, c in synced if c})
         rc = max(rc, commit_pull(repo, reg, synced, args))
     if moved and not args.dry_run:
-        opt = f"--tag {args.tag}" if args.tag else f"-b {args.branch}"
+        how = f"'git filesync set --tag {args.tag} <file>...'" if args.tag else \
+            f"'git filesync source set-branch <source> {args.branch}' (for all files of " \
+            f"the source) or 'git filesync set <file>... --source <source>' (one on that " \
+            "branch, see 'git filesync source add')"
         print(f"hint: the links still follow their own branch or tag, so a plain pull goes "
-              f"back; to stay on {once_text(args)}, use 'git filesync set {opt} <file>...'")
+              f"back; to stay on {once_text(args)}, use {how}")
     if args.all and not done and rc == EXIT_OK:
         print(paint("everything up to date", "green"))
-    for name, (tag, line, new) in sorted(newest.items()):
-        print(newest_hint(name, tag, line, new))
+    for _, (tag, line, new, rels) in sorted(newest.items()):
+        print(newest_hint(rels, tag, line, new))
     return rc
 
 
@@ -3058,34 +2979,20 @@ def glob_regex(pattern):
 
 
 def add_ref(ctx, reg, args):
-    """(url, spec, name) for add. The name of a [source]: exactly that source,
-    whatever its branch or tag (-b/--tag may only repeat it). A URL: an
-    existing source only if URL and branch/tag match (name None; found or
-    created later) - with --tag but no -b, whatever branch it looks for
-    newer tags on."""
-    given = source_spec({"tag": args.tag, "branch": args.branch})
+    """(url, branch, name) of the source for add: the [source] named by
+    args.source (-b may only repeat its branch), or for a URL the one with
+    that URL and branch - name None, found or created later."""
     if args.source in reg.sources:            # name of an existing [source]
         s = reg.sources[args.source]
-        spec = source_spec(s)
-        if not source_ref(s):
-            raise FsError(f'[source "{args.source}"] in {REGISTRY} needs a branch or tag')
-        if given and (given != spec if "tag" not in given else
-                      given["tag"] != spec.get("tag")
-                      or given.get("branch", spec.get("branch")) != spec.get("branch")):
-            raise FsError(f"source '{args.source}' {spec_desc(spec)}, not {spec_desc(given)} - "
-                          "give the URL to link to another branch or tag, or change the "
-                          "source with 'git filesync source set-branch / set-tag'")
-        return s.get("url", ""), spec, args.source
-    if given.get("tag") and is_tag_pattern(given["tag"]) and not given.get("branch"):
-        given["branch"] = ctx.default_branch(args.source)    # a pattern needs a branch
-    return args.source, given or {"branch": ctx.default_branch(args.source)}, None
-
-
-def spec_desc(spec):
-    """'follows main' / 'is pinned to v1.2' / 'is pinned to v1.2 on main'."""
-    if not spec.get("tag"):
-        return f"follows {spec['branch']}"
-    return f"is pinned to {spec['tag']}" + (f" on {spec['branch']}" if spec.get("branch") else "")
+        if not s.get("branch"):
+            raise FsError(f'[source "{args.source}"] in {REGISTRY} needs a branch')
+        if args.branch and args.branch != s["branch"]:
+            raise FsError(f"source '{args.source}' follows {s['branch']}, not {args.branch} - "
+                          "give the URL to link to another branch, or change the source's "
+                          f"branch with 'git filesync source set-branch {args.source} "
+                          f"{args.branch}'")
+        return s.get("url", ""), s["branch"], args.source
+    return args.source, args.branch or ctx.default_branch(args.source), None
 
 
 def find_base(repo, src, rev, rel, path, target, overwrite=False):
@@ -3151,17 +3058,16 @@ def cmd_add(ctx, repo, args):
     problem = path_problem(rel) if rel != "." else None
     if problem:
         raise FsError(f"cannot link '{rel}': {problem}")
-    url, spec, named = add_ref(ctx, reg, args)
-    ref = source_ref(spec)
-    assert ref, "add_ref gives a branch or a tag"
-    any_line = "branch" not in spec    # --tag without -b: any branch to look on
-    src = ctx.source(url, ref, named or reg.source_name(url, spec, any_line), source_line(spec))
+    url, branch, named = add_ref(ctx, reg, args)
+    ref = ("tag", args.tag) if args.tag else ("branch", branch)
+    line = branch if args.tag else None
+    src = ctx.source(url, ref, named or reg.source_name(url, branch), line)
     head = src.resolve()
     if not head:
         raise FsError(ref_missing(ref, src))
     at = src.require(args.commit) if args.commit else None    # --commit: given base
-    if not src.tag_names:
-        _, problem = src.tag_info(ref[1], source_line(spec), newer=False)
+    if args.tag and not src.tag_names:
+        _, problem = src.tag_info(args.tag, branch, newer=False)
         if problem:
             warn(f"{problem}; newer tags can't be found there")
     path = upstream_path(args.path if args.path else rel)
@@ -3190,8 +3096,8 @@ def cmd_add(ctx, repo, args):
              f"{src.short(at or head)}; the differences count as local adaptations (use "
              "--overwrite to take the upstream version, or --commit to choose another one)")
     rels = [p.rel for p in plan]
-    name = named or reg.source_name(url, spec, any_line)
-    shown_ref = ref_text(ref, source_line(reg.sources.get(name) or spec), src.tag_names)
+    name = named or reg.source_name(url, branch)
+    shown_ref = ref_text(ref, line, src.tag_names)
     if args.dry_run:
         for p in plan:
             note = "replacing the existing file" if p.replaced else \
@@ -3207,10 +3113,12 @@ def cmd_add(ctx, repo, args):
     for p in plan:
         if p.rel in reg.files:
             reg.remove_file(p.rel, keep_source=named)
-        name = named or reg.add_source(url, spec, any_line)
+        name = named or reg.add_source(url, branch)
         link = Link(reg, p.rel)
         for k, v in (("source", name), ("path", p.path), ("commit", p.commit), ("blob", p.blob)):
             link.set(k, v)
+        if args.tag:
+            link.set("tag", args.tag)
         if args.strict:
             link.set("strict", "true")
         if p.content is not None:
@@ -3462,56 +3370,73 @@ def commit_in(src, link):
 
 
 def cmd_set(ctx, repo, args):
-    """Change the link of linked files - their source, upstream path or strict
-    flag - like 'source' does for sources. Only .git-filesync is changed
-    (and staged); the synced version (the base) is kept where it still
-    applies: for another branch or tag of the same upstream, and for another
-    upstream that has it (a fork, a moved repository); with another path it
-    is looked up like for add."""
-    if not (args.source or args.branch or args.tag or args.path or args.strict is not None):
-        raise FsError("nothing to change: give --source, -b/--tag, -p or --strict/--no-strict")
+    """Change the link of linked files - their source, tag, upstream path or
+    strict flag - like 'source' does for sources (and their branch). Only
+    .git-filesync is changed (and staged); the synced version (the base) is
+    kept where it still applies: for another tag of the same upstream, and
+    for another upstream that has it (a fork, a moved repository); with
+    another path it is looked up like for add."""
+    if not (args.source or args.tag or args.no_tag or args.path or args.strict is not None):
+        raise FsError("nothing to change: give --source, --tag/--no-tag, -p or "
+                      "--strict/--no-strict")
     reg = Registry(repo)
     reg.dry_run = args.dry_run
     links = select_links(repo, reg, args.files)
     if args.path and len(links) != 1:
         raise FsError("-p requires exactly one file")
+    for lk in links:
+        if not lk.source.get("branch") or lk.source.get("tag"):
+            raise FsError(f"{lk.rel}: its [source \"{lk.name}\"] in {REGISTRY} needs a url "
+                          "and a branch (and no tag)")
     would = "would: " if args.dry_run else ""
     changed = False
-    given = add_ref(ctx, reg, args) if args.source else None    # (url, spec, named)
-    groups = {}
-    for lk in links:
-        groups.setdefault(lk.name, []).append(lk)
-    for name, lks in groups.items():
-        source = reg.sources.get(name)
-        if not source or not source_ref(source):
-            raise FsError(f"{lks[0].rel}: its [source \"{name}\"] in {REGISTRY} needs a url "
-                          "and a branch or tag")
-        if given:
-            url, spec, named = given
-        elif args.branch or args.tag:
-            url, spec, named = source.get("url", ""), switch_spec(source, args), None
-            if is_tag_pattern(spec.get("tag", "")) and not spec.get("branch"):
-                spec["branch"] = ctx.default_branch(url)     # a pattern needs a branch
+    if args.source:
+        if args.source in reg.sources:
+            target, url, branch = args.source, reg.sources[args.source].get("url", ""), \
+                reg.sources[args.source].get("branch")
+            if not branch:
+                raise FsError(f'[source "{target}"] in {REGISTRY} needs a branch')
         else:
-            continue
-        if named == name or not named and norm_url(url) == norm_url(source.get("url", "")) \
-                and spec == source_spec(source):
-            continue
-        ref = source_ref(spec)
-        src = ctx.source(url, ref, named or name, source_line(spec))
-        if not src.resolve():
-            raise FsError(ref_missing(ref, src))
-        new_repo = norm_url(url) != norm_url(source.get("url", ""))
-        print(would + move_to_source(reg, name, lks, url, spec, named))
-        changed = True
-        if new_repo and not args.path:
-            for lk in lks:      # same synced version, possibly another commit
-                commit = commit_in(src, lk)
-                if not commit:
-                    warn(f"{lk.rel}: synced version {lk.blob[:12]} not found in {src.label}; "
-                         "its previous sync point counts as unknown")
-                elif commit != lk.commit:
-                    lk.set("commit", commit)
+            url = args.source
+            branch = ctx.default_branch(url)
+            target = reg.find_source(url, branch)
+        moving = [lk for lk in links if lk.name != target]
+        if moving:
+            src = ctx.source(url, ("branch", branch), target or reg.source_name(url, branch))
+            if not src.resolve():
+                raise FsError(ref_missing(("branch", branch), src))
+            target = target or reg.add_source(url, branch)
+            for lk in moving:
+                old, new_repo = lk.name, norm_url(url) != norm_url(lk.url)
+                if new_repo and not args.path:   # same synced version, maybe another commit
+                    commit = commit_in(src, lk)
+                    if not commit:
+                        warn(f"{lk.rel}: synced version {lk.blob[:12]} not found in "
+                             f"{src.label}; its previous sync point counts as unknown")
+                    elif commit != lk.commit:
+                        lk.set("commit", commit)
+                lk.set("source", target)
+                print(f"{would}{lk.rel}: source {old} -> {target}")
+                if not source_files(reg, old):
+                    reg.remove_source(old)
+            changed = True
+    if args.tag or args.no_tag:
+        for lk in links:
+            if (lk.tag or None) == (args.tag or None):
+                continue
+            if args.tag:          # a tag (or pattern) not upstream is an error
+                ref = ("tag", args.tag)
+                src = ctx.source(lk.url, ref, lk.name, lk.source.get("branch"))
+                if not src.resolve():
+                    raise FsError(ref_missing(ref, src))
+                if not src.tag_names:
+                    _, problem = src.tag_info(args.tag, lk.source.get("branch"), newer=False)
+                    if problem:
+                        warn(f"{problem}; newer tags can't be found there")
+            lk.set("tag", args.tag or None)
+            print(f"{would}{lk.rel}: " + (f"tag {args.tag}" if args.tag else
+                                          f"follows branch {lk.source.get('branch')}"))
+            changed = True
     if args.path:
         lk = links[0]
         src = ctx.source(lk.url, lk.ref, lk.name, lk.line)
@@ -3562,8 +3487,11 @@ def registry_problems(reg):
     for name, s in sorted(reg.sources.items()):
         if not s.get("url"):
             problems.append(f'[source "{name}"] has no url')
-        if not source_ref(s):
-            problems.append(f'[source "{name}"] has neither branch nor tag')
+        if not s.get("branch"):
+            problems.append(f'[source "{name}"] has no branch')
+        if s.get("tag"):
+            problems.append(f'[source "{name}"] has a tag - no longer supported: pin the '
+                            "files themselves (tag in their [file] entries)")
         if not source_files(reg, name):
             problems.append(f'[source "{name}"] is not used by any file')
     for rel, v in sorted(reg.files.items()):
@@ -3614,7 +3542,7 @@ def source_files(reg, name):
 
 
 def cmd_source(ctx, repo, args):
-    """Like `git remote`: list, rename and change the [source]s. Only
+    """Like `git remote`: list, add, rename and change the [source]s. Only
     .git-filesync is changed (and staged); `pull` then syncs the files."""
     reg = Registry(repo)
     action = args.action
@@ -3623,20 +3551,24 @@ def cmd_source(ctx, repo, args):
             if not args.verbose:
                 print(name)
                 continue
-            ref, line = source_ref(s), source_line(s)
             n = len(source_files(reg, name))
-            newest, shown = "", ref_text(ref, line) if ref else "branch or tag missing"
-            if ref and ref[0] == "tag":
-                try:
-                    src = ctx.source(s.get("url", ""), ref, name, line)
-                    if src.tag_names:          # a pattern: what it is at now
-                        shown = ref_text(ref, line, src.tag_names)
-                    else:
-                        tags, _ = src.tag_info(ref[1], line)
-                        newest = f", newest {newest_text(tags, line)}" if tags else ""
-                except FsError as e:
-                    warn(f"{name}: {e}")
-            print(f"{name}\t{s.get('url', '')} ({shown}{newest}, {plural(n, 'file')})")
+            print(f"{name}\t{s.get('url', '')} ({s.get('branch') or 'branch missing'}, "
+                  f"{plural(n, 'file')})")
+        return EXIT_OK
+    if action == "add":
+        if args.name in reg.sources:
+            raise FsError(f"source '{args.name}' already exists")
+        if not args.name or "\n" in args.name:
+            raise FsError("invalid source name")
+        branch = args.branch or ctx.default_branch(args.value)
+        other = reg.find_source(args.value, branch)
+        if other:
+            raise FsError(f"source '{other}' already has this URL and branch {branch}")
+        reg.add_source(args.value, branch, name=args.name)
+        reg.finish()
+        print(f"{paint(f'added {args.name}: {args.value} ({branch})', 'green')}; {REGISTRY} "
+              f"staged (link files with 'git filesync add FILE {args.name}', or move them "
+              f"with 'git filesync set FILE... --source {args.name}')")
         return EXIT_OK
     if args.name not in reg.sources:
         raise FsError(f"no source '{args.name}' in {REGISTRY}"
@@ -3650,43 +3582,20 @@ def cmd_source(ctx, repo, args):
         reg.rename_source(args.name, args.value)
         done = f"renamed {args.name} -> {args.value}"
     else:
-        url, old = s.get("url", ""), source_spec(s)
-        spec = dict(old)
-        if action == "set-url":
+        url, branch = s.get("url", ""), s.get("branch")
+        key = "url" if action == "set-url" else "branch"
+        if key == "url":
             url = args.value
-        elif action == "set-branch" and bool(args.unset) == bool(args.value):
-            raise FsError("give either BRANCH or --unset")
-        elif action == "set-branch" and args.value:
-            spec["branch"] = args.value
-        elif action == "set-branch":
-            if not spec.get("tag"):
-                raise FsError(f"source '{args.name}' is not pinned to a tag; it needs its branch")
-            if is_tag_pattern(spec["tag"]):
-                raise FsError(f"source '{args.name}' follows the tag pattern '{spec['tag']}', "
-                              "which needs its branch")
-            spec.pop("branch", None)
-        elif bool(args.unset) == bool(args.value):
-            raise FsError("give either TAG or --unset")
-        elif args.value:
-            spec["tag"] = args.value
-            if is_tag_pattern(args.value) and not spec.get("branch"):
-                spec["branch"] = ctx.default_branch(url)     # a pattern needs a branch
-        elif not spec.get("branch"):
-            raise FsError(f"source '{args.name}' has no branch to follow; set one first with "
-                          f"'git filesync source set-branch {args.name} BRANCH'")
         else:
-            spec.pop("tag", None)
-        other = reg.find_source(url, spec, exclude=args.name) if source_ref(spec) else None
+            branch = args.value
+        other = reg.find_source(url, branch, exclude=args.name)
         if other:
-            raise FsError(f"source '{other}' already has this URL and {spec_text(spec)} - "
+            raise FsError(f"source '{other}' already has this URL and branch {branch} - "
                           f"move the files to it with 'git filesync set FILE... --source {other}'")
-        if action == "set-url":
-            reg.set_source(args.name, "url", url)
-            done = f"{args.name}: url {url}"
-        else:
-            reg.set_spec(args.name, spec)
-            done = f"{args.name}: {spec_text(spec)}" + \
-                (f" (was {spec_text(old)})" if source_ref(old) and old != spec else "")
+        old = s.get(key)
+        reg.set_source(args.name, key, args.value)
+        done = f"{args.name}: {key} {args.value}" + (f" (was {old})" if old and old != args.value
+                                                     else "")
     reg.finish()
     print(f"{paint(done, 'green')}; {REGISTRY} staged")
     files = source_files(reg, args.value if action == "rename" else args.name)
@@ -4209,11 +4118,10 @@ def main(argv=None):
                         "directory: all files below the upstream directory are linked")
     p.add_argument("source", metavar="URL|SOURCE", help="upstream URL or name of a [source] in "
                    + REGISTRY)
-    p.add_argument("-b", "--branch", help="upstream branch (default: remote HEAD, or the ref of "
-                                          "SOURCE); with --tag: the branch to look for newer "
-                                          "tags on")
-    p.add_argument("--tag", help="pin to this upstream tag instead of following a branch; a "
-                                 "pattern (* ? [...]): the newest matching tag on the branch")
+    p.add_argument("-b", "--branch", help="the source's upstream branch (default: remote HEAD; "
+                                          "with SOURCE: its branch)")
+    p.add_argument("--tag", help="pin the file to this upstream tag instead of following the "
+                                 "branch; a pattern (* ? [...]): the newest matching tag on it")
     p.add_argument("-p", "--path", help="upstream path (default: same as here)")
     p.add_argument("--include", metavar="PATTERN", action="append",
                    help="directory: only files matching PATTERN (gitignore-like; repeatable)")
@@ -4229,14 +4137,16 @@ def main(argv=None):
                    help="file must stay an exact copy (no local modifications)")
 
     p = add_command(sub, "set", parents=[common], help="change the link of linked files: source, "
-                                                     "upstream path, strict")
+                                                     "tag, upstream path, strict")
     p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
     p.add_argument("--source", metavar="URL|SOURCE",
-                   help="link to another upstream (URL) or [source]; the synced version is kept")
-    p.add_argument("-b", "--branch", help="upstream branch (as for add); without --source: "
-                                          "switch to following it, without syncing")
-    p.add_argument("--tag", help="pin to this upstream tag (as for add); without --source: "
-                                 "switch to it, without syncing")
+                   help="link to another [source], or the one for this URL (with its default "
+                        "branch; created if needed); the synced version is kept")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--tag", help="pin to this upstream tag (a pattern: the newest matching tag "
+                                 "on the source's branch), without syncing")
+    g.add_argument("--no-tag", action="store_true",
+                   help="follow the source's branch again, without syncing")
     p.add_argument("-p", "--path", help="another upstream path (one file); its current "
                                         "version becomes the base, as for add")
     g = p.add_mutually_exclusive_group()
@@ -4276,28 +4186,22 @@ def main(argv=None):
     p = add_command(sub, "source", parents=[common], help="list or change the [source]s "
                                                         "(like 'git remote')")
     p.add_argument("-v", "--verbose", action="store_true",
-                   help="list with URL, branch or tag (and newest tag), and file count")
+                   help="list with URL, branch and file count")
     actions = p.add_subparsers(dest="action", metavar="ACTION")
+    a = add_command(actions, "add", parents=[colorp],
+                    help="add a source, to link or move files to")
+    a.add_argument("name", metavar="NAME", help="key of the new [source]")
+    a.add_argument("value", metavar="URL", help="upstream URL")
+    a.add_argument("-b", "--branch", help="upstream branch (default: remote HEAD)")
     for name, arg, hlp in (("rename", "NEW", "rename a source and all references to it"),
                            ("set-url", "URL", "change the URL of a source"),
-                           ("set-branch", "BRANCH", "follow BRANCH; for a source pinned to a "
-                                                    "tag: look for newer tags on BRANCH only "
-                                                    "(--unset: on all branches)"),
-                           ("set-tag", "TAG", "pin to TAG (a branch stays the one to look "
-                                              "for newer tags on; a pattern: the newest "
-                                              "matching tag on it); --unset: follow the "
-                                              "branch again")):
+                           ("set-branch", "BRANCH", "follow BRANCH - for all files of the "
+                                                    "source; pinned ones look for newer tags "
+                                                    "(or those of a pattern) on it")):
         a = add_command(actions, name, parents=[colorp], help=hlp)
         a.add_argument("name", metavar="NAME" if name != "rename" else "OLD",
                        help="key of the [source]")
-        if name in ("set-tag", "set-branch"):
-            a.add_argument("value", metavar=arg, nargs="?")
-            a.add_argument("--unset", action="store_true",
-                           help="remove the tag: follow the source's branch again"
-                           if name == "set-tag" else "remove the branch of a pinned source: "
-                           "look for newer tags on all branches")
-        else:
-            a.add_argument("value", metavar=arg)
+        a.add_argument("value", metavar=arg)
     a = add_command(actions, "map", parents=[colorp],
                     help="use a local checkout for an upstream URL (this repo's config; "
                          "--global for all repos)")
