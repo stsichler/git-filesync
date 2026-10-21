@@ -1408,7 +1408,7 @@ check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
 check "add DIR: existing file adapted" "$(st docs)" " A"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Link docs/x.md to nowhere/m11"
 check "add DIR --overwrite: existing file replaced" \
-  "$(git filesync add -n --force --overwrite docs nowhere/m11 --include /x.md | grep -c 'replacing the existing file')" "1"
+  "$(fsd add -n --force --overwrite docs nowhere/m11 --include /x.md | grep -c 'replacing the existing file')" "1"
 
 # pattern forms
 check "pattern '**/v1/*'" "$(git filesync add -n all nowhere/m11 -p api --include '**/v1/*' | lines)" "2"
