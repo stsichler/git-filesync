@@ -162,8 +162,8 @@ kind of output, same exit codes, same caution with uncommitted changes.
 
 **Only `pull` commits**, like `git pull` – and for the same reason: it
 brings in changes from elsewhere, and its commit message comes from there
-(the upstream commits since the last sync), one commit per file, so `git log
-FILE` shows every sync. All other commands carry out a decision of yours,
+(the upstream commits since the last sync, for each file), one commit per
+`pull`, so `git log FILE` shows every sync of FILE. All other commands carry out a decision of yours,
 often together with changes of your own, so – like `git add`, `git rm`,
 `git mv`, `git restore` – they only change the working tree or stage, and
 you commit: `add`, `rm`, `mv`, `set`, `unlink`, `edit` and `source` stage,
@@ -190,7 +190,6 @@ the command and lists them.
 | Option | Commands | Effect |
 |---|---|---|
 | `--no-fetch` | `status`, `pull`, `diff`, `difftool`, `add`, `set`, `source -v` | don't fetch, use the cached state (offline) |
-| `--remote` | same | ignore local checkout mappings (see [`source map`](#source-map)) |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
 ### `status`
@@ -284,7 +283,12 @@ Upstream changes since 3f2a9c1:
 - Add support for chunked transfer (a1b2c3d)
 ```
 
-Each sync commit contains the file and its updated entry in `.git-filesync`.
+A `pull` makes **one commit** for all files it syncs, with their updated
+entries in `.git-filesync`. For several files the subject says how many
+(`[filesync] Sync 3 files from owner/lib`, or `… from 2 sources`), and each
+file gets a section of the message like the one above. A file that can't be
+synced (a refusal, an error) is reported and left out; the others are still
+synced and committed.
 
 | Option | Effect |
 |---|---|
@@ -293,26 +297,23 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH, once: the files keep following their own branch or tag (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG, once (as `-b`) |
 | `--overwrite` | discard local adaptations and take the upstream version as is (also when the file is up to date) |
-| `--autostash` | set uncommitted changes aside, sync, re-apply them |
 | `--no-edit` | commit with the proposed message without opening the editor |
-| `--no-commit` | only update and stage the file and its entry; a plain `git commit` then offers the proposed message (see [Proposed commit messages](#proposed-commit-messages)) |
+| `--no-commit` | only update and stage the files and their entries; a plain `git commit` then offers the proposed message (see [Proposed commit messages](#proposed-commit-messages)) |
 | `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename upstream, and every refusal |
 | `-v`, `--verbose` | before each file, a line on where it comes from (as in `status -v`) and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` |
 
 **Adaptations** are merged with the new upstream version (3-way merge, base =
 the last synced version). On conflicts the file gets the usual conflict
-markers; resolve them, then `git add` the file and run `git commit`, which
-offers the proposed message (see [Proposed commit
-messages](#proposed-commit-messages)). `--overwrite` skips the merge and
-discards the adaptations.
+markers, and **nothing is committed**, like `git merge`: the other synced
+files stay staged. Resolve the conflicts, then `git add` the files and run
+`git commit`, which offers the proposed message for all of them (see
+[Proposed commit messages](#proposed-commit-messages)). `--overwrite` skips
+the merge and discards the adaptations.
 
 **Uncommitted changes:** like `git pull`, `pull` refuses a file with
 uncommitted changes (`your local changes … would be overwritten by pull`):
-commit or stash them first. `--autostash` sets them aside, syncs (the sync
-commit contains only the synced version) and re-applies them to the working
-file. This works for modified files, not for deleted or not yet committed
-ones. If the sync itself ends in conflicts, the stashed version is not
-re-applied but kept in `.git/FILESYNC_STASH_*`.
+commit or stash them first (`git stash`, then `git stash pop` after the
+sync), or discard them with `git restore`.
 
 **Revisions:** `--commit` accepts branch names (`develop` means the current
 upstream `develop`), tags and commit ids. Recorded is the commit that last
@@ -325,9 +326,6 @@ commit would record their new state without their content). `pull`
 therefore refuses to commit while `.git-filesync` has uncommitted changes
 for other files – commit those first (e.g. after [`add`](#add)), or use
 `--no-commit` to stage everything and commit it together.
-
-With `--all`, a file that can't be synced (conflict, strict violation, file
-deleted upstream, …) is reported and the other files are still synced.
 
 For files of a source [pinned to a tag](#pinning-to-a-tag), `pull` ends with
 a hint if upstream has [newer tags](#newer-tags):
@@ -669,7 +667,7 @@ owner/lib-2	https://github.com/owner/lib.git (tag v1.2.0 on main, newest v1.4.0,
 owner/lib-3	https://github.com/owner/lib.git (tag v1.2.0, newest v1.2.1 on maint; v1.4.0 on main, 1 file)
 ```
 
-`source -v` accepts `--no-fetch` and `--remote` like `status`.
+`source -v` accepts `--no-fetch` like `status`.
 
 A change that would make two sources identical (same URL and same branch or
 tag) is refused; move the files with [`set -b` / `--tag`](#set)
@@ -734,7 +732,8 @@ works offline.
 - no local branch of that name in the checkout → `origin/<branch>` as last
   fetched there is used, with a note
 
-`--remote` bypasses the mapping.
+To work against the server again, remove the mapping (`source map URL
+--unset`).
 
 Without a mapping, `status` and `pull` work against the upstream repository on
 the server. It is cached as a blobless partial clone in `~/.cache/git-filesync`

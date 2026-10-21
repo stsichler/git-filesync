@@ -53,12 +53,13 @@ Basic commands:
         --exit-code             exit 1 if something is to sync or a strict
                                 file is modified
 
-    pull PATH... | --all        sync to the upstream version of the file and
-                                commit with a message listing the upstream
-                                commits since the last sync; adaptations are
-                                merged, uncommitted changes refused; a file
-                                renamed upstream is followed, one
-                                deleted there is reported
+    pull PATH... | --all        sync to the upstream version of the files and
+                                commit them in one commit, with a message
+                                listing the upstream commits since the last
+                                sync per file; adaptations are merged (with
+                                conflicts: nothing committed), uncommitted
+                                changes refused; a file renamed upstream is
+                                followed, one deleted there is reported
         --all                   all files with something to sync
         --commit REV            sync to this upstream revision (one file;
                                 also backwards)
@@ -67,7 +68,6 @@ Basic commands:
                                 (to switch: set -b/--tag, source set-*)
         --tag TAG               sync to TAG, once (as -b)
         --overwrite             discard local adaptations instead of merging
-        --autostash             set uncommitted changes aside, re-apply after
         --no-edit               commit without opening the editor
         --no-commit             only stage; a plain `git commit` offers the
                                 proposed message (via .git/SQUASH_MSG)
@@ -219,7 +219,6 @@ Advanced commands:
     Common options:
         --no-fetch              use the cached state, don't fetch (status,
                                 pull, diff, difftool, add, set, source -v)
-        --remote                ignore local checkout mappings (same commands)
         --color[=WHEN], --no-color  always, never or auto (default)
 
 Exit codes: 0 ok, 1 unfinished (conflicts, not committed, --exit-code),
@@ -1002,7 +1001,6 @@ class Context:
     def __init__(self, args, repo=None):
         self.repo_top = repo.top if repo else None
         self.fetch = not getattr(args, "no_fetch", False)
-        self.force_remote = getattr(args, "remote", False)
         # fetch even for a tag already cached, to learn about newer tags
         self.want_tags = getattr(args, "verbose", False) or args.cmd in ("pull", "source")
         self._sources = {}
@@ -1029,8 +1027,6 @@ class Context:
 
     def local_path(self, url):
         """Mapped local checkout for url (validated), or None."""
-        if self.force_remote:
-            return None
         if self._mappings is None:
             # repo-local mapping overrides a global one (later entries win)
             self._mappings = {norm_url(u): d for _, _, u, d in
@@ -2247,7 +2243,11 @@ def target_opts(args):
         ("--commit", args.commit), ("-b", args.branch), ("--tag", args.tag)) if val)
 
 
-def pull_one(repo, reg, st, args):
+def pull_one(repo, reg, st, args, check_entries):
+    """Sync one file: write it and update its entry; staged, unless it has
+    merge conflicts. Returns (its part of the commit message, conflicts),
+    or None if there is nothing to do (or only a dry run). check_entries()
+    is called before anything is changed."""
     link, src = st.link, st.src
     path = st.new_path                   # differs from link.path if renamed upstream
     new, new_blob = st.new, st.new_blob
@@ -2259,15 +2259,7 @@ def pull_one(repo, reg, st, args):
                       f"({src.short(st.moved[2])}) - keep the file with "
                       f"'git filesync unlink {rel}', or delete it too with "
                       f"'git filesync rm {rel}'")
-    # like `git pull`: uncommitted changes are never merged into a sync
-    # commit; --autostash sets them aside and re-applies them afterwards
-    dirty = st.worktree in ("modified", "deleted", "added")
-    stash = None
-    if dirty and args.autostash:
-        if st.worktree != "modified":
-            raise FsError(f"{st.rel}: --autostash can't set aside a {st.worktree} file")
-        stash = repo.read_content(repo.worktree_blob(link.target, write=True), st.rel)
-    local_mod = st.committed == "adapted" if stash is not None else st.local == "modified"
+    local_mod = st.local == "modified"
     discard = args.overwrite and local_mod
     if st.strict and local_mod and not discard:
         rel = path_arg(repo, st.rel)
@@ -2280,12 +2272,13 @@ def pull_one(repo, reg, st, args):
             and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
               + (" (adaptations kept)" if st.committed == "adapted" else ""))
-        return EXIT_OK
-    if dirty and stash is None:
+        return None
+    # like `git pull`: uncommitted changes are never merged into a sync commit
+    if st.worktree in ("modified", "deleted", "added"):
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
-                      "commit or stash them first, or use --autostash "
-                      f"('git restore {path_arg(repo, st.rel)}' discards them)")
-    check_other_entries(reg, [st.rel], args)
+                      "commit or stash them first ('git stash'; "
+                      f"'git restore {path_arg(repo, st.rel)}' discards them)")
+    check_entries()
     for w in st.warnings:
         warn(f"{st.rel}: {w}")
 
@@ -2299,8 +2292,7 @@ def pull_one(repo, reg, st, args):
             raise FsError(f"{st.rel}: base version {st.old_blob[:12]} unavailable; "
                           "cannot merge local modifications")
         base = repo.read_content(base, st.rel)
-        ours = repo.read_content(st.head_blob if stash is not None else
-                                  repo.worktree_blob(link.target, write=True), st.rel)
+        ours = repo.read_content(repo.worktree_blob(link.target, write=True), st.rel)
         old_label = src.short(st.old) if st.has_old else st.old_blob[:8]
         conflicts, content = merge3(ours, base, theirs,
                                     [f"{st.rel} (local)", f"upstream {old_label}",
@@ -2314,8 +2306,7 @@ def pull_one(repo, reg, st, args):
             ([f"renamed upstream: {link.path} -> {path}"] if path != link.path else []) + \
             (["discarding adaptations"] if discard else []) + \
             ([paint(f"{conflicts} merge conflict(s)", "boldred") if conflicts else
-              "adaptations merged cleanly"] if merged else []) + \
-            (["uncommitted changes set aside and re-applied"] if stash is not None else [])
+              "adaptations merged cleanly"] if merged else [])
         verb = "restore" if new_blob == st.old_blob and discard else "sync"
         print(f"{st.rel}: would {verb} to {link.name}@{src.short(new)}"
               + (f" ({'; '.join(notes)})" if notes else ""))
@@ -2323,7 +2314,7 @@ def pull_one(repo, reg, st, args):
             rel = path_arg(repo, st.rel)
             print(f"hint: compare the adaptations ('git filesync diff {rel}') with the "
                   f"upstream changes ('git filesync diff --upstream{target_opts(args)} {rel}')")
-        return EXIT_OK
+        return None
 
     old_path = link.path
     link.target.parent.mkdir(parents=True, exist_ok=True)
@@ -2332,33 +2323,25 @@ def pull_one(repo, reg, st, args):
         link.set("path", path)
     link.set("commit", new)
     link.set("blob", new_blob)
-    reg.finish()
-
-    msg = build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discard)
     if conflicts:
-        if stash is not None:
-            stashfile = repo.state_file("FILESYNC_STASH_", st.rel)
-            stashfile.write_bytes(repo.to_worktree(stash, st.rel))
-            print(f"{st.rel}: autostash kept in {shown_path(repo, stashfile)} (not re-applied because of the conflicts)")
-        cmd, note = commit_hint(repo, st.rel, msg)
-        print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}. "
-              f"Resolve them, then run:\n    git add {path_arg(repo, st.rel)}\n    {cmd}\n({note})")
-        return EXIT_PENDING
-    repo.git(["add", "--", lit(st.rel)])
-    rc = commit_staged(repo, st.rel, msg, args, "synced and staged")
-    if stash is not None:
-        # re-apply the stashed uncommitted changes on top of the synced version
-        head = repo.read_content(st.head_blob, st.rel)
-        c2, data = merge3(content, head, stash, [f"{st.rel} (synced)", f"{st.rel} (HEAD)",
-                                                 f"{st.rel} (autostash)"])
-        link.target.write_bytes(repo.to_worktree(data, st.rel))
-        if c2:
-            print(f"{st.rel}: {paint(f'applying autostash resulted in {c2} conflict(s)', 'boldred')}"
-                  " - resolve them in the working tree")
-            rc = EXIT_PENDING
-        else:
-            print(f"{st.rel}: {paint('applied autostash', 'green')} (uncommitted changes restored)")
-    return rc
+        print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}")
+    else:
+        repo.git(["add", "--", lit(st.rel)])
+        print(f"{st.rel}: {paint('synced', 'green')}"
+              + (" (adaptations merged)" if merged else ""))
+    return build_message(st, src, new, new_blob, old_path, path, merged, conflicts,
+                         discard), conflicts
+
+
+def pull_message(parts, names):
+    """The commit message of a pull: a file's own message, or for several
+    files a subject over all and each file's message as a section of it."""
+    if len(parts) == 1:
+        return parts[0]
+    sources = sorted(set(names))
+    what = f"from {sources[0]}" if len(sources) == 1 else f"from {len(sources)} sources"
+    return f"{MSG_PREFIX}Sync {len(parts)} files {what}\n\n" + \
+        "\n".join(m[len(MSG_PREFIX):] if m.startswith(MSG_PREFIX) else m for m in parts)
 
 
 def switch_spec(source, args):
@@ -2415,6 +2398,24 @@ def newest_hint(name, tag, line, newest):
             f"{newest_text(newest, line)} (use {switch.format(newest[0][0][0])})")
 
 
+def commit_pull(repo, reg, synced, args):
+    """One commit for all files a pull synced, with their entries - none if
+    a file has merge conflicts: then everything stays staged, and a plain
+    `git commit` offers the message once they are resolved."""
+    reg.finish()
+    rels = [rel for rel, _, _, _ in synced]
+    msg = pull_message([m for _, _, m, _ in synced], [name for _, name, _, _ in synced])
+    name = rels[0] if len(rels) == 1 else plural(len(rels), "file")
+    conflicted = [rel for rel, _, _, c in synced if c]
+    if conflicted:
+        cmd, note = commit_hint(repo, name, msg, rels)
+        add = " ".join(path_arg(repo, r) for r in conflicted)
+        print(f"{paint('merge conflicts', 'boldred')} - nothing committed. Resolve them, "
+              f"then run:\n    git add {add}\n    {cmd}\n({note})")
+        return EXIT_PENDING
+    return commit_staged(repo, name, msg, args, "synced and staged", rels)
+
+
 def cmd_pull(ctx, repo, args):
     reg = Registry(repo)
     reg.dry_run = args.dry_run
@@ -2428,7 +2429,16 @@ def cmd_pull(ctx, repo, args):
     rc, done, moved = EXIT_OK, 0, False
     once = args.branch or args.tag      # sync to another branch or tag, once
     prefetch(ctx, repo, links)
-    newest = {}
+    newest, synced = {}, []             # synced: (rel, source, message, conflicts)
+    selected = [lk.rel for lk in links]
+    checked = []
+
+    def check_entries():
+        """The commit takes .git-filesync along: other uncommitted entries
+        would get into it without their files."""
+        if not checked:
+            check_other_entries(reg, selected, args)
+            checked.append(True)
     for link in links:
         st = evaluate(ctx, repo, link)
         if st.error:
@@ -2447,11 +2457,15 @@ def cmd_pull(ctx, repo, args):
             if once:
                 st.target, st.once = target_rev(ctx, link, args), once_text(args)
             before = link.commit
-            rc = max(rc, pull_one(repo, reg, st, args))
+            result = pull_one(repo, reg, st, args, check_entries)
+            if result:
+                synced.append((st.rel, link.name) + result)
             moved = moved or once and Link(reg, link.rel).commit != before
         except FsError as e:   # report and carry on with the other files
             error(str(e) if str(e).startswith(st.rel) else f"{st.rel}: {e}")
             rc = EXIT_ERROR
+    if synced:
+        rc = max(rc, commit_pull(repo, reg, synced, args))
     if moved and not args.dry_run:
         opt = f"--tag {args.tag}" if args.tag else f"-b {args.branch}"
         print(f"hint: the links still follow their own branch or tag, so a plain pull goes "
@@ -3666,8 +3680,6 @@ def main(argv=None):
     common = argparse.ArgumentParser(add_help=False, parents=[colorp])
     common.add_argument("--no-fetch", action="store_true",
                         help="do not fetch upstream repositories, use cached state")
-    common.add_argument("--remote", action="store_true",
-                        help="ignore local checkout mappings, use the remote URL")
 
     argv = list(sys.argv[1:] if argv is None else argv)
     # the help in colors exactly when the output on stdout would be colored
@@ -3701,8 +3713,6 @@ def main(argv=None):
                    help="only stage; a plain 'git commit' offers the proposed message")
     p.add_argument("--overwrite", action="store_true",
                    help="discard local adaptations instead of merging them")
-    p.add_argument("--autostash", action="store_true",
-                   help="set uncommitted changes aside and re-apply them after the sync")
     p.add_argument("--dry-run", action="store_true",
                    help="only report what would happen (incl. merge conflicts)")
     p.add_argument("-v", "--verbose", action="store_true",

@@ -862,13 +862,12 @@ check "status -v: all files listed" \
   "$(git filesync status -v | grep -A6 '^Linked files:' | grep -cE "^${TAB}(unmodified|adapted):")" "5"
 check "hook: adapted alone is quiet" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'c\.c')" "0"
 
-# pull refuses to overwrite uncommitted changes, unless --autostash
+# pull refuses to overwrite uncommitted changes (like git pull)
 check "pull refuses uncommitted changes" "$(rc git filesync pull --no-edit d.c)" "2"
-check "pull refusal message" "$(git filesync pull --no-edit d.c 2>&1 | grep -c 'would be overwritten by pull')" "1"
+check "pull refusal message" "$(git filesync pull --no-edit d.c 2>&1 | grep -c "would be overwritten by pull - commit or stash them first ('git stash'")" "1"
 check "refused pull leaves file alone" "$(oneline < d.c)" "1 2 3-wip 4 5 "
-check "pull --autostash" "$(rc git filesync pull --no-edit --autostash d.c)" "0"
-check "autostash: commit has synced version only" "$(git show HEAD:d.c | oneline)" "1 2 3 4 5-up "
-check "autostash: uncommitted change re-applied" "$(oneline < d.c)" "1 2 3-wip 4 5-up "
+check "--autostash is gone" "$(rc git filesync pull --no-edit --autostash d.c)" "2"
+check "--remote is gone" "$(rc git filesync status --remote)" "2"
 quiet git filesync pull --no-edit b.c
 check "pull merges committed adaptation" "$(oneline < b.c)" "1-adapt 2 3 4 5-up "
 
@@ -887,6 +886,25 @@ check "diff --committed: no wip" "$(git filesync diff --committed c.c | grep -c 
 check "diff: includes wip" "$(git filesync diff c.c | grep -c 3-wip)" "1"
 check "diff -- --exit-code: no difference" "$(rc git filesync diff a.c -- --exit-code)" "0"
 check "diff -- --exit-code: difference" "$(rc git filesync diff c.c -- --exit-code)" "1"
+
+# one pull, one commit: the files share it, each with a section of its own
+(cd ../m5 && sedi 's/^4$/4-up/' a.c b.c && git commit -qam up4)
+N=$(git rev-list --count HEAD)
+quiet git filesync pull --no-edit a.c b.c
+check "pull of two files: one commit" "$(( $(git rev-list --count HEAD) - N ))" "1"
+check "pull of two files: subject" "$(git log -1 --format=%s | sed 's/ from .*//')" "[filesync] Sync 2 files"
+check "pull of two files: a section each" "$(git log -1 --format=%B | grep -cE '^Sync (a|b)\.c from ')" "2"
+check "pull of two files: both in the commit" "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" ".git-filesync a.c b.c "
+# a merge conflict in one of them: nothing committed, the others stay staged
+(cd ../m5 && sedi 's/^1$/1-up/' a.c b.c && git commit -qam up3)
+N=$(git rev-list --count HEAD)
+OUT=$(git filesync pull --no-edit a.c b.c); RC=$?
+check "conflict: nothing committed, exit 1" "$(( $(git rev-list --count HEAD) - N ))-$RC" "0-1"
+check "conflict: the others staged" "$(git status --porcelain a.c b.c .git-filesync | oneline)" "M  .git-filesync M  a.c  M b.c "
+check "conflict: how to go on" "$(echo "$OUT" | grep -cE '^    (git add b\.c|git commit)$')" "2"
+printf '1-both\n2\n3\n4-up\n5-up\n' > b.c
+git add b.c && git commit -q --no-edit
+check "conflict resolved: one commit for both" "$(git log -1 --format=%B | grep -cE '^Sync (a|b)\.c from ')" "2"
 
 
 # =============================================================================

@@ -161,7 +161,8 @@ Upstream changes since 3f2a9c1:
 - Add support for chunked transfer (a1b2c3d)
 ```
 
-Each sync commit contains the file and its updated entry in `.git-filesync`.
+A `pull` commits all files it syncs, with their entries in `.git-filesync`,
+in one commit.
 
 ## Commands
 
