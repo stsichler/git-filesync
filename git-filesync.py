@@ -3598,13 +3598,15 @@ def main(argv=None):
                    help="before each file: where it comes from and the version synced so far")
 
     for name, hlp in (("diff", "show local modifications against the synced upstream version"),
-                      ("difftool", "same in the configured difftool")):
+                      ("difftool", "show local modifications against the synced upstream "
+                                   "version in the configured difftool")):
         p = add_command(sub, name, parents=[common], help=hlp,
                            epilog="Options after '--' are passed to git " + name + ".")
         p.add_argument("files", nargs="*", help="files or directories (default: all)")
         g = p.add_mutually_exclusive_group()
         g.add_argument("--upstream", action="store_true",
-                       help="show what 'pull' would bring instead (synced -> current upstream)")
+                       help="show what 'pull' would bring instead of the local modifications "
+                            "(synced -> current upstream)")
         g.add_argument("--committed", action="store_true",
                        help="only the committed adaptations (synced -> HEAD)")
         p.add_argument("--commit", metavar="REV",
@@ -3732,7 +3734,7 @@ def main(argv=None):
                        help="show, list or clean up the cache of upstream clones")
     actions = p.add_subparsers(dest="action", metavar="ACTION")
     add_command(actions, "list", parents=[colorp],
-                       help="the clones, most recently used first: size, last used, URL")
+                       help="list the clones, most recently used first: size, last used, URL")
     a = add_command(actions, "prune", parents=[colorp],
                            help="remove clones not used for a while (default: the configured "
                                 "limits, filesync.cacheMaxAge / cacheMaxSize)")
@@ -3749,8 +3751,8 @@ def main(argv=None):
                     help="install the pre-push/post-merge hooks")
     p.add_argument("--force", action="store_true",
                    help="add our lines to existing hooks (right after the #! line)")
-    add_command(sub, "uninstall-hooks", parents=[colorp], help="remove the hooks again")
-    p = add_command(sub, "hook", parents=[colorp], help="what the installed hooks run")
+    add_command(sub, "uninstall-hooks", parents=[colorp], help="remove the pre-push/post-merge hooks of git-filesync")
+    p = add_command(sub, "hook", parents=[colorp], help="run the checks of an installed hook (called by the hooks)")
     p.add_argument("name", choices=list(HOOKS))
     p.add_argument("hook_args", nargs=argparse.REMAINDER, help="the hook's arguments")
 
