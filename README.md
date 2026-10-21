@@ -164,6 +164,8 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 
 ## Commands
 
+Basic commands – what you need day to day:
+
 | Command | Purpose |
 |---|---|
 | `status [PATH…]` | state of the linked files, like `git status` |
@@ -171,15 +173,20 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced upstream version |
 | `restore PATH…` | files back to the synced upstream version, like `git restore` |
 | `add FILE\|DIR URL\|SOURCE` | link a file (or all files of an upstream directory) to upstream |
+| `rm PATH…`, `unlink PATH…`, `mv OLD NEW` | remove links with their files (like `git rm`) or without, move them |
+
+Advanced commands:
+
+| Command | Purpose |
+|---|---|
 | `set PATH… OPTIONS` | change source, upstream path or strict of linked files |
 | `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
-| `rm PATH…`, `unlink PATH…`, `mv OLD NEW` | remove links with their files (like `git rm`) or without, move them |
 | `source [ACTION …]` | list sources; rename, change URL, branch or tag |
 | `source map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
 | `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear |
 | `install-hooks`, `uninstall-hooks` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |
 
-`git filesync <command> -h` lists the options of a command. The
+`git filesync <command> -h` describes a command and lists its options. The
 **[manual](MANUAL.md)** describes all commands and options in detail,
 along with the `.git-filesync` file, local modifications, strict files,
 local checkouts, Git LFS, line endings and CI.

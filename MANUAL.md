@@ -13,7 +13,9 @@ For motivation and installation see the [README](README.md).
 - [Commands](#commands)
   - [Common options](#common-options)
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool) · [`restore`](#restore)
-  - [`add`](#add) · [`set`](#set) · [`edit`](#edit) · [`rm`](#rm) · [`unlink`](#unlink) · [`mv`](#mv) · [`source`](#source) · [`source map`](#source-map) · [`cache`](#cache)
+  - [`add`](#add) · [`rm`](#rm) · [`unlink`](#unlink) · [`mv`](#mv)
+- [Advanced commands](#advanced-commands)
+  - [`set`](#set) · [`edit`](#edit) · [`source`](#source) · [`source map`](#source-map) · [`cache`](#cache)
   - [`install-hooks`, `uninstall-hooks`](#install-hooks-uninstall-hooks)
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted upstream](#files-renamed-or-deleted-upstream)
@@ -129,17 +131,26 @@ changes with `git restore`, or lift the restriction (`git filesync set
 
 ## Commands
 
+Basic commands – what you need day to day:
+
 | Command | Purpose |
 |---|---|
 | [`status [PATH…]`](#status) | state of the linked files, like `git status` |
 | [`pull PATH…`, `pull --all`](#pull) | sync files from upstream |
 | [`diff [PATH…] [-- OPTS]`](#diff) | local changes against the synced upstream version |
 | [`difftool [PATH…] [-- OPTS]`](#difftool) | the same in your difftool |
+| [`restore PATH…`](#restore) | files back to the synced upstream version, like `git restore` |
 | [`add FILE\|DIR URL\|SOURCE`](#add) | link a file – or all files of a directory – to the upstream repository |
-| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, upstream path, strict |
-| [`edit`](#edit) | edit `.git-filesync` in the editor |
+| [`rm PATH…`](#rm) | remove linked files and their links, like `git rm` |
 | [`unlink PATH…`](#unlink) | remove links, keep the files |
 | [`mv OLD NEW`](#mv) | move a linked file and its link |
+
+[Advanced commands](#advanced-commands) – to change links and sources, and for setup:
+
+| Command | Purpose |
+|---|---|
+| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, upstream path, strict |
+| [`edit`](#edit) | edit `.git-filesync` in the editor |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL, branch or tag |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
 | [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear |
@@ -537,6 +548,29 @@ git filesync add proto https://github.com/owner/backend.git -p api \
     --include '*.proto' --exclude '*_test.proto' --exclude test/
 ```
 
+### `rm`
+
+`rm PATH…` – like `git rm`: remove the files and their links; both are
+staged. A file with uncommitted changes (or one never committed) is not
+removed – nothing is, then – unless `-f` / `--force` is given; a committed
+adaptation is no reason to refuse. A file that is gone already just loses
+its link. `-n` / `--dry-run` only lists what would be removed. To keep the
+files, use [`unlink`](#unlink).
+
+### `unlink`
+
+`unlink PATH…` – remove the links; the files themselves are kept.
+`.git-filesync` is staged. `-n` / `--dry-run` only lists what would be
+unlinked.
+
+### `mv`
+
+`mv OLD NEW` – move a linked file (`git mv`) and its link together; NEW may
+be an existing directory. Both are staged. `-n` / `--dry-run` only shows
+what would be moved.
+
+## Advanced commands
+
 ### `set`
 
 `set PATH… OPTIONS` – change the link of linked files: their source, their
@@ -598,27 +632,6 @@ For the usual changes, the commands that know what they mean are safer:
 branch, tag, name of a source), [`rm`](#rm), [`unlink`](#unlink), [`mv`](#mv). `edit`
 keeps whatever you write: a changed `commit` or `blob` changes what counts
 as an adaptation.
-
-### `rm`
-
-`rm PATH…` – like `git rm`: remove the files and their links; both are
-staged. A file with uncommitted changes (or one never committed) is not
-removed – nothing is, then – unless `-f` / `--force` is given; a committed
-adaptation is no reason to refuse. A file that is gone already just loses
-its link. `-n` / `--dry-run` only lists what would be removed. To keep the
-files, use [`unlink`](#unlink).
-
-### `unlink`
-
-`unlink PATH…` – remove the links; the files themselves are kept.
-`.git-filesync` is staged. `-n` / `--dry-run` only lists what would be
-unlinked.
-
-### `mv`
-
-`mv OLD NEW` – move a linked file (`git mv`) and its link together; NEW may
-be an existing directory. Both are staged. `-n` / `--dry-run` only shows
-what would be moved.
 
 ### `source`
 
