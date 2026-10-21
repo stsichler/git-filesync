@@ -232,6 +232,7 @@ Manual: https://github.com/stsichler/git-filesync/blob/main/MANUAL.md
 
 import argparse
 import fnmatch
+import inspect
 import hashlib
 import os
 import re
@@ -290,17 +291,38 @@ STYLES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33",
 _color = {"out": False, "err": False}
 
 
+def color_wanted(mode, stream, cwd=None):
+    """Colors on stream? Like git: --color, NO_COLOR, color.filesync/color.ui."""
+    if mode == "always":
+        return True
+    if mode == "never" or os.environ.get("NO_COLOR"):
+        return False
+    tty = "true" if stream.isatty() else "false"
+    p = git(["config", "--get-colorbool", "color.filesync", tty], cwd=cwd, check=False)
+    return out(p) == "true"
+
+
+def color_option(argv):
+    """The --color / --no-color given in argv (the last one wins), before
+    parsing it: the help needs colors decided before argparse prints it."""
+    mode = "auto"
+    for i, a in enumerate(argv):
+        if a == "--":
+            break
+        if a == "--no-color":
+            mode = "never"
+        elif a == "--color":
+            nxt = argv[i + 1] if i + 1 < len(argv) else None
+            mode = nxt if nxt in ("always", "never", "auto") else "always"
+        elif a.startswith("--color="):
+            mode = a[len("--color="):]
+    return mode
+
+
 def setup_colors(mode, cwd=None):
     """Decide per stream like git: --color, NO_COLOR, color.filesync/color.ui."""
-    def want(stream):
-        if mode == "always":
-            return True
-        if mode == "never" or os.environ.get("NO_COLOR"):
-            return False
-        tty = "true" if stream.isatty() else "false"
-        p = git(["config", "--get-colorbool", "color.filesync", tty], cwd=cwd, check=False)
-        return out(p) == "true"
-    _color["out"], _color["err"] = want(sys.stdout), want(sys.stderr)
+    _color["out"], _color["err"] = color_wanted(mode, sys.stdout, cwd), \
+        color_wanted(mode, sys.stderr, cwd)
     if os.name == "nt" and (_color["out"] or _color["err"]):
         os.system("")          # enables ANSI escape processing in the Windows console
 
@@ -3556,20 +3578,46 @@ def add_command(sub, name, **kw):
 BASIC_COMMANDS = ("status", "pull", "diff", "difftool", "restore", "add", "rm", "unlink", "mv")
 
 
-def command_list(sub):
-    """--help: the commands with their summaries, basic ones first (the
-    rest in the order they were defined, `hook` last)."""
-    width = max(shutil.get_terminal_size().columns - 2, 40)
-    helps = {a.dest: a.help for a in sub._choices_actions}
+class NoTheme:
+    """argparse's color theme before Python 3.14: no colors."""
+    def __getattr__(self, name):
+        return ""
 
-    def group(title, names):
-        lines = [f"{title}:"]
-        for n in names:
-            lines += textwrap.wrap(helps[n], width, initial_indent=f"  {n:<18}",
-                                   subsequent_indent=" " * 20)
-        return "\n".join(lines)
-    advanced = [n for n in helps if n not in BASIC_COMMANDS]
-    return group("basic commands", BASIC_COMMANDS) + "\n\n" + group("advanced commands", advanced)
+
+class MainParser(argparse.ArgumentParser):
+    """The top-level parser: usage line and the grouped command list (basic
+    commands first, the rest in the order they were defined, `hook` last)
+    in argparse's own colors - which exist from Python 3.14 on."""
+    sub = None        # the subparsers action, set once the commands exist
+
+    def theme(self):
+        return getattr(self._get_formatter(), "_theme", None) or NoTheme()
+
+    def format_usage(self):
+        t = self.theme()
+        return (f"{t.usage}usage: {t.reset}{t.prog}{self.prog}{t.reset} "
+                f"[{t.summary_short_option}-h{t.reset}] "
+                f"[{t.summary_long_option}--version{t.reset}] "
+                f"{t.summary_action}<command>{t.reset} ...\n")
+
+    def format_help(self):
+        t = self.theme()
+        width = max(shutil.get_terminal_size().columns - 2, 40)
+        helps = {a.dest: a.help for a in self.sub._choices_actions}
+
+        def group(title, names):
+            lines = [f"{t.heading}{title}:{t.reset}"]
+            for n in names:
+                text = textwrap.wrap(helps[n], width - 20) or [""]
+                lines.append(f"  {t.action}{n}{t.reset}{' ' * (18 - len(n))}{text[0]}")
+                lines += [" " * 20 + x for x in text[1:]]
+            return "\n".join(lines)
+        advanced = [n for n in helps if n not in BASIC_COMMANDS]
+        return (self.format_usage() + "\n" + super().format_help()
+                + "\n" + group("basic commands", BASIC_COMMANDS)
+                + "\n\n" + group("advanced commands", advanced)
+                + "\n\nWithout a command: status. 'git filesync <command> -h' describes a "
+                  "command\nand lists its options.\n")
 
 
 def main(argv=None):
@@ -3591,11 +3639,16 @@ def main(argv=None):
     common.add_argument("--remote", action="store_true",
                         help="ignore local checkout mappings, use the remote URL")
 
-    ap = argparse.ArgumentParser(prog="git filesync",
-                                 description="Keep single files in sync between Git repositories.",
-                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # the help in colors exactly when the output on stdout would be colored
+    # (argparse has colors from Python 3.14 on, and checks the terminal too)
+    color = {"color": color_wanted(color_option(argv), sys.stdout)} \
+        if "color" in inspect.signature(argparse.ArgumentParser).parameters else {}
+    ap = MainParser(prog="git filesync", usage=argparse.SUPPRESS,
+                    description="Keep single files in sync between Git repositories.", **color)
     ap.add_argument("--version", action="version", version=f"git-filesync {__version__}")
-    sub = ap.add_subparsers(dest="cmd", metavar="<command>")
+    sub = ap.sub = ap.add_subparsers(dest="cmd", metavar="<command>", prog="git filesync",
+                                     parser_class=argparse.ArgumentParser)
 
     p = add_command(sub, "status", parents=[common], help="show sync state of linked files")
     p.add_argument("paths", nargs="*", help="files or directories (default: all)")
@@ -3791,14 +3844,8 @@ def main(argv=None):
     p.add_argument("name", choices=list(HOOKS))
     p.add_argument("hook_args", nargs=argparse.REMAINDER, help="the hook's arguments")
 
-    ap.epilog = command_list(sub) + (
-        "\n\nWithout a command: status. 'git filesync <command> -h' describes a command\n"
-        "and lists its options.")
-    # the grouped list instead of argparse's; hiding that hides <command> in the usage too
-    sub.help = argparse.SUPPRESS
-    ap.usage = "git filesync [-h] [--version] <command> ..."
+    sub.help = argparse.SUPPRESS      # MainParser lists the commands in groups
 
-    argv = list(sys.argv[1:] if argv is None else argv)
     extra = []
     if argv and argv[0] in ("diff", "difftool") and "--" in argv:
         i = argv.index("--")

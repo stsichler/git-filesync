@@ -1065,7 +1065,9 @@ strict violations and errors bold red.
 Colors follow `color.filesync`, falling back to `color.ui` (default: on for
 terminals); `--color[=always|never|auto]` and `--no-color` override that,
 and `NO_COLOR` turns colors off. Hook output on stderr is colored the same
-way. `diff` is colored by `git diff` itself.
+way. `diff` is colored by `git diff` itself. The help (`-h`) follows the
+same rules, with Python 3.14 or later (earlier versions have no colors for
+it); being Python's own, it is colored only on a terminal.
 
 ### CI
 
