@@ -1512,6 +1512,8 @@ check "-b: registry unchanged" \
   "$(git config -f .git-filesync source.$SRC12.branch) $(git config -f .git-filesync source.$SRC12.tag)" "main v1.0"
 
 # refusals and dry runs change nothing
+check "pull -v: where from, synced so far" "$(git filesync pull -v --dry-run a.c | head -1)" \
+  "a.c: from $SRC12:a.c (tag v1.0 on main, newest rel-2 = v2.0-rc1), synced at $(git -C ../co12 log -1 --format=%h main -- a.c)"
 check "pull --tag: missing tag" "$(rc git filesync pull --no-edit --tag v9 a.c)" "2"
 check "missing tag: nothing changed" "$(git status --porcelain)" ""
 check "--commit and --tag exclude each other" "$(rc git filesync pull --commit v1.0 --tag v1.0 a.c)" "2"

@@ -262,6 +262,7 @@ Each sync commit contains the file and its updated entry in `.git-filesync`.
 | `--no-edit` | commit with the proposed message without opening the editor |
 | `--no-commit` | only update and stage the file and its entry; a plain `git commit` then offers the proposed message (see [Proposed commit messages](#proposed-commit-messages)) |
 | `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename upstream, and every refusal |
+| `-v`, `--verbose` | before each file, a line on where it comes from (as in `status -v`) and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` |
 
 **Adaptations** are merged with the new upstream version (3-way merge, base =
 the last synced version). On conflicts the file gets the usual conflict

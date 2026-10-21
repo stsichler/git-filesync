@@ -68,6 +68,8 @@ follow the command.
                                 proposed message (via .git/SQUASH_MSG)
         --dry-run               only report what would happen (incl.
                                 merge conflicts); change nothing
+        -v, --verbose           before each file: where it comes from (as
+                                status -v) and the version synced so far
 
     restore PATH...             restore files to the synced upstream version
                                 (the base), like `git restore`; e.g. to
@@ -1864,6 +1866,15 @@ def print_short(repo, sts):
             print(f"{line} {shown(repo, st.rel)}" + (paint("  (strict!)", "boldred") if st.violation else ""))
 
 
+def link_text(st):
+    """Where a linked file comes from, for status -v and pull -v."""
+    via = f" via {st.src.label}" if st.src and st.src.local else ""
+    strict = ", strict" if st.strict else ""
+    newest = f", newest {newest_text(st.newest, st.link.line)}" if st.newest else ""
+    return (f"from {st.link.name}:{st.link.path} "
+            f"({ref_text(st.link.ref, st.link.line)}{newest}{strict}){via}")
+
+
 def print_long(repo, sts, verbose):
     """Sections like `git status`."""
     hints = out(repo.git(["config", "--type=bool", "advice.statusHints"], check=False)) != "false"
@@ -1882,14 +1893,7 @@ def print_long(repo, sts, verbose):
 
     ok = [st for st in sts if not st.error]
     if verbose:
-        rows = []
-        for st in ok:
-            via = f" via {st.src.label}" if st.src and st.src.local else ""
-            strict = ", strict" if st.strict else ""
-            newest = f", newest {newest_text(st.newest, st.link.line)}" if st.newest else ""
-            rows.append((st.committed or "uncommitted", st.rel,
-                         f"from {st.link.name}:{st.link.path} "
-                         f"({ref_text(st.link.ref, st.link.line)}{newest}{strict}){via}", "dim"))
+        rows = [(st.committed or "uncommitted", st.rel, link_text(st), "dim") for st in ok]
         section("Linked files:", [], rows, None)
 
     up_rows = []
@@ -2333,6 +2337,9 @@ def cmd_pull(ctx, repo, args):
         if args.all and not st.pending and not once:
             continue
         done += 1
+        if args.verbose:
+            synced = st.src.short(st.old) if st.has_old else link.blob[:8]
+            print(paint(f"{st.rel}: {link_text(st)}, synced at {synced}", "dim"))
         try:
             if once:
                 st.target, st.once = target_rev(ctx, link, args), once_text(args)
@@ -3509,6 +3516,8 @@ def main(argv=None):
                    help="set uncommitted changes aside and re-apply them after the sync")
     p.add_argument("--dry-run", action="store_true",
                    help="only report what would happen (incl. merge conflicts)")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="before each file: where it comes from and the version synced so far")
 
     for name, hlp in (("diff", "show local modifications against the synced upstream version"),
                       ("difftool", "same in the configured difftool")):
