@@ -1999,9 +1999,6 @@ def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, dis
              f"Upstream: {link.url} ({link.ref[1]}:{path})"]
     if path != old_path:
         lines += ["", f"Renamed upstream: {old_path} -> {path}"]
-    if st.once:
-        lines += ["", f"Synced to {st.once} once; the link still follows "
-                      f"{spec_text(link.source)}."]
     if new == st.old:
         pass
     elif st.has_old:

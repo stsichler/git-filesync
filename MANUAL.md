@@ -334,8 +334,7 @@ once to the head of another branch or to a tag of their upstream – e.g. to
 try a release before switching to it. Adaptations are merged as usual. Like
 `git pull <remote> <branch>`, this doesn't change what the files follow:
 their entries keep their branch or tag, only the synced version is updated.
-The commit message says `Synced to tag v1.3.0 once; the link still follows
-tag v1.2.0.`, and `pull` ends with a hint:
+`pull` ends with a hint:
 
 ```
 hint: the links still follow their own branch or tag, so a plain pull goes back; to stay on tag v1.3.0, use 'git filesync set --tag v1.3.0 <file>...'

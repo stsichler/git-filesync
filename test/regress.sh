@@ -1496,8 +1496,8 @@ OUT=$(git filesync pull --no-edit --tag v1.1 a.c 2>&1)
 check "pull --tag: merged" "$(oneline < a.c)" "1-local 2 3 4 5-v11 "
 check "pull --tag: registry keeps the tag" \
   "$(git config -f .git-filesync source.$SRC12.tag) $(git config -f .git-filesync file.a.c.source)" "v1.0 $SRC12"
-check "pull --tag: message" \
-  "$(git log -1 --format=%B | grep -cE '^(\[filesync\] Sync a.c from |Synced to tag v1.1 once; the link still follows tag v1.0 on main.$)')" "2"
+check "pull --tag: message without a note on it" \
+  "$(git log -1 --format=%B | grep -cE '^\[filesync\] Sync a.c from |once|follows')" "1"
 check "pull --tag: hint how to stay" \
   "$(echo "$OUT" | grep -c "^hint: .*to stay on tag v1.1, use 'git filesync set --tag v1.1 <file>...'$")" "1"
 check "pull --tag: all committed" "$(git status --porcelain)" ""
