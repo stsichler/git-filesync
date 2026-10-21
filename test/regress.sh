@@ -197,7 +197,7 @@ check "after pull" "$(st)" ""
 sedi 's/^g$/G-local/' src/lib.c
 git commit -qam tweak
 up 's/^a$/A/' "Change A"
-check "pending + adapted" "$(st)" "PA"
+check "pending + adapted" "$(st)" "PM"
 git filesync pull --no-edit src/lib.c >/dev/null
 check "clean merge result" "$(oneline < src/lib.c)" "A B C d e f G-local "
 
@@ -231,7 +231,7 @@ check "revert message" "$(git log -1 --format=%B | grep -c 'Reverts upstream')" 
 # a deleted linked file is an uncommitted change; pull --all leaves it alone
 quiet git filesync pull --no-edit src/lib.c
 rm src/lib.c
-check "deleted file is an uncommitted change" "$(st)" " AD"
+check "deleted file is an uncommitted change" "$(st)" " MD"
 quiet git filesync pull --all --no-edit
 check "pull --all leaves locally deleted file alone" \
   "$([ -e src/lib.c ] && echo restored || echo deleted)" "deleted"
@@ -279,7 +279,7 @@ check "uninstall after --force: foreign lines kept" "$(cat .git/hooks/pre-push)"
 rm -f .git/hooks/pre-push
 
 # hooks of an older version are updated in place, other lines kept
-printf '#!/bin/sh\necho mine\n# git-filesync: old\ngit filesync status --hook </dev/null || true\nexit 0\n' \
+printf '#!/bin/sh\necho mine\n# git-filesync: old\ngit filesync hook post-merge </dev/null || true\nexit 0\n' \
   > .git/hooks/post-merge
 check "hooks: an old hook of ours is outdated" "$(git filesync hooks | grep -c '^post-merge: outdated')" "1"
 check "hooks install: old hook updated" "$(git filesync hooks install 2>/dev/null | grep -c '^post-merge: updated')" "1"
@@ -648,7 +648,7 @@ check "strict refusal: how to go on" \
 check "pull --all continues after strict error" "$(git filesync pull --all --no-edit 2>&1 | grep -c '^error:')" "0"
 check "non-strict file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
 git commit -qm "adapt bar" src/bar.h
-check "strict violation (committed)" "$(git filesync status -s src/bar.h)" " A  src/bar.h  (strict!)"
+check "strict violation (committed)" "$(git filesync status -s src/bar.h)" " M  src/bar.h  (strict!)"
 check "status: restore hint for a strict file" \
   "$(git filesync status src/bar.h | grep -c 'use "git filesync restore -SW <file>..." to discard them')" "1"
 
@@ -843,7 +843,7 @@ check "status -s: nothing when clean" "$(git filesync status -s)" ""
 sedi 's/^1$/1-adapt/' b.c c.c e.c; git commit -qam adapt          # committed adaptations
 sedi 's/^3$/3-wip/' c.c d.c                                          # uncommitted changes
 check "status -s: three columns" "$(git filesync status -s | tr '\n' '|')" \
-  "P   a.c|PA  b.c| AM c.c|P M d.c| A  e.c  (strict!)|"
+  "P   a.c|PM  b.c| MM c.c|P M d.c| M  e.c  (strict!)|"
 
 # long format: sections like git status
 OUT=$(git filesync status)
@@ -974,7 +974,7 @@ echo local >> a.txt
 git commit -qam adapt
 sedi '/^\[file "a.txt"\]/a\
 strict' .git-filesync
-check "bare 'strict' means true" "$(git filesync status -s a.txt)" " A  a.txt  (strict!)"
+check "bare 'strict' means true" "$(git filesync status -s a.txt)" " M  a.txt  (strict!)"
 git checkout -q -- .git-filesync
 
 # synced version not readable -> warning, not a silent 'adapted'; --overwrite recovers
@@ -1086,7 +1086,7 @@ if git lfs version >/dev/null 2>&1; then
         quiet git filesync pull --no-edit d.txt
         check "$tag: merged" "$(oneline < d.txt)" "L1-local l2 l3 l4 L5-up "
         check "$tag: committed storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
-        check "$tag: after merge (adapted, clean worktree)" "$(st) $(git status --porcelain)" " A "
+        check "$tag: after merge (adapted, clean worktree)" "$(st) $(git status --porcelain)" " M "
 
         # add over an existing file: an older upstream version differs from
         # the base (the head), the same content doesn't (LFS or not);
@@ -1352,7 +1352,7 @@ check "pull follows rename: path updated" "$(git config -f .git-filesync file.r.
 check "pull follows rename: merged" "$(oneline < r.c)" "a B c d e-local f g h I "
 check "pull follows rename: message" \
   "$(git log -1 --format=%B | grep -cE '^(Upstream: .*\(main:lib/renamed.c\)|Renamed upstream: lib/r.c -> lib/renamed.c|- rename r .*|- change I .*)$')" "4"
-check "after rename: only adapted" "$(st r.c)" " A"
+check "after rename: only adapted" "$(st r.c)" " M"
 
 # pull refuses a deleted file and says how to proceed
 check "pull refuses deleted file" "$(rc git filesync pull --no-edit gone.c)" "2"
@@ -1368,7 +1368,7 @@ check "chained rename" "$(git filesync status r.c | grep -c 'lib/renamed.c -> li
 quiet git filesync pull --no-edit r.c
 check "pure rename: path updated" "$(git config -f .git-filesync file.r.c.path)" "lib/final.c"
 check "pure rename: commit has only the registry" "$(git show --name-only --format= HEAD)" ".git-filesync"
-check "pure rename: then clean" "$(st r.c)" " A"
+check "pure rename: then clean" "$(st r.c)" " M"
 
 
 # =============================================================================
@@ -1437,7 +1437,7 @@ check "add DIR: nothing new" "$(git filesync add proto nowhere/m11 "${PROTO[@]}"
 mkdir docs && echo mine > docs/x.md
 quiet fsd add docs nowhere/m11 --include /x.md && git commit -q --no-edit
 check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
-check "add DIR: existing file adapted" "$(st docs)" " A"
+check "add DIR: existing file adapted" "$(st docs)" " M"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Link docs/x.md to nowhere/m11"
 check "add DIR --overwrite: existing file replaced" \
   "$(fsd add -n --force --overwrite docs nowhere/m11 --include /x.md | grep -c 'replacing the existing file')" "1"
@@ -1538,7 +1538,7 @@ check "pull --tag: message without a note on it" \
 check "pull --tag: hint how to stay" \
   "$(echo "$OUT" | grep -c "^hint: .*to stay on tag v1.1, use 'git filesync set --tag v1.1 <file>...'$")" "1"
 check "pull --tag: all committed" "$(git status --porcelain)" ""
-check "after pull --tag: the link's tag is older" "$(st a.c)" "OA"
+check "after pull --tag: the link's tag is older" "$(st a.c)" "OM"
 quiet git filesync pull --no-edit a.c
 check "plain pull: back to the link's tag" "$(oneline < a.c)" "1-local 2 3 4 5 "
 
@@ -1670,7 +1670,7 @@ git reset -q --hard HEAD~1
 check "set -p: one file only" "$(rc git filesync set a.c b.c -p a.c)" "2"
 check "set -p" "$(git filesync set b.c -p a.c 2>/dev/null | grep -c '^b.c: path b.c -> a.c, based on .*, with local modifications$')" "1"
 check "set -p: entry" "$(git config -f .git-filesync file.b.c.path)" "a.c"
-check "set -p: content differs from the new base" "$(st b.c)" " A"
+check "set -p: content differs from the new base" "$(st b.c)" " M"
 quiet git filesync set b.c -p b.c
 check "set -p back: matching version found" "$(st b.c) $(git config -f .git-filesync file.b.c.path)" " b.c"
 check "set -p back: entry as committed" "$(git status --porcelain)" ""
@@ -1805,7 +1805,7 @@ else
   for i in 1 2 3 4 5 6 7 8 9; do echo local >> src/f$i.c; done
   git commit -qam "adapt 9"
   check "status: adapted files cost no git calls each" "$([ "$(calls status)" -le "$((C60 + 3))" ] && echo yes)" "yes"
-  check "status: adapted files reported" "$(git filesync status -s | grep -c '^ A ')" "9"
+  check "status: adapted files reported" "$(git filesync status -s | grep -c '^ M ')" "9"
   # diff, restore and pull compare, convert and write all files at once:
   # 9 files cost (almost) no more git calls than one
   D1=$(calls diff src/f1.c); D9=$(calls diff src)

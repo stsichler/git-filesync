@@ -243,14 +243,14 @@ something to report, with three columns:
 | Column | Meaning |
 |---|---|
 | 1 – upstream | `P` pending, `O` upstream branch older than last sync, `D` history diverged or previous sync point unknown, `R` renamed upstream, `X` deleted upstream, `N` not in the working tree yet, `E` error |
-| 2 – committed | `A` adapted |
+| 2 – committed | `M` adapted (committed modifications, like git's index column) |
 | 3 – working tree | `M` modified, `D` deleted, `?` not committed yet |
 
 ```
 P   src/a.c
-PA  src/b.c
- AM src/c.c
- A  include/x.h  (strict!)
+PM  src/b.c
+ MM src/c.c
+ M  include/x.h  (strict!)
 ```
 
 Like `git status`, the exit code is 0 (2 on errors); `--exit-code` makes it

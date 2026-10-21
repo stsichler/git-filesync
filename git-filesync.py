@@ -44,7 +44,8 @@ Basic commands:
         -s, --short             short format: upstream/committed/worktree
                                 columns (upstream: P pending, O older,
                                 D diverged, R renamed, X deleted
-                                upstream, N new; E error)
+                                upstream, N new; E error; committed: M
+                                adapted)
         -v, --verbose           also list all linked files with their sources
                                 (pinned ones with the newest tag: the first
                                 tagged commit after theirs on the branch's
@@ -2260,7 +2261,7 @@ def short_code(st):
     up = upstream_state(st)
     x = {"pending": "P", "older": "O", "changed": "D", "new": "N", "renamed": "R",
          "deleted": "X"}[up[0]] if up else " "
-    y = "A" if st.committed == "adapted" else " "
+    y = "M" if st.committed == "adapted" else " "     # like git's index column
     z = {"modified": "M", "deleted": "D", "added": "?"}.get(st.worktree, " ")
     return x + y + z
 
@@ -3970,8 +3971,7 @@ def hook_snippet(cmd):
 
 def is_our_hook_line(line):
     s = line.strip()
-    return REFS_VAR in s or s.startswith((f"# {HOOK_MARKER}:", "git filesync hook ",
-                                          "git filesync status --hook"))  # the latter: before 0.7
+    return REFS_VAR in s or s.startswith((f"# {HOOK_MARKER}:", "git filesync hook "))
 
 
 def cmd_hooks(repo, args):
@@ -4147,7 +4147,7 @@ def main(argv=None):
                                      parser_class=argparse.ArgumentParser)
 
     p = add_command(sub, "status", parents=[common], help="show sync state of linked files")
-    p.add_argument("paths", nargs="*", help="files or directories (default: all)")
+    p.add_argument("paths", nargs="*", metavar="PATH", help="linked files or directories (default: all)")
     p.add_argument("-s", "--short", action="store_true",
                    help="short format: upstream / committed / working tree columns")
     p.add_argument("-v", "--verbose", action="store_true",
@@ -4156,7 +4156,7 @@ def main(argv=None):
                    help="exit with 1 if something is to sync or a strict file is modified")
 
     p = add_command(sub, "pull", parents=[common], help="sync file(s) from upstream")
-    p.add_argument("files", nargs="*", help="files or directories")
+    p.add_argument("files", nargs="*", metavar="PATH", help="linked files or directories")
     p.add_argument("--all", action="store_true", help="sync all files with something to sync")
     p.add_argument("--commit", metavar="REV", help="sync to this upstream revision (exactly one file)")
     p.add_argument("-b", "--branch", help="sync to the head of this upstream branch, once (the "
@@ -4180,7 +4180,8 @@ def main(argv=None):
              "configured difftool.")):
         p = add_command(sub, name, parents=[common], help=hlp, description=desc,
                         epilog="Options after '--' are passed to git " + name + ".")
-        p.add_argument("files", nargs="*", help="files or directories (default: all)")
+        p.add_argument("files", nargs="*", metavar="PATH",
+                       help="linked files or directories (default: all)")
         g = p.add_mutually_exclusive_group()
         g.add_argument("--upstream", action="store_true",
                        help="show what 'pull' would bring instead of the local modifications "
@@ -4264,7 +4265,7 @@ def main(argv=None):
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be removed")
 
     p = add_command(sub, "unlink", parents=[colorp], help="remove links (the files are kept)")
-    p.add_argument("files", nargs="+", help="files or directories")
+    p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be unlinked")
 
     p = add_command(sub, "mv", parents=[colorp], help="move a linked file, keeping its link")
