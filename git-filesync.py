@@ -31,7 +31,10 @@ pull, unless the file is marked strict.
 
 Commands (run inside the repository; without a command: status).
 PATH may be a file or a directory (= all linked files below it); options
-follow the command.
+follow the command. Only pull commits; the other commands stage (restore:
+with -S), like their git namesakes.
+
+Basic commands:
 
     status [PATH...]            state of the linked files like `git status`:
                                 upstream changes to sync, committed
@@ -71,13 +74,6 @@ follow the command.
         -v, --verbose           before each file: where it comes from (as
                                 status -v) and the version synced so far
 
-    restore PATH...             restore files to the synced upstream version
-                                (the base), like `git restore`; e.g. to
-                                discard adaptations of a strict file
-        -S, --staged            restore the index instead of the working tree
-        -W, --worktree          restore the working tree (default; with -S:
-                                both)
-
     diff [PATH...] [-- OPTS]    local changes vs. the synced upstream version
                                 (one `git diff`, OPTS passed to it)
         --committed             only committed adaptations (synced -> HEAD)
@@ -93,6 +89,13 @@ follow the command.
         -y, --no-prompt         don't ask before each file (default: ask if
                                 no files are given)
         --prompt                ask even for explicitly given files
+
+    restore PATH...             restore files to the synced upstream version
+                                (the base), like `git restore`; e.g. to
+                                discard adaptations of a strict file
+        -S, --staged            restore the index instead of the working tree
+        -W, --worktree          restore the working tree (default; with -S:
+                                both)
 
     add FILE URL|SOURCE         link FILE to a file in an upstream repository
                                 (SOURCE: exactly that [source]; URL: the
@@ -124,6 +127,18 @@ follow the command.
         --force                 relink an already linked file
         -n, --dry-run           only show what would be linked
 
+    rm PATH...                  remove linked files and their links, staged
+                                like `git rm`; refused for files with
+                                uncommitted changes
+        -f, --force             remove them anyway
+        -n, --dry-run           only show what would be removed
+
+    unlink PATH...              remove links (the files are kept)
+    mv OLD NEW                  move a linked file (git mv), keeping its link
+        -n, --dry-run           (both) only show what would be done
+
+Advanced commands:
+
     set PATH... OPTIONS         change the link of linked files, like `source`
                                 for sources; only .git-filesync is changed
                                 (and staged), the synced version is kept
@@ -147,16 +162,6 @@ follow the command.
     edit                        open .git-filesync in the editor (like `git
                                 config --edit`); afterwards it is checked
                                 and staged
-
-    rm PATH...                  remove linked files and their links, staged
-                                like `git rm`; refused for files with
-                                uncommitted changes
-        -f, --force             remove them anyway
-        -n, --dry-run           only show what would be removed
-
-    unlink PATH...              remove links (the files are kept)
-    mv OLD NEW                  move a linked file (git mv), keeping its link
-        -n, --dry-run           (both) only show what would be done
 
     source                      list the [source]s (-v: with URL, ref, newest
                                 tag if pinned, files)
@@ -230,6 +235,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 from collections import namedtuple
 from dataclasses import dataclass, field
@@ -3465,6 +3471,25 @@ def add_command(sub, name, **kw):
     return sub.add_parser(name, **kw)
 
 
+BASIC_COMMANDS = ("status", "pull", "diff", "difftool", "restore", "add", "rm", "unlink", "mv")
+
+
+def command_list(sub):
+    """--help: the commands with their summaries, basic ones first (the
+    rest in the order they were defined, `hook` last)."""
+    width = max(shutil.get_terminal_size().columns - 2, 40)
+    helps = {a.dest: a.help for a in sub._choices_actions}
+
+    def group(title, names):
+        lines = [f"{title}:"]
+        for n in names:
+            lines += textwrap.wrap(helps[n], width, initial_indent=f"  {n:<18}",
+                                   subsequent_indent=" " * 20)
+        return "\n".join(lines)
+    advanced = [n for n in helps if n not in BASIC_COMMANDS]
+    return group("basic commands", BASIC_COMMANDS) + "\n\n" + group("advanced commands", advanced)
+
+
 def main(argv=None):
     for stream in (sys.stdout, sys.stderr):
         # LF line ends like git's output, also on Windows (no CRLF translation);
@@ -3486,10 +3511,9 @@ def main(argv=None):
 
     ap = argparse.ArgumentParser(prog="git filesync",
                                  description="Keep single files in sync between Git repositories.",
-                                 epilog="Without a command: status. "
-                                        "'git filesync <command> -h' lists the options of a command.")
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"git-filesync {__version__}")
-    sub = ap.add_subparsers(dest="cmd")
+    sub = ap.add_subparsers(dest="cmd", metavar="<command>")
 
     p = add_command(sub, "status", parents=[common], help="show sync state of linked files")
     p.add_argument("paths", nargs="*", help="files or directories (default: all)")
@@ -3673,6 +3697,13 @@ def main(argv=None):
     p = add_command(sub, "hook", parents=[colorp], help="what the installed hooks run")
     p.add_argument("name", choices=list(HOOKS))
     p.add_argument("hook_args", nargs=argparse.REMAINDER, help="the hook's arguments")
+
+    ap.epilog = command_list(sub) + (
+        "\n\nWithout a command: status. 'git filesync <command> -h' describes a command\n"
+        "and lists its options.")
+    # the grouped list instead of argparse's; hiding that hides <command> in the usage too
+    sub.help = argparse.SUPPRESS
+    ap.usage = "git filesync [-h] [--version] <command> ..."
 
     argv = list(sys.argv[1:] if argv is None else argv)
     extra = []

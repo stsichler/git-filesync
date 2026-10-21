@@ -164,6 +164,9 @@ up() { (cd "$T/upstream" && sedi "$1" lib.c && git commit -qam "$2" && git push 
 # downstream: links upstream's lib.c as src/lib.c
 new_repo downstream
 OUT=$(git filesync add src/lib.c "$URL" -p lib.c 2>&1)
+check "--help: basic and advanced commands" \
+  "$(git filesync -h | grep -E '^(basic commands|advanced commands):$|^  (status|mv|set|hook) ' | cut -c1-8 | oneline)" \
+  "basic co   status   mv     advanced   set      hook   "
 check "command help repeats the summary" "$(git filesync add -h | grep -c '^Link a file (or all files of a directory) to the upstream repository\.$')" "1"
 check "add stages, like git add" "$(git status --porcelain | oneline)" "A  .git-filesync A  src/lib.c "
 check "add: says how to commit" "$(echo "$OUT" | grep -cxE '    git commit|\(it offers the proposed commit message; a copy stays in \.git/FILESYNC_SQUASH_MSG\)')" "2"
