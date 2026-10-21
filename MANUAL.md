@@ -894,6 +894,32 @@ following a branch. `pull --tag v1.3.0` [tries a tag
 once](#another-branch-or-tag-once) without switching; `pull --commit` syncs a
 single file to any revision.
 
+#### Tag patterns
+
+A tag with `*`, `?` or `[…]` is a pattern (as in shell globs, matched
+against the whole tag name): the source follows the **newest matching tag
+on its branch**, so `pull` moves on to a new release by itself:
+
+```sh
+git filesync add cfg/x.yml https://github.com/owner/lib.git --tag 'v1.*'
+```
+
+- "Newest" is meant as for [newer tags](#newer-tags): by the commit graph,
+  not by name or date – the first commit along the branch's first-parent
+  line, from its head back, that has a matching tag.
+- A pattern needs the `branch` to look on. Without `-b`, `add`, `set` and
+  `source set-tag` fill in the upstream default branch; `source set-branch
+  --unset` is refused.
+- `status` fetches the upstream tags (unless `--no-fetch`) and shows a new
+  matching tag as `pending`, like a new commit on a branch. `status -v` and
+  `source -v` show which tags the pattern matches now (`tag v1.* = v1.4 on
+  main`; several tags on that commit: `v1.4 = rel-4`). The commit message of
+  `pull` names the tag.
+- Tags that don't match are ignored – there is no hint at them.
+- No matching tag on the branch is an error.
+- `pull --tag PATTERN` [syncs once](#another-branch-or-tag-once) to the
+  newest matching tag on the source's branch.
+
 #### Newer tags
 
 Tag names are taken as opaque – `v1.10` and `v1.9`, `release-7` or

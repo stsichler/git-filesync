@@ -82,7 +82,8 @@ afterwards.
 - Self-contained repositories: linked files are committed copies, so a clone is
   complete without fetching anything from other repositories
 - Follows an upstream branch, or is pinned to a tag (e.g. a release) –
-  with a hint at newer tags; `pull --tag` tries another tag once
+  with a hint at newer tags – or follows the newest tag matching a pattern
+  (`v1.*`); `pull --tag` tries another tag once
 - Proposed commit message lists all upstream commits touching the file since
   the last sync
 - Local adaptations on top of the upstream version are kept via 3-way merge,

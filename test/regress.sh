@@ -1552,6 +1552,42 @@ git filesync source rename "$SRC12" lib12 >/dev/null
 check "pull after uncommitted source rename" "$(rc git filesync pull --no-edit a.c)" "0"
 check "rename went into the sync commit" "$(git status --porcelain) $(git show HEAD:.git-filesync | grep -c 'source = lib12')" " 3"
 
+# a tag pattern: the newest matching tag on the source's branch, by the
+# commit graph; the branch is filled in; tags that don't match are ignored
+# (main: v1.0 - v1.1 = v1.2 - v2.0-rc1 = rel-2 - merge f1 - change 3)
+cd "$T"
+new_repo s12p
+check "add --tag with a tag not on the branch: warning" \
+  "$(git filesync add -n x.c "$URL12" -p a.c --tag v1.0.1 -b main 2>&1 | grep -c "^warning: tag v1.0.1 is not on branch 'main'")" "1"
+addc --tag 'v1.*' a.c "$URL12"
+SRCP=$(git config -f .git-filesync file.a.c.source)
+check "pattern: default branch filled in" \
+  "$(git config -f .git-filesync source.$SRCP.tag) $(git config -f .git-filesync source.$SRCP.branch)" "v1.* main"
+check "pattern: newest matching tag on main" "$(oneline < a.c)" "1 2 3 4 5-v11 "
+check "pattern: status -v shows the matching tags" "$(git filesync status -v | grep -c '(tag v1\.\* = v1\.1 = v1\.2 on main)')" "1"
+check "pattern: source -v" "$(git filesync source -v | grep -c '(tag v1\.\* = v1\.1 = v1\.2 on main, 1 file)')" "1"
+check "pattern: no hint at other tags" "$(git filesync pull --all 2>&1 | grep -c hint)" "0"
+(cd ../co12 && git tag v1.3 main && git push -q origin v1.3)
+check "pattern: a new matching tag is pending" "$(st)" "P"
+quiet git filesync pull --no-edit a.c
+check "pattern: pull follows it" "$(oneline < a.c)" "1 2 3-up 4 5-rc "
+check "pattern: message names the tag" "$(git log -1 --format=%B | grep -c "^Upstream: $URL12 (v1.3:a.c)$")" "1"
+check "pattern: registry unchanged" "$(git status --porcelain) $(git config -f .git-filesync source.$SRCP.tag)" " v1.*"
+check "pull --tag with a pattern, once" \
+  "$(git filesync pull --dry-run --tag 'v1.0*' a.c | grep -c "would sync to $SRCP@$(git -C ../co12 rev-parse --short v1.0) (tag v1.0\* once")" "1"
+# with a mapped checkout: its tags, unpushed ones included
+(cd ../co12 && git tag v1.4 main)
+git filesync source map "$URL12" "$T/co12" >/dev/null
+check "pattern, mapped: local tags" "$(git filesync status -v | grep -c '= v1\.3 = v1\.4 on main')" "1"
+git filesync source map "$URL12" --unset >/dev/null
+(cd ../co12 && git tag -d v1.4 >/dev/null)
+# no match: an error; a pattern keeps its branch
+git filesync source set-tag "$SRCP" 'x*' >/dev/null
+check "pattern without a match: error" \
+  "$(git filesync status 2>&1 | grep -c "no tag matching 'x\*' on branch 'main'")-$(rc git filesync status)" "1-2"
+git reset -q --hard
+check "pattern: branch can't be removed" "$(rc git filesync source set-branch "$SRCP" --unset)" "2"
+
 
 # =============================================================================
 section "19. set: change source, upstream path or strict of linked files"
