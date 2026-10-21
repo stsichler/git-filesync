@@ -254,7 +254,7 @@ from typing import Optional
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.11.2"
+__version__ = "0.12.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_REFUSED = 3          # hook pre-push: refuse the push (filesync.pushCheck = error)
