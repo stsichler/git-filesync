@@ -31,8 +31,9 @@ The **upstream repository** (short: upstream) is where a file is developed.
 A **downstream repository** carries a copy of it and records a **link** for
 each such file: which upstream repository and branch (or tag), which path
 there, and which upstream version the copy is based on. Updates are never applied
-automatically – `pull` syncs one file at a time, with a commit message that
-lists every upstream commit that changed the file since the last sync.
+automatically – `pull` syncs the files you choose and proposes a commit
+message that lists every upstream commit that changed each file since the
+last sync.
 
 All commands run inside the downstream repository.
 
@@ -164,17 +165,17 @@ Commands named like a Git command behave like it (`status`, `pull`, `diff`,
 `difftool`, `restore`, `add`, `rm`, `mv`; `source` like `git remote`): same
 kind of output, same exit codes, same caution with uncommitted changes.
 
-**Only `pull` commits**, like `git pull` – and for the same reason: it
-brings in changes from elsewhere, and its commit message comes from there
-(the upstream commits since the last sync, for each file), one commit per
-`pull`, so `git log FILE` shows every sync of FILE. All other commands carry out a decision of yours,
-often together with changes of your own, so – like `git add`, `git rm`,
-`git mv`, `git restore` – they only change the working tree or stage, and
-you commit: `add`, `rm`, `mv`, `set`, `unlink`, `edit` and `source` stage,
-`restore` (without `-S`) leaves the index alone. `pull --no-commit` only
-stages, like `git merge --no-commit`. `add` and `pull --no-commit` prepare a
-proposed commit message that a plain `git commit` offers (see [Proposed
-commit messages](#proposed-commit-messages)).
+**No command commits** – you do. Like `git add`, `git rm`, `git mv` and
+`git restore`, the commands only change the working tree or stage: `pull`,
+`add`, `rm`, `mv`, `set`, `unlink`, `edit` and `source` stage, `restore`
+(without `-S`) leaves the index alone. `pull` stages like `git merge
+--squash`. So you can look at everything before it goes into the history,
+undo it (`git restore -SW`), or combine several commands – and changes of
+your own – into one commit. `pull` and `add` prepare a proposed commit
+message that a plain `git commit` offers (see [Proposed commit
+messages](#proposed-commit-messages)); for `pull` it lists the upstream
+commits since the last sync of each file, so `git log FILE` shows every
+sync of FILE.
 
 The reading commands – `status`, `diff`, `difftool`, `source` (listing) and
 the hooks – change nothing in the repository: even the Git objects they
@@ -275,7 +276,10 @@ branch. A branch, tag or commit that is given but can't be found upstream
 is an error (there is nothing to sync to); settings that merely don't fit
 together, like a tag that isn't on the source's branch, give a warning.
 
-The editor opens with the proposed commit message:
+The synced files and their updated entries in `.git-filesync` are staged,
+like after `git merge --squash`; nothing is committed. A plain `git commit`
+then opens the editor with the proposed commit message (`git commit
+--no-edit` takes it as it is):
 
 ```
 [filesync] Sync src/foo.c from owner/lib@a1b2c3d
@@ -287,12 +291,13 @@ Upstream changes since 3f2a9c1:
 - Add support for chunked transfer (a1b2c3d)
 ```
 
-A `pull` makes **one commit** for all files it syncs, with their updated
-entries in `.git-filesync`. For several files the subject says how many
-(`[filesync] Sync 3 files from owner/lib`, or `… from 2 sources`), and each
-file gets a section of the message like the one above. A file that can't be
-synced (a refusal, an error) is reported and left out; the others are still
-synced and committed.
+A `pull` proposes **one commit** for all files it syncs. For several files
+the subject says how many (`[filesync] Sync 3 files from owner/lib`, or `…
+from 2 sources`), and each file gets a section of the message like the one
+above. A file that can't be synced (a refusal, an error) is reported and
+left out; the others are still synced and staged.
+
+In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 
 | Option | Effect |
 |---|---|
@@ -301,17 +306,15 @@ synced and committed.
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH, once: the files keep following their own branch or tag (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG, once (as `-b`) |
 | `--overwrite` | discard local adaptations and take the upstream version as is (also when the file is up to date) |
-| `--no-edit` | commit with the proposed message without opening the editor |
-| `--no-commit` | only update and stage the files and their entries; a plain `git commit` then offers the proposed message (see [Proposed commit messages](#proposed-commit-messages)) |
 | `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename upstream, and every refusal |
 | `-v`, `--verbose` | before each file, a line on where it comes from (as in `status -v`) and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` |
 
 **Adaptations** are merged with the new upstream version (3-way merge, base =
 the last synced version). On conflicts the file gets the usual conflict
-markers, and **nothing is committed**, like `git merge`: the other synced
-files stay staged. Resolve the conflicts, then `git add` the files and run
-`git commit`, which offers the proposed message for all of them (see
-[Proposed commit messages](#proposed-commit-messages)). `--overwrite` skips
+markers and is left unstaged, like after `git merge`; `pull` exits with 1.
+Resolve the conflicts, then `git add` the files and run `git commit`, which
+offers the proposed message for all of them (see [Proposed commit
+messages](#proposed-commit-messages)). `--overwrite` skips
 the merge and discards the adaptations.
 
 **Uncommitted changes:** like `git pull`, `pull` refuses a file with
@@ -323,13 +326,6 @@ sync), or discard them with `git restore`.
 upstream `develop`), tags and commit ids. Recorded is the commit that last
 changed the file up to that revision. Going back to an older version works
 the same way; the commit message then lists what is reverted.
-
-**Other entries in `.git-filesync`:** because all links share one file, a
-sync commit must not pick up uncommitted entries of *other* files (that
-commit would record their new state without their content). `pull`
-therefore refuses to commit while `.git-filesync` has uncommitted changes
-for other files – commit those first (e.g. after [`add`](#add)), or use
-`--no-commit` to stage everything and commit it together.
 
 For files [pinned to a tag](#pinning-to-a-tag), `pull` ends with a hint if
 upstream has [newer tags](#newer-tags) on the source's branch:
@@ -528,8 +524,8 @@ directory (see [below](#linking-a-directory)).
 
   For an existing FILE the subject is `Link FILE to …` (`Relink …` with
   `--force`); the message notes local modifications and `--strict`. Several
-  `add`s (and `pull --no-commit`) in a row go into one commit, with all
-  their messages.
+  `add`s (and `pull`s) in a row go into one commit, with all their
+  messages.
 
 ```sh
 git filesync add src/foo.c https://github.com/owner/lib.git -p lib/foo.c
@@ -1008,9 +1004,8 @@ and tags, unpushed ones included.
 
 ### Proposed commit messages
 
-Whenever changes are staged with a proposed commit message but not committed
-– by `add`, by `pull --no-commit`, after merge conflicts, or when the commit
-was aborted – the message is put into `.git/SQUASH_MSG`. Git offers that
+`add` and `pull` stage their changes and put a proposed commit message into
+`.git/SQUASH_MSG`. Git offers that
 file as the message of the next plain `git commit` (as after `git merge
 --squash`); `git commit --no-edit` takes it as it is. IDEs such as VS Code
 fill their commit message box with it. Git removes it after the next commit,
@@ -1019,9 +1014,8 @@ whatever its message, and on `git reset`.
 Every proposed message starts with `[filesync] `, so commits made with
 git-filesync are easy to find later (`git log --grep='^\[filesync\]'`).
 
-- Several commands in a row (e.g. `add` for some files and `pull
-  --no-commit` for others, then one commit for all of them) collect their
-  messages there.
+- Several commands in a row (e.g. `add` for some files and `pull` for
+  others, then one commit for all of them) collect their messages there.
 - A copy stays in `.git/FILESYNC_SQUASH_MSG` until the next proposal (the
   path is printed along with the hint to commit). It brings the message
   back if `SQUASH_MSG` is gone – after a commit that was aborted with an
@@ -1130,7 +1124,7 @@ jobs:
 ```
 
 This uses the latest release. To pin a version, download
-`https://github.com/stsichler/git-filesync/releases/download/v0.14.0/git-filesync.py`
+`https://github.com/stsichler/git-filesync/releases/download/v0.16.0/git-filesync.py`
 instead. (For private upstream repositories the job needs a token with read
 access.)
 
@@ -1139,7 +1133,7 @@ access.)
 | Code | Meaning |
 |---|---|
 | `0` | ok |
-| `1` | unfinished: `pull` with conflicts or without commit; `status --exit-code` with something to sync (including files deleted upstream) or a strict violation; `diff -- --exit-code` with differences |
+| `1` | unfinished: `pull` with conflicts; `status --exit-code` with something to sync (including files deleted upstream) or a strict violation; `diff -- --exit-code` with differences |
 | `2` | error |
 | `141` | the output went into a pipe that was closed early (`… \| head`, a pager quit), like Git (128 + SIGPIPE); reading commands stop there, the others finish their work first |
 
@@ -1181,7 +1175,7 @@ the same version without installing it:
 
 ```sh
 git filesync add tools/git-filesync.py https://github.com/stsichler/git-filesync.git \
-    -p git-filesync.py --tag v0.14.0 --strict
+    -p git-filesync.py --tag v0.16.0 --strict
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
 ```
 

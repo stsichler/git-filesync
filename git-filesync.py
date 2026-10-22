@@ -33,8 +33,9 @@ pull, unless the file is marked strict.
 
 Commands (run inside the repository; without a command: status).
 PATH may be a file or a directory (= all linked files below it); options
-follow the command. Only pull commits; the other commands stage (restore:
-with -S), like their git namesakes.
+follow the command. No command commits: they stage (restore: with -S), like
+their git namesakes, and propose a commit message that a plain `git commit`
+offers (.git/SQUASH_MSG) - committing is up to you.
 
 Basic commands:
 
@@ -54,10 +55,11 @@ Basic commands:
                                 file is modified
 
     pull PATH... | --all        sync to the upstream version of the files and
-                                commit them in one commit, with a message
-                                listing the upstream commits since the last
-                                sync per file; adaptations are merged (with
-                                conflicts: nothing committed), uncommitted
+                                stage them, like `git merge --squash`; the
+                                proposed message lists the upstream commits
+                                since the last sync per file; adaptations
+                                are merged (conflicts: resolve, then git
+                                add), uncommitted
                                 changes refused; a file renamed upstream is
                                 followed, one deleted there is reported
         --all                   all files with something to sync
@@ -68,9 +70,6 @@ Basic commands:
                                 (to switch: set -b/--tag)
         --tag TAG               sync to TAG, once (as -b)
         --overwrite             discard local adaptations instead of merging
-        --no-edit               commit without opening the editor
-        --no-commit             only stage; a plain `git commit` offers the
-                                proposed message (via .git/SQUASH_MSG)
         --dry-run               only report what would happen (incl.
                                 merge conflicts); change nothing
         -v, --verbose           before each file: where it comes from (as
@@ -217,7 +216,7 @@ Advanced commands:
                                 pull, diff, difftool, add, set, source -v)
         --color[=WHEN], --no-color  always, never or auto (default)
 
-Exit codes: 0 ok, 1 unfinished (conflicts, not committed, --exit-code),
+Exit codes: 0 ok, 1 unfinished (pull: conflicts; --exit-code),
 2 error, 141 output pipe closed early (reading commands stop, others finish).
 
 Files stored in Git LFS (upstream, in this repository, both or neither) are
@@ -250,7 +249,7 @@ from typing import Optional
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.15.0"
+__version__ = "0.16.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -1950,18 +1949,6 @@ class Registry:
                 self.repo.fix_eol(self.path)
         self.repo.git(["add", "-A", "--", REGISTRY])
 
-    def uncommitted(self):
-        """[file] entries that differ from the committed .git-filesync in what
-        they record about the file. Which [source] they belong to doesn't
-        count: a changed source may go into any commit."""
-        p = self.repo.git(["config", "--blob", f"HEAD:{REGISTRY}", "--list", "-z"], check=False)
-        head = parse_registry(p.stdout)[1] if p.returncode == 0 else {}
-
-        def base(entry):
-            return None if entry is None else {k: v for k, v in entry.items() if k != "source"}
-        return {rel for rel in set(head) | set(self.files)
-                if base(head.get(rel)) != base(self.files.get(rel))}
-
 
 class Link:
     """One [file] entry: a file linked to a file in an upstream repository."""
@@ -2522,18 +2509,6 @@ def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, dis
     return "\n".join(lines) + "\n"
 
 
-def check_other_entries(reg, rels, args):
-    """One commit = these files + their entries; other uncommitted entries
-    would end up in it without their files."""
-    if args.no_commit:
-        return
-    others = reg.uncommitted() - set(rels)
-    if others:
-        raise FsError(f"{REGISTRY} has uncommitted changes for {', '.join(sorted(others))}"
-                      " - commit them first, or use --no-commit to stage everything "
-                      "and commit together")
-
-
 def message_file(repo, name, msg, rels=None):
     """Keep the proposed commit message in .git/FILESYNC_MSG_<name>; returns
     the file and the command that commits the files (default: name) and
@@ -2582,31 +2557,6 @@ def report_staged(repo, name, msg, done, rels=None, how="Commit with"):
     print(f"{name}: {done}. {how}:\n    {cmd}\n({note})")
 
 
-def commit_staged(repo, name, msg, args, done, rels=None):
-    """Commit the staged files (default: name) and their entries with the
-    proposed message (in the editor unless --no-edit). With --no-commit,
-    leave them staged and tell how to commit. done: e.g. 'synced and staged'."""
-    rels = [name] if rels is None else rels
-    if args.no_commit:
-        report_staged(repo, name, msg, paint(done, "green"), rels)
-        return EXIT_OK
-    msgfile, _ = message_file(repo, name, msg, rels)
-    cmd = ["git", "commit", "-F", str(msgfile)] + ([] if args.no_edit else ["-e"]) + \
-        ["--"] + [lit(r) for r in rels] + [REGISTRY]
-    sys.stdout.flush()
-    # without an editor, git's output goes through ours (PipeGuard): git
-    # would die of a closed pipe after committing and report a failure
-    p = subprocess.run(cmd, cwd=repo.top, stdout=subprocess.PIPE if args.no_edit else None)
-    if p.stdout:
-        sys.stdout.write(p.stdout.decode("utf-8", "replace"))
-    if p.returncode:
-        report_staged(repo, name, msg, paint("commit not done", "yellow")
-                      + "; changes stay staged", rels, "Commit later with")
-        return EXIT_PENDING
-    msgfile.unlink()
-    return EXIT_OK
-
-
 def commit_target(st, rev):
     """(commit, blob, path) a sync to upstream revision rev records (--commit):
     the file at its synced path or, if renamed upstream, at the new one."""
@@ -2653,11 +2603,10 @@ def target_opts(args):
         ("--commit", args.commit), ("-b", args.branch), ("--tag", args.tag)) if val)
 
 
-def pull_one(repo, reg, st, args, check_entries):
+def pull_one(repo, reg, st, args):
     """Sync one file: write it and update its entry; staged, unless it has
     merge conflicts. Returns (its part of the commit message, conflicts),
-    or None if there is nothing to do (or only a dry run). check_entries()
-    is called before anything is changed."""
+    or None if there is nothing to do (or only a dry run)."""
     link, src = st.link, st.src
     path = st.new_path                   # differs from link.path if renamed upstream
     new, new_blob = st.new, st.new_blob
@@ -2683,12 +2632,11 @@ def pull_one(repo, reg, st, args, check_entries):
         print(f"{st.rel}: {paint('up to date', 'green')}"
               + (" (adaptations kept)" if st.committed == "adapted" else ""))
         return None
-    # like `git pull`: uncommitted changes are never merged into a sync commit
+    # like `git pull`: uncommitted changes are never merged into a sync
     if st.worktree in ("modified", "deleted", "added"):
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
                       "commit or stash them first ('git stash'; "
                       f"'git restore {path_arg(repo, st.rel)}' discards them)")
-    check_entries()
     for w in st.warnings:
         warn(f"{st.rel}: {w}")
 
@@ -2780,10 +2728,10 @@ def write_synced(repo, contents, conflicted):
         repo.git(["add", "--"] + [lit(r) for r in staged])
 
 
-def commit_pull(repo, reg, synced, args):
-    """One commit for all files a pull synced, with their entries - none if
-    a file has merge conflicts: then everything stays staged, and a plain
-    `git commit` offers the message once they are resolved."""
+def report_pull(repo, reg, synced):
+    """The files a pull synced are staged with their entries (those with
+    merge conflicts once resolved), like `git merge --squash`; one proposed
+    commit message for all of them, which a plain `git commit` offers."""
     reg.finish()
     rels = [rel for rel, _, _, _ in synced]
     msg = pull_message([m for _, _, m, _ in synced], [name for _, name, _, _ in synced])
@@ -2792,10 +2740,11 @@ def commit_pull(repo, reg, synced, args):
     if conflicted:
         cmd, note = commit_hint(repo, name, msg, rels)
         add = " ".join(path_arg(repo, r) for r in conflicted)
-        print(f"{paint('merge conflicts', 'boldred')} - nothing committed. Resolve them, "
-              f"then run:\n    git add {add}\n    {cmd}\n({note})")
+        print(f"{paint('merge conflicts', 'boldred')} - resolve them, then run:\n"
+              f"    git add {add}\n    {cmd}\n({note})")
         return EXIT_PENDING
-    return commit_staged(repo, name, msg, args, "synced and staged", rels)
+    report_staged(repo, name, msg, paint("synced and staged", "green"), rels)
+    return EXIT_OK
 
 
 def cmd_pull(ctx, repo, args):
@@ -2814,7 +2763,6 @@ def cmd_pull(ctx, repo, args):
     newest, synced = {}, []             # synced: (rel, source, message, conflicts)
     contents = {}                       # rel -> synced content (normalized form)
     selected = [lk.rel for lk in links]
-    checked = []
     states = [evaluate(ctx, repo, link) for link in links]
     # what syncing needs, asked at once: upstream contents, short commit ids,
     # attributes of the files here
@@ -2831,13 +2779,6 @@ def cmd_pull(ctx, repo, args):
         except FsError:
             pass
     repo.normalize_many(items)
-
-    def check_entries():
-        """The commit takes .git-filesync along: other uncommitted entries
-        would get into it without their files."""
-        if not checked:
-            check_other_entries(reg, selected, args)
-            checked.append(True)
     for link, st in zip(links, states):
         if st.error:
             report_error(st)
@@ -2856,7 +2797,7 @@ def cmd_pull(ctx, repo, args):
             if once:
                 st.target, st.once = target_rev(ctx, link, args), once_text(args)
             before = link.commit
-            result = pull_one(repo, reg, st, args, check_entries)
+            result = pull_one(repo, reg, st, args)
             if result:
                 synced.append((st.rel, link.name) + result[:2])
                 contents[st.rel] = result[2]
@@ -2866,7 +2807,7 @@ def cmd_pull(ctx, repo, args):
             rc = EXIT_ERROR
     if synced:
         write_synced(repo, contents, {rel for rel, _, _, c in synced if c})
-        rc = max(rc, commit_pull(repo, reg, synced, args))
+        rc = max(rc, report_pull(repo, reg, synced))
     if moved and not args.dry_run:
         opt = f"--tag {args.tag}" if args.tag else f"-b {args.branch}"
         how = f"'git filesync set <file>... {opt}'"
@@ -4237,9 +4178,6 @@ def run(argv=None):
     p.add_argument("-b", "--branch", help="sync to the head of this upstream branch, once (the "
                                           "files keep following their own branch or tag)")
     p.add_argument("--tag", help="sync to this upstream tag, once (as -b)")
-    p.add_argument("--no-edit", action="store_true", help="commit without opening the editor")
-    p.add_argument("--no-commit", action="store_true",
-                   help="only stage; a plain 'git commit' offers the proposed message")
     p.add_argument("--overwrite", action="store_true",
                    help="discard local adaptations instead of merging them")
     p.add_argument("--dry-run", action="store_true",

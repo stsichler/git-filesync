@@ -31,7 +31,7 @@ Helper modules, build scripts or configuration files often live in several
 repositories at once. Copying them by hand works – until nobody knows which
 copy is current and the history of the changes is lost. git-filesync links
 **single files**, tells you when a copy is behind, and syncs it with a
-meaningful commit.
+meaningful commit message.
 
 Because each linked file is a real copy committed in your repository, the
 repository stays **self-contained**: after a plain clone or checkout every
@@ -52,7 +52,7 @@ way.
 | What your repository contains | a pointer to a commit in the other repository | a real copy of the file, committed like any other file |
 | Local changes | made and committed in the other repository | allowed in your repository as committed adaptations, kept on every sync by a 3-way merge – or forbidden per file (`strict`) |
 | Cloning and building | needs `--recurse-submodules` and access to every submodule repository | a plain clone is complete and works on its own, even if an upstream repository is no longer reachable |
-| Updating | moves the pointer; your log shows only the new commit id | `pull` per file; the commit contains the actual change and lists the upstream commits it brings |
+| Updating | moves the pointer; your log shows only the new commit id | `pull` per file; the commit contains the actual change, its proposed message lists the upstream commits it brings |
 | For everyone else | `git submodule update` after clones, pulls and branch switches | nothing – only whoever syncs needs git-filesync |
 
 Submodules remain the better choice when you want a whole repository
@@ -129,7 +129,7 @@ your `PATH`. Either way the tool is invoked as `git filesync …`; check with
 changes of each version.
 
 You can also clone the repository and point the alias at the script in
-it: `main` is the current development state, a tag like `v0.14.0` a
+it: `main` is the current development state, a tag like `v0.16.0` a
 release. Or let git-filesync keep a copy of itself in your project, so
 everyone has the same version – see
 [Shipping git-filesync with your repository](MANUAL.md#shipping-git-filesync-with-your-repository).
@@ -148,8 +148,9 @@ git commit
 # 2. See what needs syncing
 git filesync status
 
-# 3. Sync one file – the editor opens with the proposed commit message
+# 3. Sync one file: it is staged, git commit offers the proposed message
 git filesync pull src/foo.c
+git commit
 ```
 
 Proposed commit message:
@@ -164,8 +165,9 @@ Upstream changes since 3f2a9c1:
 - Add support for chunked transfer (a1b2c3d)
 ```
 
-A `pull` commits all files it syncs, with their entries in `.git-filesync`,
-in one commit.
+A `pull` stages all files it syncs, with their entries in `.git-filesync`,
+like `git merge --squash`, and proposes one commit message for them; no
+git-filesync command commits.
 
 ## Commands
 
