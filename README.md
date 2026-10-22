@@ -92,7 +92,10 @@ afterwards.
 - Commands named like Git commands behave like them (`status`, `pull`,
   `diff`, `difftool`, `restore`, `rm`, `mv`); dry runs for `pull`, `add`,
   `rm`, `unlink`, `mv`
-- Optional local checkout of the upstream repository instead of fetching – works offline
+- Optional local checkout of the upstream repository instead of fetching – works
+  offline; the checkout is only read, never written to
+- Uncommitted content that `restore`, `add --overwrite` or `rm -f` discard is
+  kept as a blob, with a hint how to get it back
 - Git LFS upstream, downstream, both or neither
 - Correct with differing line-ending conventions (`core.autocrlf`, `text=auto`)
 - Colored output, CI-friendly exit codes, hooks: reminders, and a warning
@@ -207,8 +210,10 @@ files, `.git-filesync` handling (sources, unlink, mv, commit consistency),
 unsafe registry entries, wildcard characters in file names, local checkout
 mappings, offline operation, eol handling (autocrlf /
 text=auto / plain), Git LFS in all combinations, colors, hooks, tags,
-sources, files renamed or deleted upstream, dry runs and directories. It runs on
-every push via GitHub Actions.
+sources, files renamed or deleted upstream, dry runs and directories – and
+after every command that nothing outside the repository was written to (the
+upstream repositories are read-only for git-filesync). It runs on every push
+via GitHub Actions.
 
 Issues and pull requests are welcome. Please add a test to `test/regress.sh`
 for any change in behavior.

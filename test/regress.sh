@@ -47,6 +47,7 @@
 #   19. set: change source, tag, upstream path or strict of linked files
 #   20. cache: show, list and clean up the cache of upstream clones
 #   21. Performance: git processes don't grow with the number of files
+#   22. Closed output pipe; discarded content kept
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -80,7 +81,33 @@ export GIT_EDITOR=true                 # accept commit messages unchanged
 export GIT_PAGER=cat                   # never start a pager
 git config --global init.defaultBranch main
 git config --global core.autocrlf false    # Git for Windows: true by default
-git config --global alias.filesync "!$PYTHON $S"
+
+# Upstream repositories are read-only for git-filesync: every run goes
+# through guard.sh, which logs any path written outside the repository it
+# runs in, its cache and $HOME (a mapped checkout, a server copy, another
+# repository ...) to $T/foreign-writes; the summary fails if there are any.
+# Not counted: files directly in $T (output the tests redirect there) and
+# $T itself.
+# Checking timestamps instead of making the upstreams read-only also catches
+# writes git only does if it may (index refresh) and works as root and on
+# Windows.
+mkdir -p "$T/stamps"
+REAL_GIT=$(command -v git)
+cat > "$T/guard.sh" <<EOF
+stamp=\$(mktemp "$T/stamps/XXXXXX")
+"$PYTHON" "$S" "\$@"
+rc=\$?
+top=\$("$REAL_GIT" rev-parse --show-toplevel 2>/dev/null)
+gd=\$("$REAL_GIT" rev-parse --absolute-git-dir 2>/dev/null)
+find "$T" \\( -path "$T/stamps" -o -path "$T/cache*" -o -path "$T/home" \\
+    \${top:+-o -path "\$top"} \${gd:+-o -path "\$gd"} \\
+    -o -type f -path "$T/*" ! -path "$T/*/*" \\) -prune -o \\
+    -newer "\$stamp" ! -path "$T" -print > "\$stamp.new"
+while read -r f; do echo "filesync \$*: \$f"; done < "\$stamp.new" >> "$T/foreign-writes"
+rm -f "\$stamp" "\$stamp.new"
+exit \$rc
+EOF
+git config --global alias.filesync "!bash $T/guard.sh"
 
 # --- helpers -----------------------------------------------------------------
 
@@ -122,7 +149,7 @@ addc() { git filesync add "$@" >/dev/null 2>&1 && git commit -q --no-edit >/dev/
 # 'C:/Program Files/Git/x.md'); the latter is avoided here with
 # MSYS_NO_PATHCONV (which can't be set for the alias: it breaks how git
 # passes the arguments to it). No effect elsewhere.
-fsd() { MSYS_NO_PATHCONV=1 "$PYTHON" "$S" "$@"; }
+fsd() { MSYS_NO_PATHCONV=1 bash "$T/guard.sh" "$@"; }
 
 # sedi SCRIPT FILE... - edit each FILE in place with sed; works with GNU and
 # BSD sed and keeps CRLF (GNU sed in Git Bash only does with -b)
@@ -507,6 +534,14 @@ check "mapped: uncommitted upstream change warned" \
   "$(cd sB && git filesync status | grep -c 'uncommitted changes')" "1"
 check "mapped: uncommitted change not synced" "$(cd sB && st)" ""
 (cd coB && git checkout -q -- x.c)
+
+# the checkout is only read: a file whose timestamp changed doesn't make
+# git-filesync refresh (rewrite) the checkout's index, as `git diff` would
+(cd coB && git update-index -q --refresh; touch -t 202001010000 x.c)
+IDX=$(cksum < coB/.git/index)
+check "mapped: timestamp change is no uncommitted change" \
+  "$(cd sB && git filesync status | grep -c 'uncommitted changes')" "0"
+check "mapped: checkout's index not rewritten" "$(cksum < coB/.git/index)" "$IDX"
 
 # branch 'rel' only known as origin/rel in the checkout -> fallback
 (cd coA && git push -q origin HEAD:rel)
@@ -1123,6 +1158,19 @@ if git lfs version >/dev/null 2>&1; then
   ERR=$(GIT_LFS_SKIP_SMUDGE=1 git filesync add d.txt "$TURL/ml.git" 2>&1)
   check "lfs unavailable: add fails" "$(echo "$ERR" | grep -c 'stored in Git LFS')" "1"
   check "lfs unavailable: no pointer file written" "$([ -e d.txt ] && echo written || echo none)" "none"
+
+  # a mapped checkout without the LFS object: fetched into a temporary
+  # store, nothing written into the checkout's .git/lfs
+  git clone -q "$TURL/ml.git" "$T/mlfull" 2>/dev/null
+  GIT_LFS_SKIP_SMUDGE=1 git clone -q "$TURL/ml.git" "$T/mlnolfs" 2>/dev/null
+  rm -rf "$T/mlnolfs/.git/lfs"
+  cd "$T" && new_repo slmap
+  git filesync source map "$TURL/ml.git" "$T/mlnolfs" >/dev/null
+  addc d.txt "$TURL/ml.git"
+  check "lfs via mapping, object missing there: content" "$(cat d.txt)" "$(cat "$T/mlfull/d.txt")"
+  check "lfs via mapping, object missing there: checkout untouched" \
+    "$([ -e "$T/mlnolfs/.git/lfs" ] && echo written || echo none)" "none"
+  cd "$T/sl"
 
   # pre-push hook shared with git lfs: our block first (as hooks install
   # says) - LFS must still get the pushed refs and upload its objects
@@ -1819,8 +1867,64 @@ fi
 
 
 # =============================================================================
+section "22. Closed output pipe; discarded content kept"
+# =============================================================================
+cd "$T"
+
+git init -q m22 && (cd m22 && for i in 1 2 3; do echo "v$i" > f$i; done && git add . && git commit -qm init)
+new_repo s22
+git filesync source map file:///nowhere/m22.git "$T/m22" >/dev/null
+addc d file:///nowhere/m22.git -p /
+(cd ../m22 && for i in 1 2 3; do echo "w$i" >> f$i; done && git commit -qam w)
+
+# output into a pipe whose reader is gone (`| head`, a pager quit early):
+# a reading command stops, a changing one carries on - never halfway -
+# both exit with 141 like git (unbuffered: the first line already fails)
+PYTHONUNBUFFERED=1 fsd status | true
+check "closed pipe: status exits with 141" "${PIPESTATUS[0]}" "141"
+PYTHONUNBUFFERED=1 fsd pull --all --no-edit | true
+check "closed pipe: pull exits with 141" "${PIPESTATUS[0]}" "141"
+check "closed pipe: pull committed all" "$(git log -1 --format=%s)" "[filesync] Sync 3 files from nowhere/m22"
+check "closed pipe: nothing left staged or to sync" "$(git status --porcelain)|$(st)" "|"
+check "closed pipe: an error keeps its exit code" "$(fsd pull nothere 2>/dev/null | true; echo "${PIPESTATUS[0]}")" "2"
+
+# content with uncommitted changes that restore, add --overwrite or rm -f
+# discard is kept as a blob, with a hint how to get it back
+echo mine >> d/f1
+OUT=$(git filesync restore d/f1)
+check "restore: discarded content reported" "$(echo "$OUT" | grep -c '^discarded: d/f1 (git show [0-9a-f]\{12\} to get it back)$')" "1"
+ID=$(echo "$OUT" | sed -n 's/.*git show \([0-9a-f]*\).*/\1/p')
+check "restore: discarded content can be got back" "$(git show "$ID" | tail -1)" "mine"
+check "restore: file restored" "$(cat d/f1)" "$(git show HEAD:d/f1)"
+echo staged >> d/f2 && git add d/f2
+check "restore: staged content (index stays) not reported" "$(git filesync restore d/f2 | grep -c discarded)" "0"
+git reset -q --hard
+echo adapted >> d/f2 && git commit -qam adapt
+check "restore: committed adaptation not reported" "$(git filesync restore d/f2 | grep -c discarded)" "0"
+git reset -q --hard
+echo mine2 >> d/f2
+check "restore -SW: discarded content reported" "$(git filesync restore -SW d/f2 | grep -c '^discarded: d/f2 ')" "1"
+git reset -q --hard
+echo mine3 >> d/f3
+OUT=$(git filesync rm -f d/f3)
+check "rm -f: discarded content reported" "$(echo "$OUT" | grep -c '^discarded: d/f3 ')" "1"
+check "rm -f: discarded content can be got back" \
+  "$(git show "$(echo "$OUT" | sed -n 's/.*git show \([0-9a-f]*\).*/\1/p')" | tail -1)" "mine3"
+git reset -q --hard
+check "rm: unchanged file not reported" "$(git filesync rm d/f3 | grep -c discarded)" "0"
+git reset -q --hard
+echo own > x
+check "add --overwrite: replaced untracked file reported" \
+  "$(git filesync add --overwrite x file:///nowhere/m22.git -p f1 | grep -c '^discarded: x ')" "1"
+git reset -q --hard
+
+
+# =============================================================================
 # summary
 # =============================================================================
+section "Upstream repositories untouched"
+check "no writes outside the repository git-filesync runs in" \
+  "$(cat "$T/foreign-writes" 2>/dev/null)" ""
 echo
 if [ $FAILED = 0 ]; then
   echo "ALL PASSED ($PASSED checks)"

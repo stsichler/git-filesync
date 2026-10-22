@@ -459,6 +459,19 @@ the synced version already are reported with `nothing to restore`.
 `git restore FILE` (without `filesync`) discards uncommitted changes as
 usual, back to the committed state, adaptations included.
 
+<a id="discarded-content"></a>Like `git restore`, `restore` overwrites
+uncommitted changes in the working tree. Their content isn't lost, though:
+before a file with content in neither HEAD nor the index (if that stays)
+is overwritten, it is kept as a blob, exactly as it was, and reported:
+
+```text
+discarded: src/lib.c (git show 3f2a9c1d07be to get it back)
+```
+
+`git show 3f2a9c1d07be > src/lib.c` brings it back – until Git removes
+unreferenced objects (`git gc`, after two weeks by default). The same
+applies to `add --overwrite` and `rm -f`.
+
 ### `add`
 
 `add FILE URL|SOURCE` – link FILE to a file in an upstream repository, given by
@@ -486,7 +499,7 @@ directory (see [below](#linking-a-directory)).
 | `--include PATTERN` | directory: only files matching PATTERN; repeatable |
 | `--exclude PATTERN` | directory: skip files matching PATTERN; repeatable, beats `--include` |
 | `--commit REV` | upstream revision to base FILE on, instead of the head of the branch (or the tag) |
-| `--overwrite` | replace an existing FILE (for DIR: existing files) with the upstream version |
+| `--overwrite` | replace an existing FILE (for DIR: existing files) with the upstream version; uncommitted content is kept as a blob ([discarded content](#discarded-content)) |
 | `--strict` | the file must stay an exact copy (see [Strict files](#strict-files)) |
 | `--force` | relink a file that is already linked |
 | `-n`, `--dry-run` | change nothing, only show what would be linked and on which upstream version it would be based |
@@ -567,8 +580,9 @@ git filesync add proto https://github.com/owner/backend.git -p api \
 
 `rm PATH…` – like `git rm`: remove the files and their links; both are
 staged. A file with uncommitted changes (or one never committed) is not
-removed – nothing is, then – unless `-f` / `--force` is given; a committed
-adaptation is no reason to refuse. A file that is gone already just loses
+removed – nothing is, then – unless `-f` / `--force` is given (its
+uncommitted content is then kept as a blob, see [discarded
+content](#discarded-content)); a committed adaptation is no reason to refuse. A file that is gone already just loses
 its link. `-n` / `--dry-run` only lists what would be removed. To keep the
 files, use [`unlink`](#unlink).
 
@@ -746,6 +760,13 @@ works offline.
   touch the file don't matter)
 - no local branch of that name in the checkout → `origin/<branch>` as last
   fetched there is used, with a note
+
+The checkout is only read: git-filesync writes nothing into it – Git
+doesn't refresh its index, Git LFS stores nothing in its `.git/lfs` (an
+LFS object missing there is fetched with the cache clone of the URL). So a
+read-only checkout, e.g. on a network share, works too. Only if the
+checkout is itself a partial clone (`--filter`), Git fetches objects
+missing there into it as usual.
 
 To work against the server again, remove the mapping (`source map URL
 --unset`).
@@ -1041,9 +1062,9 @@ file](#the-git-filesync-file)).
 Whether a synced file is stored in Git LFS upstream, downstream, in both or
 in neither doesn't matter:
 
-- Upstream side: LFS pointers are resolved to the real content (`git lfs
-  smudge` in the mapped checkout or the cache; the content comes from the
-  local LFS store or the upstream LFS server). Comparisons against an upstream
+- Upstream side: LFS pointers are resolved to the real content: from the
+  LFS store of a mapped checkout (only read), otherwise with `git lfs
+  smudge` in the cache clone, from the upstream LFS server. Comparisons against an upstream
   file in LFS use the pointer's SHA-256, so no download is needed to tell
   whether the downstream copy is unmodified.
 - Downstream side: the file is written as real content and stored the way
@@ -1120,6 +1141,7 @@ access.)
 | `0` | ok |
 | `1` | unfinished: `pull` with conflicts or without commit; `status --exit-code` with something to sync (including files deleted upstream) or a strict violation; `diff -- --exit-code` with differences |
 | `2` | error |
+| `141` | the output went into a pipe that was closed early (`… \| head`, a pager quit), like Git (128 + SIGPIPE); reading commands stop there, the others finish their work first |
 
 `--dry-run` / `-n` exit with 0, or 2 on errors – also for refusals they
 report (`pull --dry-run` on a strict violation, …); expected merge conflicts

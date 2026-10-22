@@ -94,7 +94,9 @@ Basic commands:
 
     restore PATH...             restore files to the synced upstream version
                                 (the base), like `git restore`; e.g. to
-                                discard adaptations of a strict file
+                                discard adaptations of a strict file;
+                                uncommitted content is kept as a blob
+                                (`discarded: FILE (git show ID ...)`)
         -S, --staged            restore the index instead of the working tree
         -W, --worktree          restore the working tree (default; with -S:
                                 both)
@@ -125,7 +127,7 @@ Basic commands:
         --commit REV            upstream revision to base FILE on instead
                                 of the head
         --overwrite             replace an existing FILE with the upstream
-                                version
+                                version (uncommitted content: as restore)
         --strict                FILE must stay an exact copy
         --force                 relink an already linked file
         -n, --dry-run           only show what would be linked
@@ -133,7 +135,8 @@ Basic commands:
     rm PATH...                  remove linked files and their links, staged
                                 like `git rm`; refused for files with
                                 uncommitted changes
-        -f, --force             remove them anyway
+        -f, --force             remove them anyway (their content: as
+                                restore)
         -n, --dry-run           only show what would be removed
 
     unlink PATH...              remove links (the files are kept)
@@ -173,7 +176,8 @@ Advanced commands:
     source map [URL|SOURCE [DIR]]  use the local checkout DIR instead of
                                 fetching URL (SOURCE: the URL of that
                                 [source]); its branch is used, unpushed
-                                commits included; without DIR: list mappings
+                                commits included; DIR is only read; without
+                                DIR: list mappings
         --global                global git config (default: this repository)
         --unset                 remove the mapping for the URL
 
@@ -214,7 +218,7 @@ Advanced commands:
         --color[=WHEN], --no-color  always, never or auto (default)
 
 Exit codes: 0 ok, 1 unfinished (conflicts, not committed, --exit-code),
-2 error.
+2 error, 141 output pipe closed early (reading commands stop, others finish).
 
 Files stored in Git LFS (upstream, in this repository, both or neither) are
 handled transparently, as are differing line-ending conventions. Output is
@@ -226,6 +230,7 @@ Manual: https://github.com/stsichler/git-filesync/blob/main/MANUAL.md
 """
 
 import argparse
+import errno
 import fnmatch
 import inspect
 import hashlib
@@ -245,9 +250,10 @@ from typing import Optional
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
+EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
 EXIT_REFUSED = 3          # hook pre-push: refuse the push (filesync.pushCheck = error)
 HOOK_MARKER = "git-filesync"
 MSG_PREFIX = "[filesync] "    # subject of every proposed commit message
@@ -334,6 +340,50 @@ def warn(msg):
 
 def error(msg):
     print(f"{paint('error:', 'boldred', 'err')} {msg}", file=sys.stderr)
+
+
+class PipeGuard:
+    """Wraps sys.stdout / sys.stderr. Once the reader of a pipe is gone
+    (`| head`), output goes to the null device: a reading command then
+    stops (BrokenPipeError, see stop), a changing one carries on, so it
+    never stops halfway. main() then exits with EXIT_PIPE."""
+    broken = False      # a pipe broke
+    stop = False        # stop the command when it does (reading commands)
+
+    def __init__(self, stream, each=False):
+        self._stream = stream
+        self._each = each   # flush after each write (stderr: Python < 3.9 buffers it)
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+    def write(self, text):
+        try:
+            n = self._stream.write(text)
+            if self._each:
+                self._stream.flush()
+            return n
+        except OSError as e:
+            self._broken(e)
+            return len(text)
+
+    def flush(self):
+        try:
+            self._stream.flush()
+        except OSError as e:
+            self._broken(e)
+
+    def _broken(self, e):
+        # Windows reports a closed pipe as EINVAL
+        if not isinstance(e, BrokenPipeError) and e.errno != errno.EINVAL:
+            raise e
+        PipeGuard.broken = True
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), self._stream.fileno())
+        except (OSError, ValueError):
+            pass
+        if PipeGuard.stop:
+            raise BrokenPipeError(errno.EPIPE, "output pipe closed")
 
 
 # --------------------------------------------------------------------------
@@ -612,6 +662,21 @@ def lfs_pointer(data):
     return None
 
 
+@contextmanager
+def lfs_elsewhere():
+    """Options for `git status` in a mapped checkout that keep Git LFS from
+    writing into the checkout's .git/lfs: the clean filter (run for files
+    with a new timestamp) keeps its temporary files and the objects it
+    stores in a temporary store instead. (Not for fetching objects: with
+    lfs.storage set, git-lfs looks in the wrong place on a file:// server.)
+    Older git-lfs (2.x) also installs its hooks: into a temporary directory."""
+    store = tempfile.mkdtemp(prefix="git-filesync-lfs-")
+    try:
+        yield ["-c", f"lfs.storage={store}", "-c", f"core.hooksPath={store}/hooks"]
+    finally:
+        rmtree(store)
+
+
 def lfs_smudge(run, data, path, where):
     """Content behind an LFS pointer, via `git lfs smudge` in that repository
     (local LFS store first, then the repository's LFS server)."""
@@ -656,6 +721,7 @@ class Source:
         self.local = local   # mapped local checkout: ref is its local branch
         self.note = note     # remark about the ref choice, shown by status
         self.tag_names = None   # for a tag pattern: the matching tags ref is at
+        self.lfs_server = None  # mapped: () -> repository to fetch missing LFS objects in
         self._memo = {}      # answers that don't change during a run (see prefetch)
 
     def git(self, args, **kw):
@@ -703,15 +769,20 @@ class Source:
 
     def has_uncommitted(self, path):
         """Does a local checkout have uncommitted changes to path? One `git
-        diff` for the whole checkout, asked once."""
+        status` for the whole checkout, asked once. The checkout is only read:
+        --no-optional-locks keeps git from rewriting its index (`git diff`
+        would), lfs_elsewhere Git LFS from writing into its .git/lfs."""
         key = ("uncommitted",)
+        status = ["--no-optional-locks", "status", "--porcelain", "-z", "--untracked-files=no",
+                  "--no-renames"]
         if key not in self._memo:
-            p = self.git(["diff", "--name-only", "-z", "--no-renames", "HEAD"], check=False)
-            self._memo[key] = set(p.stdout.decode("utf-8", "replace").split("\0")) \
-                if p.returncode == 0 else None
+            with lfs_elsewhere() as lfs:
+                p = self.git(lfs + status, check=False)
+            self._memo[key] = {e[3:] for e in p.stdout.decode("utf-8", "replace").split("\0")
+                               if e} if p.returncode == 0 else None
         if self._memo[key] is None:
-            return self.git(["diff", "--quiet", "HEAD", "--", lit(path)],
-                            check=False).returncode == 1
+            with lfs_elsewhere() as lfs:
+                return bool(out(self.git(lfs + status + ["--", lit(path)], check=False)))
         return path in self._memo[key]
 
     def resolve(self, rev=None):
@@ -823,9 +894,31 @@ class Source:
         if lfs_pointer(data):
             key = ("lfs", oid)
             if key not in self._memo:
-                self._memo[key] = lfs_smudge(self.git, data, path, self.label)
+                self._memo[key] = self.lfs_content(data, path)
             data = self._memo[key]
         return data
+
+    def lfs_content(self, pointer, path):
+        """Content behind an LFS pointer. A mapped checkout is only read
+        (`git lfs smudge` would write into its .git/lfs, even for objects it
+        has): an object in its LFS store is taken from there, a missing one
+        is fetched with the cache clone of the source."""
+        if not self.local:
+            return lfs_smudge(self.git, pointer, path, self.label)
+        oid, size = lfs_pointer(pointer)
+        common = self.dir / out(self.git(["rev-parse", "--git-common-dir"]))
+        try:
+            data = (common / "lfs" / "objects" / oid[:2] / oid[2:4] / oid).read_bytes()
+            if len(data) == size and hashlib.sha256(data).hexdigest() == oid:
+                return data
+        except OSError:
+            pass
+        if not self.lfs_server:
+            raise FsError(f"'{path}' is stored in Git LFS in {self.label}, but its content "
+                          "is not there")
+        cache = self.lfs_server()
+        return lfs_smudge(lambda args, **kw: git(["-C", cache] + args, env=clean_env(), **kw),
+                          pointer, path, self.label)
 
     def short(self, oid):
         """Abbreviated commit id (asked at once for many: shorts)."""
@@ -1061,6 +1154,8 @@ class Context:
         if key not in self._sources:
             try:
                 self._sources[key] = self._make(url, ref, name, line)
+                if self._sources[key].local:     # LFS objects it lacks: via the cache clone
+                    self._sources[key].lfs_server = lambda: self._cache(url)
             except FsError as e:      # e.g. a failed clone: not tried again for each file
                 self._sources[key] = e
         s = self._sources[key]
@@ -2498,7 +2593,13 @@ def commit_staged(repo, name, msg, args, done, rels=None):
     msgfile, _ = message_file(repo, name, msg, rels)
     cmd = ["git", "commit", "-F", str(msgfile)] + ([] if args.no_edit else ["-e"]) + \
         ["--"] + [lit(r) for r in rels] + [REGISTRY]
-    if subprocess.run(cmd, cwd=repo.top).returncode:
+    sys.stdout.flush()
+    # without an editor, git's output goes through ours (PipeGuard): git
+    # would die of a closed pipe after committing and report a failure
+    p = subprocess.run(cmd, cwd=repo.top, stdout=subprocess.PIPE if args.no_edit else None)
+    if p.stdout:
+        sys.stdout.write(p.stdout.decode("utf-8", "replace"))
+    if p.returncode:
         report_staged(repo, name, msg, paint("commit not done", "yellow")
                       + "; changes stay staged", rels, "Commit later with")
         return EXIT_PENDING
@@ -2886,9 +2987,12 @@ def cmd_diff(ctx, repo, args):
         prefixes = ["--src-prefix=synced/", "--dst-prefix=" + (
             "upstream/" if args.upstream else "committed/" if args.committed else "local/")]
     color = {"always": ["--color=always"], "never": ["--no-color"]}.get(args.color, [])
+    sys.stdout.flush()
     p = subprocess.run(["git", "diff"] + color + prefixes + args.extra + [left, right],
                        cwd=repo.top)
-    if p.returncode > 1:
+    if p.returncode in (-13, EXIT_PIPE):       # killed by SIGPIPE: like our own output
+        PipeGuard.broken = True
+    elif p.returncode > 1:
         rc = EXIT_ERROR
     elif p.returncode == 1 and ("--exit-code" in args.extra or "--quiet" in args.extra):
         rc = max(rc, EXIT_PENDING)      # like `git diff --exit-code`: 1 = differences
@@ -3122,6 +3226,7 @@ def cmd_add(ctx, repo, args):
 
     repo.check_plain(rels)
     repo.normalize_many([(p.content, p.rel) for p in plan if p.content is not None])
+    save_discarded(repo, [p.rel for p in plan if p.replaced])
     fetched = []          # (rel, content in this repository's form) to write
     for p in plan:
         if p.rel in reg.files:
@@ -3211,6 +3316,24 @@ def index_entry(repo, rel):
     return mode or "100644", None
 
 
+def save_discarded(repo, rels, keep_index=False):
+    """Before restore, add --overwrite or rm -f overwrite or delete these
+    working tree files: the content of those with uncommitted changes - in
+    neither HEAD nor, if it stays, the index - is kept as a blob exactly as
+    it is, and the command tells how to get it back (`git show ID > FILE`).
+    Like with `git restore`, the files are discarded anyway."""
+    rels = [r for r in rels if (repo.top / r).is_file()]
+    if not rels:
+        return
+    repo.prefetch(rels)
+    index = repo.index_entries(rels) if keep_index else {}
+    current = repo.worktree_blobs(rels)
+    lost = [r for r in rels if current.get(r) not in
+            (repo.head_blob(r), index.get(r, (None, None))[1])]
+    for rel, oid in zip(lost, repo.store_many([(repo.top / r).read_bytes() for r in lost])):
+        print(f"{paint('discarded:', 'yellow')} {rel} (git show {oid[:12]} to get it back)")
+
+
 def cmd_restore(ctx, repo, args):
     """Like `git restore`, with the synced upstream version (the base the
     entry records) as the source: the working tree files (default), with -S
@@ -3255,6 +3378,7 @@ def cmd_restore(ctx, repo, args):
     oids = dict(zip([lk.rel for lk in plain], repo.store_many([bases[lk.rel] for lk in plain])))
     index = repo.index_entries([lk.rel for lk in links]) if args.staged else {}
     at_once, said = [], []         # said: what to print, in the order of the files
+    one_by_one = []                # (link, base, mode, fix tree, fix index)
     for link in links:
         if link.rel not in srcs:
             continue
@@ -3280,19 +3404,29 @@ def cmd_restore(ctx, repo, args):
             if (fix_tree or not worktree) and (fix_index or not args.staged):
                 at_once.append((link, base))       # written below, all at once
             else:
-                if fix_tree:
-                    link.target.parent.mkdir(parents=True, exist_ok=True)
-                    link.target.write_bytes(repo.to_worktree(repo.read_content(base, link.rel),
-                                                             link.rel))
-                if fix_index:
-                    repo.git(["update-index", "--add", "--cacheinfo",
-                              f"{mode},{base},{link.rel}"])
+                one_by_one.append((link, base, mode, fix_tree, fix_index))
             at = src.short(link.commit) if link.commit else link.blob[:8]
             said.append(f"{link.rel}: {paint(done, 'green')} ({link.name}@{at})")
         except FsError as e:   # report and carry on with the other files
             error(str(e))
             rc = EXIT_ERROR
+    if worktree:
+        save_discarded(repo, [lk.rel for lk, _ in at_once] +
+                       [lk.rel for lk, _, _, fix_tree, _ in one_by_one if fix_tree],
+                       keep_index=not args.staged)
     repo.put_blobs([(lk.rel, oid) for lk, oid in at_once], stage=args.staged, worktree=worktree)
+    for link, base, mode, fix_tree, fix_index in one_by_one:
+        try:
+            if fix_tree:
+                content = repo.to_worktree(repo.read_content(base, link.rel), link.rel)
+                link.target.parent.mkdir(parents=True, exist_ok=True)
+                link.target.write_bytes(content)
+            if fix_index:
+                repo.git(["update-index", "--add", "--cacheinfo", f"{mode},{base},{link.rel}"])
+        except FsError as e:
+            said = [x for x in said if not x.startswith(f"{link.rel}: ")]
+            error(str(e))
+            rc = EXIT_ERROR
     for line in said:
         print(line)
     return rc
@@ -3326,6 +3460,8 @@ def cmd_rm(ctx, repo, args):
             raise FsError("".join(f"{r}: has uncommitted changes\n" for r in dirty[:-1])
                           + f"{dirty[-1]}: has uncommitted changes - use -f to remove "
                           f"{'it' if len(dirty) == 1 else 'them'} anyway")
+    if not args.dry_run:
+        save_discarded(repo, [lk.rel for lk in links])
     for link in links:
         if args.dry_run:
             print(f"would remove {link.rel}")
@@ -4045,6 +4181,19 @@ class MainParser(argparse.ArgumentParser):
 
 
 def main(argv=None):
+    """Run a command (see run) with output through PipeGuard: exit code
+    EXIT_PIPE if a pipe broke and nothing else went wrong."""
+    PipeGuard.broken = PipeGuard.stop = False
+    if not isinstance(sys.stdout, PipeGuard):
+        sys.stdout, sys.stderr = PipeGuard(sys.stdout), PipeGuard(sys.stderr, each=True)
+    rc = run(argv)
+    PipeGuard.stop = False           # the command is done
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return EXIT_PIPE if PipeGuard.broken and rc == EXIT_OK else rc
+
+
+def run(argv=None):
     for stream in (sys.stdout, sys.stderr):
         # LF line ends like git's output, also on Windows (no CRLF translation);
         # not there if the stream was replaced (e.g. by a test harness)
@@ -4293,6 +4442,7 @@ def main(argv=None):
         ctx = Context(args, repo)
         reading = args.cmd in ("status", "diff", "difftool", "hook") or \
             args.cmd == "source" and not args.action
+        PipeGuard.stop = reading
         with repo.scratch() if reading else nullcontext():
             return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
                     "edit": cmd_edit, "restore": cmd_restore, "rm": cmd_rm,
@@ -4304,12 +4454,8 @@ def main(argv=None):
         return EXIT_ERROR
     except KeyboardInterrupt:
         return 130
-    except BrokenPipeError:
-        # output piped into e.g. `head`, which exited early
-        try:
-            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
-        except OSError:
-            pass
+    except BrokenPipeError:     # a reading command, its output piped into e.g. `head`
+        PipeGuard.broken = True
         return EXIT_OK
 
 
