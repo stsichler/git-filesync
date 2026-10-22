@@ -358,10 +358,8 @@ hint: the links still follow their own branch or tag, so a plain pull goes back;
 
 `status` then shows the files as `older` (their own tag is older than the
 synced version) or `pending`, and a plain `pull` syncs them back. To switch
-for good, change what the files follow, then `pull`: their tag with
-[`set --tag`](#set); their branch with [`source set-branch`](#source) for
-all files of a source, or by moving files to a source on that branch
-(`set FILE… --source NAME`, after `source add NAME URL -b BRANCH` if needed).
+for good, change what the files follow with [`set -b` / `--tag`](#set),
+then `pull`.
 
 With `--all`, every file is synced, also those up to date with their own
 branch or tag. A branch or tag that doesn't exist upstream is refused; `-b`
@@ -597,15 +595,30 @@ staged); `status` then shows what changes, and `pull` syncs.
 
 | Option | Effect |
 |---|---|
-| `--source URL\|SOURCE` | move the files to another `[source]`, or to the one for this URL with its default branch (created if necessary) – a fork, a moved repository. A source left without files is removed. For another branch of the same upstream: `source add NAME URL -b BRANCH`, then `set … --source NAME` |
+| `--source URL\|SOURCE` | take the files from another upstream repository – a fork, a moved repository – or from the `[source]` SOURCE |
+| `-b`, `--branch BRANCH` | follow BRANCH (with `--source URL`: a branch of that upstream; default: its default branch) |
 | `--tag TAG` | [pin](#pinning-to-a-tag) the files to TAG (or a [pattern](#tag-patterns)) from now on; the source's branch is where [newer tags](#newer-tags) are looked for. A tag that doesn't exist upstream is refused |
 | `--no-tag` | follow the source's branch again |
 | `-p`, `--path PATH` | another upstream path (exactly one file; `\` counts as `/`, as for `add`) |
 | `--strict`, `--no-strict` | mark the files as [strict](#strict-files), or allow adaptations again |
 | `-n`, `--dry-run` | only show what would change |
 
-The branch belongs to the source: [`source set-branch`](#source) changes it
-for all of its files.
+As for [`add`](#add), URL and branch select the `[source]` the files use:
+the one with that URL and branch, created if there is none – or, when all
+files of a source move, that source itself changes (keeping its name, like
+[`source set-url` / `set-branch`](#source)). A source left without files is
+removed. `--source SOURCE` with another `-b` than its branch is refused.
+
+Several options can go together, e.g. to pin files to a tag on another
+branch:
+
+```sh
+git filesync set cfg/ -b maint --tag 'v1.2.*'    # the newest v1.2.* on maint
+```
+
+`--tag` is checked on the branch the files follow then: a tag not on it
+gives a warning naming the branches it is on, a pattern without a match
+there an error naming the branches with matching tags.
 
 The synced version the files are based on (`commit` / `blob`) is kept where
 it still applies, so adaptations stay adaptations:
@@ -650,14 +663,15 @@ as an adaptation.
 
 ### `source`
 
-`source [ACTION …]` – list, add and change the `[source]` sections, like
-`git remote`. Only `.git-filesync` is changed (and staged); commit it on its
-own, or it goes into the next sync commit.
+`source [ACTION …]` – list and change the `[source]` sections, like
+`git remote`. Sources are created by [`add`](#add) and [`set`](#set) as
+needed, and removed when no file uses them any more. Only `.git-filesync`
+is changed (and staged); commit it on its own, or it goes into the next
+sync commit.
 
 | Command | Effect |
 |---|---|
 | `source` | list the source names (`-v`: with URL, branch and number of linked files) |
-| `source add NAME URL [-b BRANCH]` | add a source (default branch: the upstream default branch), e.g. to move files to another branch: `set FILE… --source NAME` |
 | `source rename OLD NEW` | rename a source, including every `source =` line |
 | `source set-url NAME URL` | change the URL, e.g. after upstream moved (its commits must be there) |
 | `source set-branch NAME BRANCH` | follow BRANCH – all files of the source; for [pinned](#pinning-to-a-tag) ones the branch to look for newer tags on |
@@ -672,7 +686,7 @@ owner/lib-dev	https://github.com/owner/lib.git (dev, 1 file)
 files: [`set --tag`](#set), and `status -v` shows them.
 
 A change that would make two sources identical (same URL and branch) is
-refused; move the files with [`set --source`](#set) instead. After changing
+refused; move the files with [`set -b` / `--source`](#set) instead. After changing
 URL or branch, `status` shows what is to sync for the source's files.
 
 ### `source map`
@@ -963,9 +977,9 @@ on that commit: `v1.4.0 = release-7`):
 hint: 3 files pinned to tag v1.2.0; the newest tag on branch main is v1.4.0 (use 'git filesync set --tag v1.4.0 <file>...' and pull to switch)
 ```
 
-If the pinned tag isn't on that branch, `status` warns. A maintenance line
-(`maint` with `v1.2.1`) is a source of its own: `source add lib-maint URL -b
-maint`, then `set FILE… --source lib-maint`.
+If the pinned tag isn't on that branch, `status` warns. To follow a
+maintenance line (`maint` with `v1.2.1`), switch the files to that branch:
+`set FILE… -b maint --tag v1.2.1`.
 
 Pre-releases count like any other tag. Branches are those of upstream
 (`origin/…` in the cache); with a [mapped checkout](#source-map) its local branches
