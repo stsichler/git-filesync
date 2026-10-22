@@ -1874,7 +1874,8 @@ cd "$T"
 git init -q m22 && (cd m22 && for i in 1 2 3; do echo "v$i" > f$i; done && git add . && git commit -qm init)
 new_repo s22
 git filesync source map file:///nowhere/m22.git "$T/m22" >/dev/null
-addc d file:///nowhere/m22.git -p /
+fsd add d file:///nowhere/m22.git -p / >/dev/null 2>&1 && git commit -q --no-edit   # fsd: '/' (Windows)
+check "closed pipe: files linked" "$(ls d | oneline)" "f1 f2 f3 "
 (cd ../m22 && for i in 1 2 3; do echo "w$i" >> f$i; done && git commit -qam w)
 
 # output into a pipe whose reader is gone (`| head`, a pager quit early):
