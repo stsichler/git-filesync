@@ -145,7 +145,7 @@ Basic commands – what you need day to day:
 | [`diff [PATH…] [-- OPTS]`](#diff) | local changes against the synced upstream version |
 | [`difftool [PATH…] [-- OPTS]`](#difftool) | the same in your difftool |
 | [`restore PATH…`](#restore) | files back to the synced upstream version, like `git restore` |
-| [`add FILE\|DIR URL\|SOURCE`](#add) | link a file – or all files of a directory – to the upstream repository |
+| [`add URL\|SOURCE FILE\|DIR`](#add) | link a file – or all files of a directory – to the upstream repository |
 | [`rm PATH…`](#rm) | remove linked files and their links, like `git rm` |
 | [`unlink PATH…`](#unlink) | remove links, keep the files |
 | [`mv OLD NEW`](#mv) | move a linked file and its link |
@@ -194,7 +194,7 @@ the command and lists them.
 
 | Option | Commands | Effect |
 |---|---|---|
-| `--no-fetch` | `status`, `pull`, `diff`, `difftool`, `add`, `set`, `source -v` | don't fetch, use the cached state (offline) |
+| `--no-fetch` | `status`, `pull`, `diff`/`difftool --upstream`, `add`, `set`, `source set-url`/`set-branch` | don't fetch, use the cached state (offline); `restore` and `diff` of local changes never fetch – the synced versions don't change |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
 ### `status`
@@ -306,7 +306,7 @@ In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH, once: the files keep following their own branch or tag (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG, once (as `-b`) |
 | `--overwrite` | discard local adaptations and take the upstream version as is (also when the file is up to date) |
-| `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename upstream, and every refusal |
+| `-n`, `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename upstream, and every refusal |
 | `-v`, `--verbose` | before each file, a line on where it comes from (as in `status -v`) and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` |
 
 **Adaptations** are merged with the new upstream version (3-way merge, base =
@@ -470,8 +470,9 @@ applies to `add --overwrite` and `rm -f`.
 
 ### `add`
 
-`add FILE URL|SOURCE` – link FILE to a file in an upstream repository, given by
-its URL or by the name of a `[source]` already in `.git-filesync`:
+`add URL|SOURCE FILE` – link FILE to a file in an upstream repository, given by
+its URL or by the name of a `[source]` already in `.git-filesync` (first
+upstream, then here – as in `source map` and `git submodule add`):
 
 - **URL**: the file joins an existing source only if the URL and the
   branch (`-b`, default: the upstream default branch) both match;
@@ -484,7 +485,7 @@ With `--tag`, the file is [pinned](#pinning-to-a-tag) to that tag (the tag
 goes into its `[file]` entry); the source and its branch are found as
 above.
 
-`add DIR URL|SOURCE` – the same for every file below an upstream
+`add URL|SOURCE DIR` – the same for every file below an upstream
 directory (see [below](#linking-a-directory)).
 
 | Option | Effect |
@@ -528,11 +529,11 @@ directory (see [below](#linking-a-directory)).
   messages.
 
 ```sh
-git filesync add src/foo.c https://github.com/owner/lib.git -p lib/foo.c
+git filesync add https://github.com/owner/lib.git src/foo.c -p lib/foo.c
 git commit                                            # with the proposed message
-git filesync add include/bar.h owner/lib --strict     # reuse [source "owner/lib"]
-git filesync add src/ owner/lib -p lib/util.h         # into an existing directory: src/util.h
-git filesync add cfg/x.yml https://github.com/owner/lib.git --tag v1.2.0
+git filesync add owner/lib include/bar.h --strict     # reuse [source "owner/lib"]
+git filesync add owner/lib src/ -p lib/util.h         # into an existing directory: src/util.h
+git filesync add https://github.com/owner/lib.git cfg/x.yml --tag v1.2.0
 ```
 
 #### Linking a directory
@@ -568,7 +569,7 @@ Patterns work like `.gitignore` lines, relative to the upstream directory:
 | `**/gen/*.h` | `**/` any number of directories; `*` and `?` don't match `/`; `[abc]`, `[!abc]` |
 
 ```sh
-git filesync add proto https://github.com/owner/backend.git -p api \
+git filesync add https://github.com/owner/backend.git proto -p api \
     --include '*.proto' --exclude '*_test.proto' --exclude test/
 ```
 
@@ -683,7 +684,7 @@ sync commit.
 |---|---|
 | `source` | list the source names (`-v`: with URL, branch and number of linked files) |
 | `source rename OLD NEW` | rename a source, including every `source =` line |
-| `source set-url NAME URL` | change the URL, e.g. after upstream moved (its commits must be there) |
+| `source set-url NAME URL` | change the URL, e.g. after upstream moved; the synced versions are looked up there as for [`set --source`](#set) |
 | `source set-branch NAME BRANCH` | follow BRANCH – all files of the source; for [pinned](#pinning-to-a-tag) ones the branch to look for newer tags on |
 
 ```
@@ -692,8 +693,9 @@ owner/lib	https://github.com/owner/lib.git (main, 3 files)
 owner/lib-dev	https://github.com/owner/lib.git (dev, 1 file)
 ```
 
-`source -v` accepts `--no-fetch` like `status`. Tags are a matter of the
-files: [`set --tag`](#set), and `status -v` shows them.
+`set-url` and `set-branch` refuse a branch that doesn't exist upstream, as
+[`set -b`](#set) does (`--no-fetch`: checked in the cache). Tags are a
+matter of the files: [`set --tag`](#set), and `status -v` shows them.
 
 A change that would make two sources identical (same URL and branch) is
 refused; move the files with [`set -b` / `--source`](#set) instead. After changing
@@ -920,7 +922,7 @@ Instead of following its source's branch, a file can be pinned to a tag,
 e.g. a release of upstream:
 
 ```sh
-git filesync add cfg/x.yml https://github.com/owner/lib.git --tag v1.2.0
+git filesync add https://github.com/owner/lib.git cfg/x.yml --tag v1.2.0
 git filesync set cfg/ --tag v1.2.0          # files already linked
 ```
 
@@ -961,7 +963,7 @@ against the whole tag name): the file follows the **newest matching tag on
 its source's branch**, so `pull` moves on to a new release by itself:
 
 ```sh
-git filesync add cfg/x.yml https://github.com/owner/lib.git --tag 'v1.*'
+git filesync add https://github.com/owner/lib.git cfg/x.yml --tag 'v1.*'
 ```
 
 - "Newest" is meant as for [newer tags](#newer-tags): by the commit graph,
@@ -1084,7 +1086,7 @@ With a [mapped local checkout](#source-map), all commands work without network
 access (`add` takes the default branch from the checkout's `origin/HEAD`,
 or – with a warning if the checkout has a remote – from the branch checked
 out there). Files [pinned to a tag](#pinning-to-a-tag) work offline as
-soon as the tag is in the cache; `pull`, `status -v` and `source -v`, which
+soon as the tag is in the cache; `pull` and `status -v`, which
 look for newer tags, then warn that fetching failed and go on. Without a
 mapping, the cache is used after a failed fetch; file versions never read
 before may be missing there (blobless clone): `status` then warns and
@@ -1156,14 +1158,14 @@ call `git filesync` from cmd or PowerShell. That shell changes two kinds of
 arguments before git-filesync sees them:
 
 - **Wildcard characters** in file names (`*`, `?`, `[…]`) are expanded if a
-  file matches: `git filesync add 'f[1].txt' …` turns into `f1.txt` when
+  file matches: `git filesync add … 'f[1].txt'` turns into `f1.txt` when
   that file exists.
 - **Arguments starting with `/`** become Windows paths: `--include /x.md`
   turns into `C:/Program Files/Git/x.md`. For the upstream root, `-p .`
   works as well as `-p /`.
 
 For such arguments, run the script directly instead of through the alias,
-e.g. `py C:/tools/git-filesync.py add docs owner/lib --include /x.md` in
+e.g. `py C:/tools/git-filesync.py add owner/lib docs --include /x.md` in
 cmd or PowerShell; in Git Bash, put `MSYS_NO_PATHCONV=1` in front of it.
 Don't set `MSYS_NO_PATHCONV` (or `MSYS=noglob`) for git itself: it breaks
 how git passes the arguments to the alias.
@@ -1174,7 +1176,7 @@ git-filesync can keep a copy of itself in your repository, so everyone has
 the same version without installing it:
 
 ```sh
-git filesync add tools/git-filesync.py https://github.com/stsichler/git-filesync.git \
+git filesync add https://github.com/stsichler/git-filesync.git tools/git-filesync.py \
     -p git-filesync.py --tag v0.16.0 --strict
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
 ```

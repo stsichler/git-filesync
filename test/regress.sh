@@ -195,7 +195,7 @@ up() { (cd "$T/upstream" && sedi "$1" lib.c && git commit -qam "$2" && git push 
 
 # downstream: links upstream's lib.c as src/lib.c
 new_repo downstream
-OUT=$(git filesync add src/lib.c "$URL" -p lib.c 2>&1)
+OUT=$(git filesync add "$URL" src/lib.c -p lib.c 2>&1)
 check "--help: basic and advanced commands" \
   "$(git filesync -h | grep -E '^(basic commands|advanced commands):$|^  (status|mv|set|hooks?) ' | cut -c1-8 | oneline)" \
   "basic co   status   mv     advanced   set      hooks  "
@@ -213,7 +213,7 @@ check "add: proposed commit message" "$(git log -1 --format=%B | sed '/^$/d' | s
 # protocol v2 - git-filesync asks for it even if v0 is configured
 git config --global protocol.version 0
 check "protocol.version=0 configured: add works" \
-  "$( (new_repo "$T/sv0" && FILESYNC_CACHE=$T/cache-v0 git filesync add x.c "$URL" -p lib.c >/dev/null 2>&1; echo $?) )" "0"
+  "$( (new_repo "$T/sv0" && FILESYNC_CACHE=$T/cache-v0 git filesync add "$URL" x.c -p lib.c >/dev/null 2>&1; echo $?) )" "0"
 git config --global --unset protocol.version
 
 # two upstream commits -> pending; pull lists them in the commit message
@@ -412,7 +412,7 @@ for mode in autocrlf textauto plain; do
     textauto) echo '* text=auto' > .gitattributes; git add .gitattributes ;;
   esac
   git commit -q --allow-empty -m i
-  addc w.c "$URL2"
+  addc "$URL2" w.c
   check "$mode: clean after add" "$(st)" ""
 
   # upstream change; git's "CRLF will be replaced by LF" must not appear
@@ -454,7 +454,7 @@ section "3. Branch name as --commit"
 (cd m && git checkout -q -b develop && printf 'x\r\n' > w.c && git commit -qam d1 && git push -q origin develop)
 rm -rf s
 new_repo s
-addc w.c "$URL2"
+addc "$URL2" w.c
 (cd ../m && printf 'y\r\n' > w.c && git commit -qam d2 && git push -q origin develop && git checkout -q main)
 quiet pullc --commit develop w.c
 check "--commit <branch> gets current head" "$(tr -d '\r' < w.c)" "y"
@@ -477,7 +477,7 @@ git clone -q m3.git coB
 
 # three repositories linking x.c
 for s in sA sB sC; do
-  (new_repo $s && addc x.c "$URL3")
+  (new_repo $s && addc "$URL3" x.c)
 done
 
 # sA -> coA (given as relative path from a subdirectory), sB -> coB
@@ -554,7 +554,7 @@ check "mapped: checkout's index not rewritten" "$(cksum < coB/.git/index)" "$IDX
 git init -q sD
 (cd sD && git commit -q --allow-empty -m i \
   && git filesync source map "$URL3" "$T/coB" >/dev/null \
-  && addc -b rel x.c "$URL3")
+  && addc -b rel "$URL3" x.c)
 check "mapped: falls back to origin/<branch>" "$(cat sD/x.c)" "v2"
 check "mapped: fallback noted" "$(cd sD && git filesync status | grep -c 'using origin/rel')" "1"
 git filesync source map --global "$URL3" --unset >/dev/null
@@ -571,7 +571,7 @@ OFF=https://unreachable.invalid/owner/m3.git
 (cd coA && git remote set-head origin main >/dev/null 2>&1)
 new_repo sOff
 git filesync source map "$OFF" "$T/coA" >/dev/null
-check "offline add via mapping (no -b)" "$(rc git filesync add x.c "$OFF")" "0"
+check "offline add via mapping (no -b)" "$(rc git filesync add "$OFF" x.c)" "0"
 check "offline add: branch from checkout" \
   "$(git config -f .git-filesync --get-regexp "^source\..*\.branch" | cut -d" " -f2)" "main"
 check "offline add: content from checkout" "$(cat x.c)" "v2"
@@ -606,7 +606,7 @@ check "offline: pull got v3 from checkout" "$(cat x.c)" "v3"
 cd "$T"
 mv m3.git m3-away.git
 new_repo sOff2
-check "offline add via cache (no -b)" "$(rc git filesync add x.c "$URL3")" "0"
+check "offline add via cache (no -b)" "$(rc git filesync add "$URL3" x.c)" "0"
 check "offline add via cache: content" "$(cat x.c)" "v1"
 cd "$T"
 mv m3-away.git m3.git
@@ -630,8 +630,8 @@ git init -q m4
   && git add . && git commit -qm init)
 new_repo s4
 git filesync source map file:///nowhere/m4.git "$T/m4" >/dev/null
-addc src/foo.c file:///nowhere/m4.git -p lib/foo.c
-addc src/bar.h file:///nowhere/m4.git -p lib/bar.h --strict
+addc file:///nowhere/m4.git src/foo.c -p lib/foo.c
+addc file:///nowhere/m4.git src/bar.h -p lib/bar.h --strict
 
 # diff: synced version <-> local file
 check "diff: nothing when clean" "$(git filesync diff)" ""
@@ -737,7 +737,7 @@ check "one [source] for files of one upstream" \
 SRC=$(git config -f .git-filesync --get-regexp '^source\..*\.url' | sed 's/^source\.\(.*\)\.url .*/\1/')
 (cd ../m4 && printf 'n\n' > lib/new.h && sedi 's/^d$/D-up/' lib/foo.c && git add . && git commit -qm "add new.h")
 # add only stages; the proposed message is prepared for a plain git commit
-OUT=$(git filesync add include/new.h "$SRC" -p lib/new.h 2>&1)
+OUT=$(git filesync add "$SRC" include/new.h -p lib/new.h 2>&1)
 check "add by source name" "$?" "0"
 check "add by source name: same source" "$(git config -f .git-filesync file.include/new.h.source)" "$SRC"
 check "add: staged, not committed" "$(git status --porcelain | oneline)" "M  .git-filesync A  include/new.h "
@@ -757,7 +757,10 @@ check "mv: old entry gone" "$(git config -f .git-filesync --get-regexp '^file\.i
 git commit -qm mv
 
 # unlink: removes the entry, keeps the file; the last unlink removes the registry
+{ printf '# my own note\n\n'; cat .git-filesync; } > "$T/reg" && cp "$T/reg" .git-filesync
+git commit -qam "own comment"
 check "unlink rc" "$(rc git filesync unlink include/renamed.h)" "0"
+check "unlink: own comment and layout kept" "$(head -2 .git-filesync | oneline)" "# my own note  "
 check "unlink: file kept" "$(cat include/renamed.h)" "n"
 check "unlink: entry removed" "$(git filesync status include/renamed.h 2>&1 | grep -c 'not linked')" "1"
 check "unlink: source kept while used" "$(git config -f .git-filesync --get-regexp '^source\.' | lines)" "2"
@@ -787,7 +790,7 @@ git reset -q --hard
 check "source key from URL" "$SRC" "nowhere/m4"
 git filesync source map file:///other/nowhere/m4.git "$T/m4" >/dev/null
 check "add: output shows the new key" \
-  "$(git filesync add include/other.h file:///other/nowhere/m4.git -p lib/bar.h 2>&1 | grep -c '^linked include/other.h -> nowhere/m4-2:lib/bar.h (main)')" "1"
+  "$(git filesync add file:///other/nowhere/m4.git include/other.h -p lib/bar.h 2>&1 | grep -c '^linked include/other.h -> nowhere/m4-2:lib/bar.h (main)')" "1"
 check "same key, other URL: own source" \
   "$(git config -f .git-filesync source.nowhere/m4-2.url)" "file:///other/nowhere/m4.git"
 check "same key, other URL: existing source unchanged" \
@@ -807,23 +810,23 @@ check "status -v: source key as label" \
 quiet pullc src/foo.c
 check "pull: source key in commit message" \
   "$(git log -1 --format=%s)" "[filesync] Sync src/foo.c from mylib@$(git -C ../m4 log -1 --format=%h -- lib/foo.c)"
-addc include/x.h file:///nowhere/m4.git -p lib/bar.h
+addc file:///nowhere/m4.git include/x.h -p lib/bar.h
 check "add finds the source by URL, not by key" \
   "$(git config -f .git-filesync file.include/x.h.source)" "mylib"
 check "add by URL: no new source" "$(git config -f .git-filesync --get-regexp '^source\..*\.url' | lines)" "1"
 
 # add over an existing, different file: message notes modifications and strict
 echo mine > include/y.h
-addc --strict include/y.h mylib -p lib/bar.h
+addc --strict mylib include/y.h -p lib/bar.h
 check "add existing file: subject" "$(git log -1 --format=%s | sed 's/@[0-9a-f]*$//')" "[filesync] Link include/y.h to mylib"
 check "add existing file: notes" \
   "$(git log -1 --format=%B | grep -cE '^(Contains local modifications|Strict:)')" "2"
 check "add existing file: committed as is" "$(git show HEAD:include/y.h)" "mine"
 check "add existing file: warned" \
-  "$(git filesync add -n --force include/y.h mylib -p lib/bar.h 2>&1 | grep -c '^warning: include/y.h differs from upstream .*--overwrite')" "1"
+  "$(git filesync add -n --force mylib include/y.h -p lib/bar.h 2>&1 | grep -c '^warning: include/y.h differs from upstream .*--overwrite')" "1"
 # --overwrite replaces it with the upstream version; --force: it is linked already
-check "add --overwrite of a linked file needs --force" "$(rc git filesync add --overwrite include/y.h mylib -p lib/bar.h)" "2"
-quiet git filesync add --force --overwrite include/y.h mylib -p lib/bar.h
+check "add --overwrite of a linked file needs --force" "$(rc git filesync add --overwrite mylib include/y.h -p lib/bar.h)" "2"
+quiet git filesync add --force --overwrite mylib include/y.h -p lib/bar.h
 git commit -q --no-edit
 check "add --overwrite: upstream content" "$(cat include/y.h)" "$(git -C ../m4 show main:lib/bar.h)"
 check "add --overwrite: unmodified" "$(st include/y.h)" ""
@@ -863,7 +866,7 @@ git init -q m5
 new_repo s5
 git filesync source map file:///nowhere/m5.git "$T/m5" >/dev/null
 for f in a b c d e; do
-  quiet git filesync add $f.c file:///nowhere/m5.git
+  quiet git filesync add file:///nowhere/m5.git $f.c
 done
 git config -f .git-filesync file.e.c.strict true
 git add .git-filesync
@@ -974,20 +977,20 @@ git rm -q .git-filesync
 git commit -qm "drop unsafe entries"
 
 # the same paths given on the command line
-check "add into .git refused" "$(rc git filesync add .git/x file:///nowhere/m6.git -p a.txt)" "2"
-check "add outside refused" "$(rc git filesync add ../x file:///nowhere/m6.git -p a.txt)" "2"
+check "add into .git refused" "$(rc git filesync add file:///nowhere/m6.git .git/x -p a.txt)" "2"
+check "add outside refused" "$(rc git filesync add file:///nowhere/m6.git ../x -p a.txt)" "2"
 # an upstream file added to an existing directory goes into it, like cp
 mkdir d
-quiet git filesync add d file:///nowhere/m6.git -p a.txt
+quiet git filesync add file:///nowhere/m6.git d -p a.txt
 check "add FILE into existing directory" "$(git config -f .git-filesync file.d/a.txt.path)" "a.txt"
 git reset -q --hard
 # an upstream directory links the files below it
-check "upstream path is a directory" "$(git filesync add -n x.txt file:///nowhere/m6.git -p sub | cut -d' ' -f1-5)" \
+check "upstream path is a directory" "$(git filesync add -n file:///nowhere/m6.git x.txt -p sub | cut -d' ' -f1-5)" \
   "would link x.txt/s.txt -> nowhere/m6:sub/s.txt"
 check "upstream path with backslashes (copied on Windows)" \
-  "$(git filesync add -n x.txt file:///nowhere/m6.git -p '.\sub\s.txt' | cut -d' ' -f1-5)" \
+  "$(git filesync add -n file:///nowhere/m6.git x.txt -p '.\sub\s.txt' | cut -d' ' -f1-5)" \
   "would link x.txt -> nowhere/m6:sub/s.txt"
-addc a.txt file:///nowhere/m6.git
+addc file:///nowhere/m6.git a.txt
 check "mv outside refused" "$(rc git filesync mv a.txt ../moved.txt)" "2"
 check "mv outside: file stays" "$(ls a.txt ../moved.txt 2>/dev/null)" "a.txt"
 check "map --unset without URL" "$(rc git filesync source map --unset)" "2"
@@ -996,7 +999,7 @@ check "map --unset without URL" "$(rc git filesync source map --unset)" "2"
 # not match the unrelated file f1.txt
 echo other > f1.txt
 git add f1.txt
-quiet fsd add 'f[1].txt' file:///nowhere/m6.git
+quiet fsd add file:///nowhere/m6.git 'f[1].txt'
 git commit -qm link
 echo changed > f1.txt
 check "glob chars: other file's change not attributed" "$(fsd status -s 'f[1].txt' | cut -c1-3)" ""
@@ -1030,7 +1033,7 @@ git clone -q m6 co6
 new_repo s7
 git filesync source map file:///nowhere/m6.git "$T/co6" >/dev/null
 check "default branch guessed: warned" \
-  "$(git filesync add a.txt file:///nowhere/m6.git 2>&1 | grep -c "using its checked-out branch 'feature'")" "1"
+  "$(git filesync add file:///nowhere/m6.git a.txt 2>&1 | grep -c "using its checked-out branch 'feature'")" "1"
 
 
 # =============================================================================
@@ -1052,11 +1055,11 @@ URL7=$TURL/m7.git
 rec() { git config -f .git-filesync file.f.txt.commit; }
 
 new_repo s8
-addc f.txt "$URL7"
+addc "$URL7" f.txt
 check "add (new file): commit that changed the file" "$(rec)" "$(git -C ../co7 rev-parse HEAD~1)"
-quiet git filesync add --force f.txt "$URL7"
+quiet git filesync add --force "$URL7" f.txt
 check "relink unchanged file: registry unchanged" "$(git status --porcelain)" ""
-quiet git filesync add --force --commit "$(git -C ../co7 rev-parse HEAD)" f.txt "$URL7"
+quiet git filesync add --force --commit "$(git -C ../co7 rev-parse HEAD)" "$URL7" f.txt
 check "add --commit tip: commit that changed the file" "$(rec)" "$(git -C ../co7 rev-parse HEAD~1)"
 
 # "f v2" changes f.txt, "other 2" does not
@@ -1110,7 +1113,7 @@ if git lfs version >/dev/null 2>&1; then
         [ $dlfs = yes ] && git lfs track d.txt >/dev/null && git add .gitattributes
         git commit -q --allow-empty -m i
         [ $via = map ] && git filesync source map "$TURL/ml.git" "$T/ml" >/dev/null
-        addc d.txt "$TURL/ml.git"
+        addc "$TURL/ml.git" d.txt
         check "$tag: content after add" "$(head -1 d.txt)" "l1"
         check "$tag: downstream storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
         check "$tag: clean" "$(st)" ""
@@ -1136,16 +1139,16 @@ if git lfs version >/dev/null 2>&1; then
         git commit -qm i
         [ $via = map ] && git filesync source map "$TURL/ml.git" "$T/ml" >/dev/null
         check "$tag: add over an older version: differs from the head" \
-          "$(git filesync add d.txt "$TURL/ml.git" 2>&1 | grep -c 'd.txt differs from upstream')" "1"
+          "$(git filesync add "$TURL/ml.git" d.txt 2>&1 | grep -c 'd.txt differs from upstream')" "1"
         git reset -q --hard
-        quiet git filesync add --overwrite d.txt "$TURL/ml.git"
+        quiet git filesync add --overwrite "$TURL/ml.git" d.txt
         git commit -q --no-edit
         check "$tag: add --overwrite: upstream content" "$(oneline < d.txt)" "l1 l2 l3 l4 L5-up "
         check "$tag: add --overwrite: storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
         check "$tag: add --overwrite: clean" "$(st)" ""
         quiet git filesync unlink d.txt; git commit -qam unlink
         check "$tag: add over the same content: no warning" \
-          "$(git filesync add d.txt "$TURL/ml.git" 2>&1 | grep -c 'differs')" "0"
+          "$(git filesync add "$TURL/ml.git" d.txt 2>&1 | grep -c 'differs')" "0"
         cd ..
 
         # reset the upstream for the next combination
@@ -1158,7 +1161,7 @@ if git lfs version >/dev/null 2>&1; then
   rm -rf sl "$T/cache"
   new_repo sl
   (cd ../ml && git lfs track d.txt >/dev/null && git add . && git commit -qm lfs && git push -q origin main 2>/dev/null)
-  ERR=$(GIT_LFS_SKIP_SMUDGE=1 git filesync add d.txt "$TURL/ml.git" 2>&1)
+  ERR=$(GIT_LFS_SKIP_SMUDGE=1 git filesync add "$TURL/ml.git" d.txt 2>&1)
   check "lfs unavailable: add fails" "$(echo "$ERR" | grep -c 'stored in Git LFS')" "1"
   check "lfs unavailable: no pointer file written" "$([ -e d.txt ] && echo written || echo none)" "none"
 
@@ -1169,7 +1172,7 @@ if git lfs version >/dev/null 2>&1; then
   rm -rf "$T/mlnolfs/.git/lfs"
   cd "$T" && new_repo slmap
   git filesync source map "$TURL/ml.git" "$T/mlnolfs" >/dev/null
-  addc d.txt "$TURL/ml.git"
+  addc "$TURL/ml.git" d.txt
   check "lfs via mapping, object missing there: content" "$(cat d.txt)" "$(cat "$T/mlfull/d.txt")"
   check "lfs via mapping, object missing there: checkout untouched" \
     "$([ -e "$T/mlnolfs/.git/lfs" ] && echo written || echo none)" "none"
@@ -1215,7 +1218,7 @@ git clone -q m9.git co9 2>/dev/null
 URL9=$TURL/m9.git
 
 new_repo s9
-addc --tag v1 t.c "$URL9"
+addc --tag v1 "$URL9" t.c
 SRC9=$(git config -f .git-filesync --get-regexp '^source\..*\.url' | sed 's/^source\.\(.*\)\.url .*/\1/')
 check "add --tag: the source has the branch, the file the tag" \
   "$(git config -f .git-filesync --get-regexp '^source\.' | cut -d' ' -f1 | sed 's/.*\.//' | sort | oneline)$(git config -f .git-filesync file.t.c.tag)" "branch url v1"
@@ -1291,7 +1294,7 @@ check "set-url: status works" "$(st)" ""
 # the source for URL and branch (created); a source left without files is
 # removed; one that would duplicate another is refused
 (cd ../co9 && git push -q origin main:dev)
-quiet git filesync add u.c lib9 -p t.c
+quiet git filesync add lib9 u.c -p t.c
 git commit -qm "u.c"
 quiet git filesync set u.c -b dev
 SRCD=$(git config -f .git-filesync file.u.c.source)
@@ -1306,41 +1309,41 @@ git commit -qm "u.c on dev"
 
 # add by name: exactly that source; -b may only repeat its branch. A tag
 # pins the file, the source stays as it is.
-quiet git filesync add w.c "$SRCD" -p t.c
+quiet git filesync add "$SRCD" w.c -p t.c
 check "add by name: that source" "$(git config -f .git-filesync file.w.c.source)" "$SRCD"
-check "add by name, other branch: refused" "$(rc git filesync add -b main x.c "$SRCD" -p t.c)" "2"
-check "add by name, same branch repeated" "$(rc git filesync add -b dev y.c "$SRCD" -p t.c)" "0"
-quiet git filesync add --tag v1 v1.c lib9 -p t.c
+check "add by name, other branch: refused" "$(rc git filesync add -b main "$SRCD" x.c -p t.c)" "2"
+check "add by name, same branch repeated" "$(rc git filesync add -b dev "$SRCD" y.c -p t.c)" "0"
+quiet git filesync add --tag v1 lib9 v1.c -p t.c
 check "add by name with a tag: the file pinned" \
   "$(git config -f .git-filesync file.v1.c.source) $(git config -f .git-filesync file.v1.c.tag)" "lib9 v1"
 check "add by name with a tag: content at the tag" "$(oneline < v1.c)" "1 2 3 "
-quiet git filesync add --force --tag v2 v1.c lib9 -p t.c
+quiet git filesync add --force --tag v2 lib9 v1.c -p t.c
 check "relink with another tag" "$(git config -f .git-filesync file.v1.c.tag)" "v2"
 printf '[source "dup"]\n\turl = %s\n\tbranch = main\n' "$URL9" >> .git-filesync
-quiet git filesync add v.c dup -p t.c
+quiet git filesync add dup v.c -p t.c
 check "add by name: that source, not an equal one" "$(git config -f .git-filesync file.v.c.source)" "dup"
 
 # add by URL: the source with that URL and branch (default: remote HEAD)
-quiet git filesync add a.c "$URL9" -p t.c
+quiet git filesync add "$URL9" a.c -p t.c
 check "add by URL, default branch: source reused" "$(git config -f .git-filesync file.a.c.source)" "lib9"
-quiet git filesync add b.c "$URL9" -p t.c --tag v1
+quiet git filesync add "$URL9" b.c -p t.c --tag v1
 check "add by URL + tag: the branch's source, the file pinned" \
   "$(git config -f .git-filesync file.b.c.source) $(git config -f .git-filesync file.b.c.tag)" "lib9 v1"
 check "two adds: both messages prepared" \
   "$(grep -cE '^\[filesync\] Add (a|b)\.c from' "$(git rev-parse --git-dir)/SQUASH_MSG")" "2"
-quiet git filesync add c.c "$URL9/" -p t.c -b dev
+quiet git filesync add "$URL9/" c.c -p t.c -b dev
 check "add by URL + branch: that source" "$(git config -f .git-filesync file.c.c.source)" "$SRCD"
-check "add -b: a missing branch is an error" "$(rc git filesync add e.c "$URL9" -p t.c -b nope)" "2"
+check "add -b: a missing branch is an error" "$(rc git filesync add "$URL9" e.c -p t.c -b nope)" "2"
 git reset -q --hard
 
 # a SQUASH_MSG of git's own (e.g. merge --squash) is left alone
 echo "squashed" > "$(git rev-parse --git-dir)/SQUASH_MSG"
 check "foreign SQUASH_MSG: said so" \
-  "$(git filesync add f.c "$URL9" -p t.c | grep -c "SQUASH_MSG is in use")" "1"
+  "$(git filesync add "$URL9" f.c -p t.c | grep -c "SQUASH_MSG is in use")" "1"
 check "foreign SQUASH_MSG: kept" "$(cat "$(git rev-parse --git-dir)/SQUASH_MSG")" "squashed"
 # the command shown names its paths relative to the current directory, and works there
 mkdir sub
-CMD=$(cd sub && git filesync add g.c "$URL9" -p t.c | sed -n 's/^    git commit/git commit/p')
+CMD=$(cd sub && git filesync add "$URL9" g.c -p t.c | sed -n 's/^    git commit/git commit/p')
 check "foreign SQUASH_MSG, subdirectory: paths relative to it" \
   "$(echo "$CMD" | grep -cE '^git commit -e -F "\.\./\.git/FILESYNC_MSG_[^"]*" -- g\.c \.\./\.git-filesync$')" "1"
 check "foreign SQUASH_MSG, subdirectory: the command commits" \
@@ -1351,9 +1354,9 @@ git reset -q --hard
 # adds and a pull go into one commit, with all their proposals
 cd "$T"
 new_repo s9c
-addc t.c "$URL9" --commit v1
+addc "$URL9" t.c --commit v1
 check "linked at v1: pending" "$(st)" "P"
-quiet git filesync add u.c "$URL9" -p t.c
+quiet git filesync add "$URL9" u.c -p t.c
 check "pull despite another uncommitted entry" "$(rc git filesync pull t.c)" "0"
 git commit -q
 check "one commit: files of add and pull" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync t.c u.c "
@@ -1375,8 +1378,8 @@ git clone -q m10.git co10 2>/dev/null
 URL10=$TURL/m10.git
 
 new_repo s10
-addc r.c "$URL10" -p lib/r.c
-addc gone.c "$URL10" -p lib/gone.c
+addc "$URL10" r.c -p lib/r.c
+addc "$URL10" gone.c -p lib/gone.c
 SRC10=$(git config -f .git-filesync file.r.c.source)
 
 # r.c: renamed with a change, then changed again; gone.c: deleted
@@ -1436,7 +1439,7 @@ check "pull --dry-run: rc" "$(rc git filesync pull --dry-run r.c)" "0"
 check "pull --dry-run: file untouched" "$(grep -c '^<<<<<<<' r.c)" "0"
 git reset -q --hard HEAD~1
 
-check "add -n" "$(git filesync add -n new.c "$URL10" -p lib/final.c)" \
+check "add -n" "$(git filesync add -n "$URL10" new.c -p lib/final.c)" \
   "would link new.c -> $SRC10:lib/final.c (main), fetched, based on $(git -C ../co10 rev-parse --short HEAD)"
 check "add -n: nothing written" "$(ls new.c 2>/dev/null; git status --porcelain)" ""
 check "unlink -n" "$(git filesync unlink -n r.c)" "would unlink r.c"
@@ -1459,7 +1462,7 @@ git filesync source map file:///nowhere/m11.git "$T/m11" >/dev/null
 
 # PROTO - the options linking the .proto files of api/ as proto/
 PROTO=(-p api --include '*.proto' --exclude '*_test.proto' --exclude test/)
-addc proto file:///nowhere/m11.git "${PROTO[@]}"
+addc file:///nowhere/m11.git proto "${PROTO[@]}"
 check "add DIR: files linked" \
   "$(git config -f .git-filesync --get-regexp '^file\..*\.path' | LC_ALL=C sort | oneline)" \
   "file.proto/a.proto.path api/a.proto file.proto/v1/b.proto.path api/v1/b.proto "
@@ -1472,31 +1475,31 @@ check "add DIR: status clean" "$(st)" ""
 
 # a new upstream file: the same add links only that one
 (cd ../m11 && echo c > api/c.proto && git add . && git commit -qm c)
-OUT=$(git filesync add proto nowhere/m11 "${PROTO[@]}" 2>&1)
+OUT=$(git filesync add nowhere/m11 proto "${PROTO[@]}" 2>&1)
 git commit -q --no-edit
 check "add DIR again: linked ones skipped" "$(echo "$OUT" | grep -c '^2 files already linked, skipped')" "1"
 check "add DIR again: new file committed" "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" \
   ".git-filesync proto/c.proto "
 check "add DIR again: subject" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Add proto/c.proto from nowhere/m11"
-check "add DIR: nothing new" "$(git filesync add proto nowhere/m11 "${PROTO[@]}" 2>&1)" \
+check "add DIR: nothing new" "$(git filesync add nowhere/m11 proto "${PROTO[@]}" 2>&1)" \
   "3 files already linked, skipped (use --force to relink)"
 
 # an existing file is linked as it is; '/x.md' is anchored at the directory
 mkdir docs && echo mine > docs/x.md
-quiet fsd add docs nowhere/m11 --include /x.md && git commit -q --no-edit
+quiet fsd add nowhere/m11 docs --include /x.md && git commit -q --no-edit
 check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
 check "add DIR: existing file adapted" "$(st docs)" " M"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Link docs/x.md to nowhere/m11"
 check "add DIR --overwrite: existing file replaced" \
-  "$(fsd add -n --force --overwrite docs nowhere/m11 --include /x.md | grep -c 'replacing the existing file')" "1"
+  "$(fsd add -n --force --overwrite nowhere/m11 docs --include /x.md | grep -c 'replacing the existing file')" "1"
 
 # pattern forms
-check "pattern '**/v1/*'" "$(git filesync add -n all nowhere/m11 -p api --include '**/v1/*' | lines)" "2"
-check "pattern 'test/' (directory)" "$(git filesync add -n all nowhere/m11 -p api --include 'test/' | cut -d' ' -f3)" "all/test/t.proto"
-check "pattern 'v?/b*.proto'" "$(git filesync add -n all nowhere/m11 -p api --include 'v?/b[_.]*' | lines)" "2"
-check "patterns need an upstream directory" "$(rc git filesync add x nowhere/m11 -p api/a.proto --include '*')" "2"
+check "pattern '**/v1/*'" "$(git filesync add -n nowhere/m11 all -p api --include '**/v1/*' | lines)" "2"
+check "pattern 'test/' (directory)" "$(git filesync add -n nowhere/m11 all -p api --include 'test/' | cut -d' ' -f3)" "all/test/t.proto"
+check "pattern 'v?/b*.proto'" "$(git filesync add -n nowhere/m11 all -p api --include 'v?/b[_.]*' | lines)" "2"
+check "patterns need an upstream directory" "$(rc git filesync add nowhere/m11 x -p api/a.proto --include '*')" "2"
 check "whole upstream repository (docs/x.md already linked)" \
-  "$(fsd add -n . nowhere/m11 -p / --exclude '*.proto' | grep '^would' | cut -d' ' -f3 | oneline)" "api/README.md "
+  "$(fsd add -n nowhere/m11 . -p / --exclude '*.proto' | grep '^would' | cut -d' ' -f3 | oneline)" "api/README.md "
 
 # the script itself, synced into the repository and run via a repo alias
 mkdir tools && cp "$S" tools/git-filesync.py
@@ -1522,7 +1525,7 @@ git clone -q m12.git co12 2>/dev/null
 URL12=$TURL/m12.git
 
 new_repo s12
-for f in a b c; do addc --tag v1.0 $f.c "$URL12"; done
+for f in a b c; do addc --tag v1.0 "$URL12" $f.c; done
 SRC12=$(git config -f .git-filesync file.a.c.source)
 
 # newer tags by their place in the commit graph, on the source's branch -
@@ -1553,10 +1556,12 @@ git filesync source set-branch "$SRC12" main >/dev/null
 check "tag not on the branch: warning, naming its branch" \
   "$(git filesync status -v 2>&1 | grep -c "tag v1.0.1 is not on branch 'main' .* (it is on maint; -b selects another branch)")" "1"
 check "tag not on the branch: no error" "$(rc git filesync status)" "0"
-git filesync source set-branch "$SRC12" nope >/dev/null
+check "source set-branch: a missing branch refused" \
+  "$(git filesync source set-branch "$SRC12" nope 2>&1 | grep -c "^error: branch 'nope' not found")-$(rc git filesync source set-branch "$SRC12" nope)" "1-2"
+git config -f .git-filesync "source.$SRC12.branch" nope     # as if edited by hand
 check "a missing branch of pinned files: an error" \
   "$(git filesync status 2>&1 | grep -c "^error: .*branch 'nope' not found")-$(rc git filesync status)" "3-2"
-git filesync source set-branch "$SRC12" main >/dev/null
+git config -f .git-filesync "source.$SRC12.branch" main
 git filesync set a.c --tag v1.0 >/dev/null
 git commit -qm "pinned to v1.0 on main"
 
@@ -1595,8 +1600,12 @@ check "-b: registry unchanged" \
   "$(git config -f .git-filesync source.$SRC12.branch) $(git config -f .git-filesync file.a.c.tag)" "main v1.0"
 
 # refusals and dry runs change nothing
-check "pull -v: where from, synced so far" "$(git filesync pull -v --dry-run a.c | head -1)" \
+check "pull -v: where from, synced so far" "$(git filesync pull -v -n a.c | head -1)" \
   "a.c: from $SRC12:a.c (tag v1.0 on main, newest rel-2 = v2.0-rc1), synced at $(git -C ../co12 log -1 --format=%h main -- a.c)"
+check "pull -v: syncs too" \
+  "$(git filesync pull -v a.c >/dev/null 2>&1; echo $?) $(git diff --cached --name-only | oneline)" \
+  "0 .git-filesync a.c "
+git reset -q --hard
 check "pull --tag: missing tag" "$(rc pullc --tag v9 a.c)" "2"
 check "missing tag: nothing changed" "$(git status --porcelain)" ""
 check "--commit and --tag exclude each other" "$(rc git filesync pull --commit v1.0 --tag v1.0 a.c)" "2"
@@ -1638,8 +1647,8 @@ check "rename went into the sync commit" "$(git status --porcelain) $(git show H
 cd "$T"
 new_repo s12p
 check "add --tag with a tag not on the branch: warning" \
-  "$(git filesync add -n x.c "$URL12" -p a.c --tag v1.0.1 -b main 2>&1 | grep -c "^warning: tag v1.0.1 is not on branch 'main'")" "1"
-addc --tag 'v1.*' a.c "$URL12"
+  "$(git filesync add -n "$URL12" x.c -p a.c --tag v1.0.1 -b main 2>&1 | grep -c "^warning: tag v1.0.1 is not on branch 'main'")" "1"
+addc --tag 'v1.*' "$URL12" a.c
 SRCP=$(git config -f .git-filesync file.a.c.source)
 check "pattern: on the source's (default) branch" \
   "$(git config -f .git-filesync file.a.c.tag) $(git config -f .git-filesync source.$SRCP.branch)" "v1.* main"
@@ -1694,8 +1703,8 @@ URL13=$TURL/m13.git
 for r in m13 m13fork m13copy; do git -C $r.git config uploadpack.allowFilter true; done
 
 new_repo s13
-addc a.c "$URL13"
-addc b.c "$URL13"
+addc "$URL13" a.c
+addc "$URL13" b.c
 SRC13=$(git config -f .git-filesync file.a.c.source)
 COMMIT13=$(git config -f .git-filesync file.a.c.commit)
 
@@ -1720,6 +1729,12 @@ check "set -p: content differs from the new base" "$(st b.c)" " M"
 quiet git filesync set b.c -p b.c
 check "set -p back: matching version found" "$(st b.c) $(git config -f .git-filesync file.b.c.path)" " b.c"
 check "set -p back: entry as committed" "$(git status --porcelain)" ""
+
+# source set-url looks up the synced versions there, as set --source does
+quiet git filesync source set-url "$SRC13" "$TURL/m13copy.git"
+check "source set-url: commit of the copy" "$(git config -f .git-filesync file.a.c.commit)" \
+  "$(git -C ../m13copy rev-parse HEAD)"
+git reset -q --hard
 
 # a fork with the same history: all files of the source move, so the source
 # itself gets the new URL; the recorded commit is kept
@@ -1801,7 +1816,7 @@ check "cache prune --max-size: least recently used" \
 git config --global filesync.cacheMaxAge 1
 rm -f "$T/cache/last-prune"
 new_repo s20
-addc a.c "$URL12"
+addc "$URL12" a.c
 check "automatic clean-up keeps the clone in use" "$(nclones)" "1"
 age_clones
 quiet git filesync status
@@ -1826,7 +1841,7 @@ cd "$T"
 # calls; not on Windows, where Python would still find git.exe first.
 # a failing git command is named in the error, not the "-c" option before it
 check "error names the git command" \
-  "$( (new_repo "$T/s21e" && git filesync add x.c file:///nowhere/none.git -b main 2>&1) | grep -c 'git clone failed')" "1"
+  "$( (new_repo "$T/s21e" && git filesync add file:///nowhere/none.git x.c -b main 2>&1) | grep -c 'git clone failed')" "1"
 
 if command -v cygpath >/dev/null; then
   echo "skipped on Windows"
@@ -1841,9 +1856,9 @@ else
     && git add . && git commit -qm init)
   new_repo s21
   git filesync source map file:///nowhere/m21.git "$T/m21" >/dev/null
-  addc src file:///nowhere/m21.git -p lib --include 'f[1-3]?.c'      # 30 files
+  addc file:///nowhere/m21.git src -p lib --include 'f[1-3]?.c'      # 30 files
   C30=$(calls status)
-  addc src file:///nowhere/m21.git -p lib                             # all 60
+  addc file:///nowhere/m21.git src -p lib                             # all 60
   C60=$(calls status)
   check "status: git calls independent of the number of files ($C30 / $C60)" \
     "$([ "$C60" -le "$((C30 + 2))" ] && [ "$C60" -lt 30 ] && echo yes)" "yes"
@@ -1865,6 +1880,13 @@ else
   CP=$(calls pull --all); quiet git commit --no-edit
   check "pull: few git calls per file ($CP for 60)" "$([ "$CP" -le $((60 * 3 + 30)) ] && echo yes)" "yes"
   check "pull: all in one commit" "$(git log -1 --format=%s)" "[filesync] Sync 60 files from nowhere/m21"
+  # unlink and rm remove all entries (and files) at once
+  U1=$(calls unlink src/f1.c); git reset -q --hard
+  U60=$(calls unlink src); git reset -q --hard
+  check "unlink: no git calls per file ($U1 / $U60)" "$([ "$U60" -le "$((U1 + 2))" ] && echo yes)" "yes"
+  M1=$(calls rm src/f1.c); git reset -q --hard
+  M60=$(calls rm src); git reset -q --hard
+  check "rm: no git calls per file ($M1 / $M60)" "$([ "$M60" -le "$((M1 + 2))" ] && echo yes)" "yes"
 fi
 
 
@@ -1876,7 +1898,7 @@ cd "$T"
 git init -q m22 && (cd m22 && for i in 1 2 3; do echo "v$i" > f$i; done && git add . && git commit -qm init)
 new_repo s22
 git filesync source map file:///nowhere/m22.git "$T/m22" >/dev/null
-fsd add d file:///nowhere/m22.git -p / >/dev/null 2>&1 && git commit -q --no-edit   # fsd: '/' (Windows)
+fsd add file:///nowhere/m22.git d -p / >/dev/null 2>&1 && git commit -q --no-edit   # fsd: '/' (Windows)
 check "closed pipe: files linked" "$(ls d | oneline)" "f1 f2 f3 "
 (cd ../m22 && for i in 1 2 3; do echo "w$i" >> f$i; done && git commit -qam w)
 
@@ -1920,7 +1942,7 @@ check "rm: unchanged file not reported" "$(git filesync rm d/f3 | grep -c discar
 git reset -q --hard
 echo own > x
 check "add --overwrite: replaced untracked file reported" \
-  "$(git filesync add --overwrite x file:///nowhere/m22.git -p f1 | grep -c '^discarded: x ')" "1"
+  "$(git filesync add --overwrite file:///nowhere/m22.git x -p f1 | grep -c '^discarded: x ')" "1"
 git reset -q --hard
 
 

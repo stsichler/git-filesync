@@ -70,7 +70,7 @@ Basic commands:
                                 (to switch: set -b/--tag)
         --tag TAG               sync to TAG, once (as -b)
         --overwrite             discard local adaptations instead of merging
-        --dry-run               only report what would happen (incl.
+        -n, --dry-run           only report what would happen (incl.
                                 merge conflicts); change nothing
         -v, --verbose           before each file: where it comes from (as
                                 status -v) and the version synced so far
@@ -100,7 +100,7 @@ Basic commands:
         -W, --worktree          restore the working tree (default; with -S:
                                 both)
 
-    add FILE URL|SOURCE         link FILE to a file in an upstream repository
+    add URL|SOURCE FILE         link FILE to a file in an upstream repository
                                 (SOURCE: exactly that [source]; URL: the
                                 source with that URL and branch/tag, else a
                                 new one named 'owner/repo' after the URL, with
@@ -110,7 +110,7 @@ Basic commands:
                                 a missing FILE is fetched; FILE and
                                 .git-filesync are staged like `git add` - a
                                 plain `git commit` offers the proposed message
-    add DIR URL|SOURCE          link every file below an upstream directory
+    add URL|SOURCE DIR          link every file below an upstream directory
                                 (-p, default: same as DIR) as DIR/...; files
                                 already linked are skipped
         -b, --branch BRANCH     the source's upstream branch (default: its
@@ -170,8 +170,12 @@ Advanced commands:
     source                      list the [source]s (-v: with URL, branch,
                                 files)
     source rename OLD NEW       rename a [source] and all references to it
-    source set-url NAME URL     change the URL of a [source]
+    source set-url NAME URL     change the URL of a [source]; the synced
+                                versions are looked up there as for set
+                                --source
     source set-branch NAME BRANCH  follow BRANCH, all files of the source
+                                (set-url, set-branch: the branch must exist
+                                upstream)
     source map [URL|SOURCE [DIR]]  use the local checkout DIR instead of
                                 fetching URL (SOURCE: the URL of that
                                 [source]); its branch is used, unpushed
@@ -213,7 +217,9 @@ Advanced commands:
 
     Common options:
         --no-fetch              use the cached state, don't fetch (status,
-                                pull, diff, difftool, add, set, source -v)
+                                pull, diff/difftool --upstream, add, set,
+                                source set-url/set-branch; restore and diff
+                                of local changes never fetch)
         --color[=WHEN], --no-color  always, never or auto (default)
 
 Exit codes: 0 ok, 1 unfinished (pull: conflicts; --exit-code),
@@ -289,6 +295,7 @@ class FsError(Exception):
 STYLES = {"bold": "1", "dim": "2", "red": "31", "green": "32", "yellow": "33",
           "cyan": "36", "boldred": "1;31"}
 _color = {"out": False, "err": False}
+_colorbool = {}       # tty? -> git's answer (the same for stdout, stderr and the help)
 
 
 def color_wanted(mode, stream, cwd=None):
@@ -298,8 +305,10 @@ def color_wanted(mode, stream, cwd=None):
     if mode == "never" or os.environ.get("NO_COLOR"):
         return False
     tty = "true" if stream.isatty() else "false"
-    p = git(["config", "--get-colorbool", "color.filesync", tty], cwd=cwd, check=False)
-    return out(p) == "true"
+    if tty not in _colorbool:
+        p = git(["config", "--get-colorbool", "color.filesync", tty], cwd=cwd, check=False)
+        _colorbool[tty] = out(p) == "true"
+    return _colorbool[tty]
 
 
 def color_option(argv):
@@ -905,7 +914,9 @@ class Source:
         if not self.local:
             return lfs_smudge(self.git, pointer, path, self.label)
         oid, size = lfs_pointer(pointer)
-        common = self.dir / out(self.git(["rev-parse", "--git-common-dir"]))
+        if ("common",) not in self._memo:
+            self._memo[("common",)] = self.dir / out(self.git(["rev-parse", "--git-common-dir"]))
+        common = self._memo[("common",)]
         try:
             data = (common / "lfs" / "objects" / oid[:2] / oid[2:4] / oid).read_bytes()
             if len(data) == size and hashlib.sha256(data).hexdigest() == oid:
@@ -1135,9 +1146,13 @@ class Context:
 
     def __init__(self, args, repo=None):
         self.repo_top = repo.top if repo else None
-        self.fetch = not getattr(args, "no_fetch", False)
+        # restore, and diff of local changes, only need the synced versions,
+        # which never change (a blob missing in the cache is fetched lazily)
+        offline = args.cmd == "restore" or \
+            args.cmd in ("diff", "difftool") and not args.upstream
+        self.fetch = not getattr(args, "no_fetch", False) and not offline
         # fetch even for a tag already cached, to learn about newer tags
-        self.want_tags = getattr(args, "verbose", False) or args.cmd in ("pull", "source")
+        self.want_tags = getattr(args, "verbose", False) or args.cmd == "pull"
         self._sources = {}
         self._ready = set()
         self._fetch_failed = set()
@@ -1282,7 +1297,6 @@ class Context:
             if p.returncode:
                 warn(f"fetching {url} failed, using cached state")
                 self._fetch_failed.add(d)
-            self._drop_heads(d)
         touch_used(d)
         if self.fetch:
             auto_prune()
@@ -1319,11 +1333,14 @@ class Context:
 
 class Repo:
     def __init__(self):
-        p = git(["rev-parse", "--show-toplevel"], check=False)
-        if p.returncode:
+        p = git(["rev-parse", "--show-toplevel", "--absolute-git-dir", "--git-path", "objects"],
+                check=False)
+        lines = out(p).splitlines()
+        if p.returncode or len(lines) != 3:
             raise FsError("not inside a Git working tree")
-        self.top = Path(out(p)).resolve()
-        self.gitdir = Path(out(git(["rev-parse", "--absolute-git-dir"])))
+        self.top = Path(lines[0]).resolve()
+        self.gitdir = Path(lines[1])
+        self.objects = Path.cwd() / lines[2]      # relative to the current directory
         # shell aliases run in the top-level dir and pass the original
         # subdirectory in GIT_PREFIX
         prefix = os.environ.get("GIT_PREFIX")
@@ -1346,8 +1363,7 @@ class Repo:
         nothing is written into .git/objects."""
         names = ("GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES")
         saved = {k: os.environ.get(k) for k in names}
-        objects = saved["GIT_OBJECT_DIRECTORY"] or str(
-            self.top / out(self.git(["rev-parse", "--git-path", "objects"])))
+        objects = saved["GIT_OBJECT_DIRECTORY"] or str(self.objects)
         alternates = [objects] + ([saved["GIT_ALTERNATE_OBJECT_DIRECTORIES"]]
                                   if saved["GIT_ALTERNATE_OBJECT_DIRECTORIES"] else [])
         tmp = tempfile.mkdtemp(prefix="git-filesync-objects-")
@@ -1448,13 +1464,6 @@ class Repo:
         if lfs_pointer(data):
             data = lfs_smudge(self.git, data, rel, "this repository")
         return data
-
-    def content_id(self, oid, rel):
-        """Blob id of the actual content (differs from oid for an LFS pointer)."""
-        data = self.read_blob(oid)
-        if not lfs_pointer(data):
-            return oid
-        return self.store(self.read_content(oid, rel))
 
     def store(self, content):
         return out(self.git(["hash-object", "-w", "--stdin", "--no-filters"], data=content))
@@ -1588,15 +1597,20 @@ class Repo:
         return entries
 
     def write_files(self, files, stage=True, worktree=True):
-        """Put these [(rel, content)] - content in the form stored here - into
-        the index and/or the working tree, converted for it as on any
-        checkout (eol, attributes): a few git commands for all of them,
-        instead of storing, converting and adding each file. Only for files
-        without content-changing attributes (see check_plain): with LFS etc.
-        the index holds something else than the content."""
-        if files:
-            self.put_blobs(list(zip([rel for rel, _ in files],
-                                    self.store_many([c for _, c in files]))), stage, worktree)
+        """Put these [(rel, content)] - content in the form stored here, LFS
+        resolved - into the index and/or the working tree, converted for it
+        as on any checkout (eol, attributes, LFS): each stored as this
+        repository stores it - as it is without content-changing attributes
+        (see check_plain), else converted (see as_local; LFS: the pointer) -
+        then all put there at once (see put_blobs)."""
+        if not files:
+            return
+        plain = [(r, c) for r, c in files if self.is_plain(r)]
+        ids = dict(zip([r for r, _ in plain], self.store_many([c for _, c in plain])))
+        rest = [(c, r) for r, c in files if r not in ids]
+        self.as_local_many(rest)
+        ids.update((r, self.as_local(c, r)) for c, r in rest)
+        self.put_blobs([(r, ids[r]) for r, _ in files], stage, worktree)
 
     def put_blobs(self, entries, stage=True, worktree=True):
         """Put these [(rel, blob id)] - blobs as stored here (LFS pointers
@@ -1676,26 +1690,33 @@ def config_value(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
-def edit_registry(data, pending):
-    """The registry's bytes with pending ({(rel, key): value}) written into
-    the [file "rel"] sections: a value replaced in its `key = value` line,
-    a new key added at the end of its section, a new section appended.
-    None if the file isn't laid out simply enough for that (a section or key
-    twice, a value with quotes or a comment, keys on the header line)."""
+def edit_registry(data, pending, drop=()):
+    """The registry's bytes with the sections in drop ({("file" | "source",
+    name)}) removed - like `git config --remove-section`: from the header
+    to the next section - and pending ({(rel, key): value}) written into the
+    [file "rel"] sections: a value replaced in its `key = value` line, a new
+    key added at the end of its section, a new section appended. None if
+    the file isn't laid out simply enough for that (a section or key twice,
+    a value with quotes or a comment, keys on the header line)."""
     lines = data.splitlines(keepends=True)
     if lines and not lines[-1].endswith(b"\n"):
         lines[-1] += b"\n"
     sections, current, keys = {}, None, {}     # rel -> [first, last line]; (rel, key) -> line
+    headers = {}                    # (section, name) -> its line; None: any other header
     for i, raw in enumerate(lines):
         line = raw.decode("utf-8", "replace").rstrip("\r\n")
-        m = re.fullmatch(r'\s*\[\s*(?i:file)\s+"((?:[^"\\]|\\.)*)"\s*\]\s*', line)
+        m = re.fullmatch(r'\s*\[\s*([A-Za-z][A-Za-z0-9-]*)\s+"((?:[^"\\]|\\.)*)"\s*\]\s*', line)
         if m:
-            current = re.sub(r"\\(.)", r"\1", m.group(1))
-            if current in sections:
+            name = (m.group(1).lower(), re.sub(r"\\(.)", r"\1", m.group(2)))
+            if name in headers:
                 return None
-            sections[current] = [i, i]
+            headers[name] = i
+            current = name[1] if name[0] == "file" and name not in drop else None
+            if current is not None:
+                sections[current] = [i, i]
             continue
         if re.match(r"\s*\[", line):
+            headers[(None, i)] = i
             current = None
             continue
         if current is None or not line.strip() or re.match(r"\s*[#;]", line):
@@ -1709,6 +1730,13 @@ def edit_registry(data, pending):
             return None      # twice, or a value we wouldn't write like that
         keys[key] = i
         sections[current][1] = i
+    starts = sorted(headers.values()) + [len(lines)]
+    dropped = set()
+    for name in drop:
+        if name not in headers:
+            return None
+        first = headers[name]
+        dropped.update(range(first, next(j for j in starts if j > first)))
     after, appended = {}, {}
     for (rel, k), v in pending.items():
         text = f"\t{k} = {config_value(v)}\n".encode()
@@ -1723,8 +1751,9 @@ def edit_registry(data, pending):
             appended.setdefault(rel, []).append(text)
     out_lines = []
     for i, raw in enumerate(lines):
-        out_lines.append(raw)
-        out_lines += after.get(i, [])
+        if i not in dropped:
+            out_lines.append(raw)
+            out_lines += after.get(i, [])
     for rel, texts in appended.items():
         name = rel.replace("\\", "\\\\").replace('"', '\\"')
         out_lines.append(f'[file "{name}"]\n'.encode())
@@ -1817,6 +1846,7 @@ class Registry:
         self.sources, self.files = {}, {}
         self.dry_run = False      # only change the in-memory state
         self._pending = {}        # (rel, key) -> new commit/blob id, see set_file
+        self._drop = set()        # ("file" | "source", name): sections to remove, see remove_file
         if self.path.exists():
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
             if p.returncode:
@@ -1907,35 +1937,48 @@ class Registry:
 
     def remove_file(self, rel, keep_source=None):
         """Remove a [file]; its [source] too when no other file uses it
-        (unless it is keep_source)."""
+        (unless it is keep_source). Removed later, all at once (see flush)
+        - rm and unlink remove many."""
         src = self.files.pop(rel, {}).get("source")
-        self._cfg("--remove-section", f"file.{rel}")
+        self._remove_section("file", rel)
         if src and src != keep_source and src in self.sources and \
                 not any(f.get("source") == src for f in self.files.values()):
-            self._cfg("--remove-section", f"source.{src}")
+            self._remove_section("source", src)
             del self.sources[src]
+
+    def _remove_section(self, sect, name):
+        if self.dry_run:
+            return
+        if sect == "file":        # values set before are gone with it
+            self._pending = {k: v for k, v in self._pending.items() if k[0] != name}
+        self._drop.add((sect, name))
 
     def rename_file(self, old, new):
         self._cfg("--rename-section", f"file.{old}", f"file.{new}")
         self.files[new] = self.files.pop(old)
 
     def flush(self):
-        """Write the pending [file] values (see set_file) at once, editing the
-        file directly instead of one `git config` per value - checked by
-        reading it back with git, which must give exactly the state here;
-        otherwise (an unusual layout of the file) value by value with git."""
+        """Remove the sections and write the [file] values pending (see
+        remove_file, set_file) at once, editing the file directly instead of
+        one `git config` for each - checked by reading it back with git,
+        which must give exactly the state here; otherwise (an unusual layout
+        of the file) one by one with git. Removals first: a value pending
+        for a removed [file] was set after the removal."""
         pending, self._pending = self._pending, {}
-        if not pending:
+        drop, self._drop = self._drop, set()
+        if not (pending or drop):
             return
         original = self.path.read_bytes() if self.path.exists() \
             else REGISTRY_HEADER.encode()
-        edited = edit_registry(original, pending)
+        edited = edit_registry(original, pending, drop)
         if edited is not None:
             self.path.write_bytes(edited)
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
             if p.returncode == 0 and parse_registry(p.stdout) == (self.sources, self.files):
                 return
         self.path.write_bytes(original)
+        for sect, name in sorted(drop):
+            git(["config", "-f", self.path, "--remove-section", f"{sect}.{name}"])
         for (rel, k), v in pending.items():
             git(["config", "-f", self.path, f"file.{rel}.{k}", v])
 
@@ -2711,21 +2754,9 @@ def newest_hint(rels, tag, line, newest):
 def write_synced(repo, contents, conflicted):
     """Write the synced files ({rel: content in this repository's stored
     form}) to the working tree and stage them - those with merge conflicts
-    only written. Files without content-changing attributes go all at once
-    (see Repo.write_files), the others one by one."""
-    at_once = [(rel, c) for rel, c in contents.items()
-               if rel not in conflicted and repo.is_plain(rel)]
-    repo.write_files(at_once)
-    markers = [(rel, c) for rel, c in contents.items() if rel in conflicted and repo.is_plain(rel)]
-    repo.write_files(markers, stage=False)
-    rest = [rel for rel in contents if rel not in dict(at_once) and rel not in dict(markers)]
-    for rel in rest:
-        target = repo.top / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(repo.to_worktree(contents[rel], rel))
-    staged = [rel for rel in rest if rel not in conflicted]
-    if staged:
-        repo.git(["add", "--"] + [lit(r) for r in staged])
+    only written (see Repo.write_files)."""
+    repo.write_files([(r, c) for r, c in contents.items() if r not in conflicted])
+    repo.write_files([(r, c) for r, c in contents.items() if r in conflicted], stage=False)
 
 
 def report_pull(repo, reg, synced):
@@ -2791,8 +2822,8 @@ def cmd_pull(ctx, repo, args):
             continue
         done += 1
         if args.verbose:
-            synced = st.src.short(st.old) if st.has_old else link.blob[:8]
-            print(paint(f"{st.rel}: {link_text(st)}, synced at {synced}", "dim"))
+            at = st.src.short(st.old) if st.has_old else link.blob[:8]
+            print(paint(f"{st.rel}: {link_text(st)}, synced at {at}", "dim"))
         try:
             if once:
                 st.target, st.once = target_rev(ctx, link, args), once_text(args)
@@ -3130,11 +3161,11 @@ def cmd_add(ctx, repo, args):
             warn(f"{problem}; newer tags can't be found there")
     path = upstream_path(args.path if args.path else rel)
     patterns = args.include or args.exclude
-    upstream_file = bool(path) and not patterns and bool(src.blob_at(head, path))
+    upstream_file = bool(path) and not patterns and bool(src.blob_at(at or head, path))
     if target.is_dir() and upstream_file:       # like cp: into the directory
         target = target / Path(path).name
         rel = repo.rel(target)
-    if target.is_dir() or patterns or not upstream_file and src.is_dir(head, path):
+    if target.is_dir() or patterns or not upstream_file and src.is_dir(at or head, path):
         plan, relink = plan_dir(repo, reg, src, args, at or head, rel, path, target)
         if not plan:
             return EXIT_OK
@@ -3183,15 +3214,10 @@ def cmd_add(ctx, repo, args):
         if p.content is not None:
             fetched.append((p.rel, repo.normalize(p.content, p.rel)))
         print(f"{paint('linked', 'green')} {p.rel} -> {name}:{p.path} ({shown_ref})")
-    # fetched files written and staged at once where possible; the link
-    # commit contains each file as it is in the working tree
-    at_once = [(r, c) for r, c in fetched if repo.is_plain(r)]
-    repo.write_files(at_once)
-    done = {r for r, _ in at_once}
-    for r, c in fetched:
-        if r not in done:
-            (repo.top / r).parent.mkdir(parents=True, exist_ok=True)
-            (repo.top / r).write_bytes(repo.to_worktree(c, r))
+    # fetched files written and staged at once; existing ones staged as
+    # they are in the working tree
+    repo.write_files(fetched)
+    done = {r for r, _ in fetched}
     if any(r not in done for r in rels):
         repo.git(["add", "--"] + [lit(r) for r in rels if r not in done])
     reg.finish()
@@ -3245,16 +3271,6 @@ def plan_dir(repo, reg, src, args, at, rel, path, target):
     plan = [Planned(r, p, *find_base(repo, src, at, r, p, repo.top / r, args.overwrite))
             for r, p in todo]
     return plan, any(r in reg.files for r, _ in todo)
-
-
-def index_entry(repo, rel):
-    """(mode, blob) of rel in the index; (mode in HEAD or a plain file's, None)
-    if it isn't there."""
-    entry = out(repo.git(["ls-files", "-s", "--", lit(rel)], check=False)).split(" ")
-    if len(entry) > 1:
-        return entry[0], entry[1]
-    mode = out(repo.git(["ls-tree", "HEAD", "--", lit(rel)], check=False)).split(" ")[0]
-    return mode or "100644", None
 
 
 def save_discarded(repo, rels, keep_index=False):
@@ -3318,8 +3334,7 @@ def cmd_restore(ctx, repo, args):
     plain = [lk for lk in links if lk.rel in bases]
     oids = dict(zip([lk.rel for lk in plain], repo.store_many([bases[lk.rel] for lk in plain])))
     index = repo.index_entries([lk.rel for lk in links]) if args.staged else {}
-    at_once, said = [], []         # said: what to print, in the order of the files
-    one_by_one = []                # (link, base, mode, fix tree, fix index)
+    fixes, said = [], []           # (link, base, fix tree, fix index); said: what to print
     for link in links:
         if link.rel not in srcs:
             continue
@@ -3337,37 +3352,21 @@ def cmd_restore(ctx, repo, args):
                     raise FsError(f"{link.rel}: base version {link.blob[:12]} unavailable")
                 cur = repo.worktree_blob(link.target)
             fix_tree = worktree and cur != base
-            mode, staged = index.get(link.rel, ("100644", None))
-            fix_index = args.staged and staged != base
+            fix_index = args.staged and index.get(link.rel, (None, None))[1] != base
             if not (fix_tree or fix_index):
                 said.append(f"{link.rel}: nothing to restore")
                 continue
-            if (fix_tree or not worktree) and (fix_index or not args.staged):
-                at_once.append((link, base))       # written below, all at once
-            else:
-                one_by_one.append((link, base, mode, fix_tree, fix_index))
+            fixes.append((link, base, fix_tree, fix_index))     # written below, all at once
             at = src.short(link.commit) if link.commit else link.blob[:8]
             said.append(f"{link.rel}: {paint(done, 'green')} ({link.name}@{at})")
         except FsError as e:   # report and carry on with the other files
             error(str(e))
             rc = EXIT_ERROR
-    if worktree:
-        save_discarded(repo, [lk.rel for lk, _ in at_once] +
-                       [lk.rel for lk, _, _, fix_tree, _ in one_by_one if fix_tree],
-                       keep_index=not args.staged)
-    repo.put_blobs([(lk.rel, oid) for lk, oid in at_once], stage=args.staged, worktree=worktree)
-    for link, base, mode, fix_tree, fix_index in one_by_one:
-        try:
-            if fix_tree:
-                content = repo.to_worktree(repo.read_content(base, link.rel), link.rel)
-                link.target.parent.mkdir(parents=True, exist_ok=True)
-                link.target.write_bytes(content)
-            if fix_index:
-                repo.git(["update-index", "--add", "--cacheinfo", f"{mode},{base},{link.rel}"])
-        except FsError as e:
-            said = [x for x in said if not x.startswith(f"{link.rel}: ")]
-            error(str(e))
-            rc = EXIT_ERROR
+    save_discarded(repo, [lk.rel for lk, _, fix_tree, _ in fixes if fix_tree],
+                   keep_index=not args.staged)
+    for tree, index in ((True, True), (True, False), (False, True)):
+        repo.put_blobs([(lk.rel, base) for lk, base, fix_tree, fix_index in fixes
+                        if (fix_tree, fix_index) == (tree, index)], stage=index, worktree=tree)
     for line in said:
         print(line)
     return rc
@@ -3401,19 +3400,19 @@ def cmd_rm(ctx, repo, args):
             raise FsError("".join(f"{r}: has uncommitted changes\n" for r in dirty[:-1])
                           + f"{dirty[-1]}: has uncommitted changes - use -f to remove "
                           f"{'it' if len(dirty) == 1 else 'them'} anyway")
-    if not args.dry_run:
-        save_discarded(repo, [lk.rel for lk in links])
-    for link in links:
-        if args.dry_run:
+    if args.dry_run:
+        for link in links:
             print(f"would remove {link.rel}")
-            continue
-        repo.git(["rm", "-q", "-f", "--ignore-unmatch", "--", lit(link.rel)])
+        return EXIT_OK
+    save_discarded(repo, [lk.rel for lk in links])
+    for part in chunks(lk.rel for lk in links):
+        repo.git(["rm", "-q", "-f", "--ignore-unmatch", "--"] + [lit(r) for r in part])
+    for link in links:
         if link.target.is_file():       # never added to git
             link.target.unlink()
         reg.remove_file(link.rel)
         print(f"{paint('removed', 'green')} {link.rel}")
-    if not args.dry_run:
-        reg.finish()
+    reg.finish()
     return EXIT_OK
 
 
@@ -3457,6 +3456,18 @@ def commit_in(src, link):
         if oid == link.blob:
             return rev
     return None
+
+
+def keep_base(src, link):
+    """A link moves to another upstream (src): its synced version stays the
+    base, with the commit it has there (see commit_in) - or, if src doesn't
+    have it, a warning: the previous sync point counts as unknown."""
+    commit = commit_in(src, link)
+    if not commit:
+        warn(f"{link.rel}: synced version {link.blob[:12]} not found in "
+             f"{src.label}; its previous sync point counts as unknown")
+    elif commit != link.commit:
+        link.set("commit", commit)
 
 
 def cmd_set(ctx, repo, args):
@@ -3516,12 +3527,7 @@ def cmd_set(ctx, repo, args):
             name = name or reg.add_source(url_, branch_)
             for lk in lks:
                 if norm_url(url_) != norm_url(lk.url) and not args.path:
-                    commit = commit_in(src, lk)     # same synced version, maybe another commit
-                    if not commit:
-                        warn(f"{lk.rel}: synced version {lk.blob[:12]} not found in "
-                             f"{src.label}; its previous sync point counts as unknown")
-                    elif commit != lk.commit:
-                        lk.set("commit", commit)
+                    keep_base(src, lk)
                 if lk.name != name:
                     lk.set("source", name)
                     print(f"{would}{lk.rel}: source {old} -> {name}")
@@ -3686,6 +3692,13 @@ def cmd_source(ctx, repo, args):
         if other:
             raise FsError(f"source '{other}' already has this URL and branch {branch} - "
                           f"move the files to it with 'git filesync set FILE... --source {other}'")
+        if url and branch:        # as for set: the branch must exist upstream
+            src = ctx.source(url, ("branch", branch), args.name)
+            if not src.resolve():
+                raise FsError(ref_missing(("branch", branch), src))
+            if key == "url" and norm_url(url) != norm_url(s.get("url", "")):
+                for rel in source_files(reg, args.name):
+                    keep_base(src, Link(reg, rel))
         old = s.get(key)
         reg.set_source(args.name, key, args.value)
         done = f"{args.name}: {key} {args.value}" + (f" (was {old})" if old and old != args.value
@@ -4180,7 +4193,7 @@ def run(argv=None):
     p.add_argument("--tag", help="sync to this upstream tag, once (as -b)")
     p.add_argument("--overwrite", action="store_true",
                    help="discard local adaptations instead of merging them")
-    p.add_argument("--dry-run", action="store_true",
+    p.add_argument("-n", "--dry-run", action="store_true",
                    help="only report what would happen (incl. merge conflicts)")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="before each file: where it comes from and the version synced so far")
@@ -4217,11 +4230,11 @@ def run(argv=None):
 
     p = add_command(sub, "add", parents=[common], help="link a file (or all files of a directory) "
                                                      "to the upstream repository")
+    p.add_argument("source", metavar="URL|SOURCE", help="upstream URL or name of a [source] in "
+                   + REGISTRY)
     p.add_argument("file", metavar="FILE|DIR",
                    help="file in this repository (fetched from upstream if missing), or a "
                         "directory: all files below the upstream directory are linked")
-    p.add_argument("source", metavar="URL|SOURCE", help="upstream URL or name of a [source] in "
-                   + REGISTRY)
     p.add_argument("-b", "--branch", help="the source's upstream branch (default: remote HEAD; "
                                           "with SOURCE: its branch)")
     p.add_argument("--tag", help="pin the file to this upstream tag instead of following the "
@@ -4266,7 +4279,7 @@ def run(argv=None):
     add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then check "
                                                   "and stage it")
 
-    p = add_command(sub, "restore", parents=[common],
+    p = add_command(sub, "restore", parents=[colorp],
                     help="restore files to the synced upstream version, like 'git restore'")
     p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
     p.add_argument("-S", "--staged", action="store_true",
@@ -4290,7 +4303,7 @@ def run(argv=None):
     p.add_argument("dst", metavar="NEW", help="new path or existing directory")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be moved")
 
-    p = add_command(sub, "source", parents=[common], help="list or change the [source]s "
+    p = add_command(sub, "source", parents=[colorp], help="list or change the [source]s "
                                                         "(like 'git remote')")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="list with URL, branch and file count")
@@ -4300,7 +4313,8 @@ def run(argv=None):
                            ("set-branch", "BRANCH", "follow BRANCH - for all files of the "
                                                     "source; pinned ones look for newer tags "
                                                     "(or those of a pattern) on it")):
-        a = add_command(actions, name, parents=[colorp], help=hlp)
+        # set-url / set-branch check the branch upstream
+        a = add_command(actions, name, parents=[colorp if name == "rename" else common], help=hlp)
         a.add_argument("name", metavar="NAME" if name != "rename" else "OLD",
                        help="key of the [source]")
         a.add_argument("value", metavar=arg)

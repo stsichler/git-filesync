@@ -142,7 +142,7 @@ cd my-repo
 # 1. Link a file (once): staged like git add, then committed - git commit
 #    offers the proposed message. Without -b the upstream default branch is
 #    used, without -p the same path as here.
-git filesync add src/foo.c https://github.com/owner/lib.git -p lib/foo.c
+git filesync add https://github.com/owner/lib.git src/foo.c -p lib/foo.c
 git commit
 
 # 2. See what needs syncing
@@ -179,7 +179,7 @@ Basic commands – what you need day to day:
 | `pull PATH…`, `pull --all` | sync files from upstream, keeping local adaptations |
 | `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced upstream version |
 | `restore PATH…` | files back to the synced upstream version, like `git restore` |
-| `add FILE\|DIR URL\|SOURCE` | link a file (or all files of an upstream directory) to upstream |
+| `add URL\|SOURCE FILE\|DIR` | link a file (or all files of an upstream directory) to upstream |
 | `rm PATH…`, `unlink PATH…`, `mv OLD NEW` | remove links with their files (like `git rm`) or without, move them |
 
 Advanced commands:
