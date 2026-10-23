@@ -2017,6 +2017,9 @@ git commit -q --no-edit
 quiet git filesync source rename "$(git config -f .git-filesync file.y.c.source)" mine23
 check "source rename: the header keeps its comment" "$(grep -c '^\[source "mine23"\]   # our upstream$' .git-filesync)" "1"
 check "source rename: the entries follow" "$(git config -f .git-filesync file.y.c.source) $(st y.c)" "mine23 "
+# nocr FILE - its lines without CRLF (counted with tr: awk and grep in Git
+# Bash drop the CR when they read)
+nocr() { echo $(( $(lines < "$1") - $(tr -cd '\r' < "$1" | wc -c) )); }
 # .git-filesync is written with the line ends of a checkout: CRLF by a git
 # attribute stays CRLF (only the changed line differs), and with
 # core.autocrlf an LF one becomes CRLF, so that git doesn't warn about it
@@ -2026,7 +2029,7 @@ awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' .git-filesync > "$T/reg23" && cp "
 git commit -qam crlf
 quiet git filesync set y.c --strict
 check "eol=crlf: .git-filesync stays CRLF, only the changed line" \
-  "$(awk '!/\r$/' .git-filesync | lines) $(git diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' ')" "0 1 0"
+  "$(nocr .git-filesync) $(git diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' ')" "0 1 0"
 git reset -q --hard
 new_repo "$T/s23a"
 git config core.autocrlf true
@@ -2035,7 +2038,7 @@ tr -d '\r' < .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
 quiet git filesync set a.c --strict
 git add .git-filesync 2> "$T/warn23"
 check "autocrlf: an LF .git-filesync becomes CRLF, git doesn't warn" \
-  "$(awk '!/\r$/' .git-filesync | lines) $(grep -c 'will be replaced' "$T/warn23")" "0 0"
+  "$(nocr .git-filesync) $(grep -c 'will be replaced' "$T/warn23")" "0 0"
 cd "$T/s23c"
 cd "$T/s23"
 
