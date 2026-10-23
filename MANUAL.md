@@ -812,7 +812,7 @@ $ git filesync cache list
 |---|---|
 | (none) | where the cache is, how big, and its limits |
 | `list` | the clones, most recently used first: size, last used, URL |
-| `prune` | remove clones not used for `filesync.cacheMaxAge` days, then the least recently used beyond `filesync.cacheMaxSize`; `--older-than DAYS` and `--max-size SIZE` (e.g. `500M`, `2G`) set other limits for this run; `-n` only shows what would be removed |
+| `prune` | remove clones not used for `filesync.cacheMaxAge` days, then the least recently used beyond `filesync.cacheMaxSize`; `--older-than DAYS` and `--max-size SIZE` (e.g. `500M`, `2G`) set other limits for this run – `0` means no limit, as in the settings below (to remove everything: `clear`); `-n` only shows what would be removed |
 | `clear` | remove all clones (`-n`: only show them) |
 | `dir` | print the cache's directory, e.g. to keep it between CI runs |
 

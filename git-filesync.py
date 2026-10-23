@@ -196,7 +196,8 @@ Advanced commands:
                                 filesync.cacheMaxSize SIZE; 0/off: none) -
                                 also done automatically after a fetch, at
                                 most once a day
-        --older-than DAYS, --max-size SIZE  other limits (SIZE: 500M, 2G)
+        --older-than DAYS, --max-size SIZE  other limits (SIZE: 500M, 2G;
+                                0: no limit, as configured; all: cache clear)
         -n, --dry-run           only show what would be removed
     cache clear [-n]            remove all clones
     cache dir                   print its directory (e.g. for CI caching)
@@ -3839,12 +3840,14 @@ def cmd_cache(args):
             removed = prune_cache(None, 0, args.dry_run, grace=False)
         else:
             max_age, max_size = cache_limits()
+            # 0: no limit, as in the configuration (everything: cache clear)
             if args.older_than is not None:
-                max_age = args.older_than
+                max_age = args.older_than or None
             if args.max_size is not None:
-                max_size = parse_size(args.max_size)
+                max_size = parse_size(args.max_size) or None
             if max_age is None and max_size is None:
-                print("no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize) - nothing to do")
+                print("no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize, "
+                      "--older-than, --max-size) - nothing to do")
                 return EXIT_OK
             removed = prune_cache(max_age, max_size, args.dry_run)
         verb = "would remove" if args.dry_run else "removed"

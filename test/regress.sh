@@ -1827,13 +1827,15 @@ check "cache: summary" "$(git filesync cache | sed -n 2p)" \
   "cleaned up automatically: clones unused for 90 days (filesync.cacheMaxAge, filesync.cacheMaxSize)"
 check "cache list: one line per clone" "$(git filesync cache list | lines)" "$N"
 check "cache list: the URL" "$(git filesync cache list | grep -c " $URL12$")" "1"
-check "cache prune: recently used ones kept" "$(git filesync cache prune --older-than 0 | tail -1)" \
+check "cache prune: recently used ones kept" "$(git filesync cache prune --max-size 1 | tail -1)" \
   "removed 0 clones (0 bytes) from the cache - clones used in the last minutes are kept"
 age_clones
 check "cache prune -n" "$(git filesync cache prune -n | grep -c '^would remove .* 2020-01-01 ')" "$N"
 check "cache prune -n: nothing removed" "$(nclones)" "$N"
 check "cache prune --max-size: least recently used" \
-  "$(git filesync cache prune --older-than 100000 --max-size 0 -n | grep -c '^would remove .* 2020-01-01 ')" "$N"
+  "$(git filesync cache prune --older-than 100000 --max-size 1 -n | grep -c '^would remove .* 2020-01-01 ')" "$N"
+check "cache prune: 0 is no limit, as configured" \
+  "$(git filesync cache prune --older-than 0 -n | grep -c '^would remove .* 2020-01-01 ')-$(git filesync cache prune --older-than 100000 --max-size 0 -n | grep -c '^would remove .* 2020-01-01 ')" "0-0"
 
 # automatic clean-up after a fetch, at most once a day: here everything
 # but the clone just used is old
@@ -1847,7 +1849,7 @@ quiet git filesync status
 check "... at most once a day" "$(nclones)" "1"
 git config --global filesync.cacheMaxAge off
 check "cacheMaxAge off: no limits" "$(git filesync cache prune)" \
-  "no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize) - nothing to do"
+  "no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize, --older-than, --max-size) - nothing to do"
 git config --global --unset filesync.cacheMaxAge
 check "cache clear -n" "$(git filesync cache clear -n | tail -1 | cut -d' ' -f1-4)" "would remove 1 clone"
 quiet git filesync cache clear
