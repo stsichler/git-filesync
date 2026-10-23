@@ -196,6 +196,10 @@ up() { (cd "$T/upstream" && sedi "$1" lib.c && git commit -qam "$2" && git push 
 
 # downstream: links upstream's lib.c as src/lib.c
 new_repo downstream
+# like cp: the directory of FILE must exist (pull and restore create it)
+check "add: a missing directory is refused" \
+  "$(git filesync add "$URL" src/lib.c -p lib.c 2>&1 | grep -c "^error: directory 'src' does not exist$")" "1"
+mkdir src
 OUT=$(git filesync add "$URL" src/lib.c -p lib.c 2>&1)
 check "--help: basic and advanced commands" \
   "$(git filesync -h | grep -E '^(basic commands|advanced commands):$|^  (status|mv|set|hooks?) ' | cut -c1-8 | oneline)" \
@@ -631,6 +635,7 @@ git init -q m4
   && git add . && git commit -qm init)
 new_repo s4
 git filesync source map file:///nowhere/m4.git "$T/m4" >/dev/null
+mkdir src
 addc file:///nowhere/m4.git src/foo.c -p lib/foo.c
 addc file:///nowhere/m4.git src/bar.h -p lib/bar.h --strict
 
@@ -739,6 +744,7 @@ check "one [source] for files of one upstream" \
 SRC=$(git config -f .git-filesync --get-regexp '^source\..*\.url' | sed 's/^source\.\(.*\)\.url .*/\1/')
 (cd ../m4 && printf 'n\n' > lib/new.h && sedi 's/^d$/D-up/' lib/foo.c && git add . && git commit -qm "add new.h")
 # add only stages; the proposed message is prepared for a plain git commit
+mkdir include
 OUT=$(git filesync add "$SRC" include/new.h -p lib/new.h 2>&1)
 check "add by source name" "$?" "0"
 check "add by source name: same source" "$(git config -f .git-filesync file.include/new.h.source)" "$SRC"
@@ -757,6 +763,20 @@ check "mv: file moved" "$(ls include)" "renamed.h"
 check "mv: link moved (staged, not yet committed)" "$(git filesync status -s include/renamed.h)" "  ? include/renamed.h"
 check "mv: old entry gone" "$(git config -f .git-filesync --get-regexp '^file\.include/new\.h\.' | lines)" "0"
 git commit -qm mv
+
+# directories: add and mv put files into existing ones only, like cp and
+# git mv; add DIR may create DIR itself; pull and restore recreate them
+check "mv: a missing directory is refused" \
+  "$(git filesync mv include/renamed.h nope/r.h 2>&1)-$(git status --porcelain)" \
+  "error: directory 'nope' does not exist-"
+check "add DIR: a missing parent directory is refused" \
+  "$(git filesync add -n "$SRC" nope/lib -p lib 2>&1 | grep -c "^error: directory 'nope' does not exist$")" "1"
+check "add DIR: DIR itself may be new" "$(git filesync add -n "$SRC" newdir -p lib | grep -c '^would link newdir/')" "3"
+rm -r include
+check "restore: recreates a missing directory" "$(rc git filesync restore include/renamed.h) $(cat include/renamed.h)" "0 n"
+git rm -q -r include && git commit -qm "include gone, its entry kept"
+check "pull: recreates a missing directory" "$(rc git filesync pull include/renamed.h) $(cat include/renamed.h)" "0 n"
+git reset -q --hard HEAD~1
 
 # unlink: removes the entry, keeps the file; the last unlink removes the registry
 { printf '# my own note\n\n'; cat .git-filesync; } > "$T/reg" && cp "$T/reg" .git-filesync

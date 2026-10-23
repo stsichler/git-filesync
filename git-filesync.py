@@ -108,12 +108,14 @@ Basic commands:
                                 a number appended if taken); the base is the
                                 upstream head (or --commit): an existing FILE
                                 is kept, its differences count as adaptations;
-                                a missing FILE is fetched; FILE and
+                                a missing FILE is fetched (its directory must
+                                exist, as for cp); FILE and
                                 .git-filesync are staged like `git add` - a
                                 plain `git commit` offers the proposed message
     add URL|SOURCE DIR          link every file below an upstream directory
                                 (-p, default: same as DIR) as DIR/...; files
-                                already linked are skipped
+                                already linked are skipped; as for cp -r, DIR
+                                may be new, its parent must exist
         -b, --branch BRANCH     the source's upstream branch (default: its
                                 default branch, or that of SOURCE)
         --tag TAG               pin the file to an upstream tag instead of
@@ -140,7 +142,8 @@ Basic commands:
         -n, --dry-run           only show what would be removed
 
     unlink PATH...              remove links (the files are kept)
-    mv OLD NEW                  move a linked file (git mv), keeping its link
+    mv OLD NEW                  move a linked file (git mv), keeping its link;
+                                the directory of NEW must exist
         -n, --dry-run           (both) only show what would be done
 
 Advanced commands:
@@ -3169,6 +3172,8 @@ def cmd_add(ctx, repo, args):
         target = target / Path(path).name
         rel = repo.rel(target)
     if target.is_dir() or patterns or not upstream_file and src.is_dir(at or head, path):
+        # like cp -r: DIR may be new, the directory it goes into must exist
+        require_dir(repo, target if target.is_dir() else target.parent)
         plan, relink = plan_dir(repo, reg, src, args, at or head, rel, path, target)
         if not plan:
             return EXIT_OK
@@ -3178,6 +3183,7 @@ def cmd_add(ctx, repo, args):
             raise FsError(f"'{rel}' is already linked (use --force to relink)")
         if target.is_dir():
             raise FsError(f"cannot link '{rel}': is a directory")
+        require_dir(repo, target.parent)        # like cp
         plan = [Planned(rel, path, *find_base(repo, src, at or head, rel, path, target,
                                               args.overwrite))]
     modified = [p for p in plan if p.modified]
@@ -3234,6 +3240,13 @@ def cmd_add(ctx, repo, args):
     msg_name = rels[0] if len(rels) == 1 else (rel if rel != "." else "root")
     report_staged(repo, msg_name, msg, paint("staged", "green"))
     return EXIT_OK
+
+
+def require_dir(repo, path):
+    """add and mv put a file into an existing directory only, like cp and
+    git mv: a mistyped directory isn't created."""
+    if not path.is_dir():
+        raise FsError(f"directory '{repo.rel(path)}' does not exist")
 
 
 def plan_dir(repo, reg, src, args, at, rel, path, target):
@@ -3433,14 +3446,13 @@ def cmd_mv(ctx, repo, args):
         raise FsError(f"cannot move to '{new}': {problem}")
     if new in reg.files or dst.exists():
         raise FsError(f"'{new}' already exists")
+    require_dir(repo, dst.parent)                # like git mv
     if args.dry_run:
         print(f"would move {old} -> {new}")
         return EXIT_OK
     if repo.git(["ls-files", "--error-unmatch", "--", lit(old)], check=False).returncode == 0:
-        dst.parent.mkdir(parents=True, exist_ok=True)
         repo.git(["mv", "--", old, new])
     elif (repo.top / old).exists():
-        dst.parent.mkdir(parents=True, exist_ok=True)
         (repo.top / old).rename(dst)
     reg.rename_file(old, new)
     reg.finish()

@@ -511,7 +511,10 @@ directory (see [below](#linking-a-directory)).
   would be kept reverted. Use `--overwrite` to take the upstream version
   instead, or `--commit` to name the upstream version FILE is a copy of (then
   `pull` brings the changes since).
-- If FILE doesn't exist, it is fetched from upstream.
+- If FILE doesn't exist, it is fetched from upstream. Its directory must
+  exist, as for `cp`: `add` doesn't create a mistyped one (`error:
+  directory 'src/new' does not exist`). `pull` and `restore` do create
+  missing directories – the entry is there already, as for `git checkout`.
 - Like `git add`, `add` stages FILE (as it is in the working tree) and its
   entry in `.git-filesync`, but doesn't commit. A plain `git commit` then
   opens the editor with the proposed commit message (`git commit --no-edit`
@@ -543,7 +546,9 @@ If DIR is an existing directory, or the upstream path is a directory, or
 `--include` / `--exclude` are given, `add` links every file below upstream
 directory: `-p api` with DIR `proto` links `api/v1/x.proto` as
 `proto/v1/x.proto`. (An upstream *file* given for an existing directory goes
-into it, like `cp`.) Each file gets its own ordinary `[file]` entry – after
+into it, like `cp`.) As for `cp -r`, DIR itself may be new, but the
+directory it goes into must exist; subdirectories below DIR are created as
+upstream has them. Each file gets its own ordinary `[file]` entry – after
 `add` there is no difference to files linked one by one – and all of them
 are staged together, with one proposed message:
 
@@ -593,7 +598,8 @@ unlinked.
 ### `mv`
 
 `mv OLD NEW` – move a linked file (`git mv`) and its link together; NEW may
-be an existing directory. Both are staged. `-n` / `--dry-run` only shows
+be an existing directory. As for `git mv`, the directory NEW goes into must
+exist. Both are staged. `-n` / `--dry-run` only shows
 what would be moved.
 
 ## Advanced commands
