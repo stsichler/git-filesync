@@ -424,15 +424,16 @@ your difftool (`diff.tool`); `OPTS` go to `git difftool` (e.g. `-t meld`).
 |---|---|
 | `--committed`, `--upstream`, `--commit`, `-b`, `--tag` | as for `diff` |
 | `-y`, `--no-prompt` | don't ask before each file |
-| `--prompt` | ask even for explicitly given files |
+| `--prompt` | ask even with `difftool.prompt = false` |
 
 Without `--upstream` / `--committed`, the right side is the real working
 file, so edits made in the tool are kept.
 
-Like `git difftool`, `difftool` without file arguments asks before each file
+Like `git difftool`, `difftool` asks before each file
 (`Viewing (1/3): 'src/foo.c'` / `Launch 'meld' [Y/n/q]?`; Enter = yes,
 `q` = stop). `-y` / `--no-prompt` or `difftool.prompt = false` skip the
-questions, `--prompt` asks even for explicitly given files.
+questions, `--prompt` asks anyway; of `-y` and `--prompt`, the last one
+given counts.
 
 ### `restore`
 
@@ -1018,16 +1019,14 @@ git-filesync are easy to find later (`git log --grep='^\[filesync\]'`).
 
 - Several commands in a row (e.g. `add` for some files and `pull` for
   others, then one commit for all of them) collect their messages there.
-- A copy stays in `.git/FILESYNC_SQUASH_MSG` until the next proposal (the
-  path is printed along with the hint to commit). It brings the message
-  back if `SQUASH_MSG` is gone – after a commit that was aborted with an
-  empty message and then made with another one, after `git reset`, or
-  after `git commit -m`:
-  `git commit -e -F .git/FILESYNC_SQUASH_MSG`.
-- A `SQUASH_MSG` that git-filesync didn't write (e.g. from `git merge
-  --squash`) is left alone. The tool then keeps the message in
-  `.git/FILESYNC_MSG_*` and prints a `git commit -e -F …` command that uses
-  it.
+- A `SQUASH_MSG` of git's own (e.g. from `git merge --squash`) gets the
+  proposal added as well: the next commit contains both.
+- A copy of `SQUASH_MSG` stays in `.git/FILESYNC_MSG` (the path is printed
+  along with the hint to commit); each proposal rewrites it, so it never
+  grows beyond what the next commit is offered. It brings the message back
+  if `SQUASH_MSG` is gone – after `git reset`, or after a commit made with
+  another message (`git commit -m`):
+  `git commit -e -F .git/FILESYNC_MSG`.
 
 ### Files renamed or deleted upstream
 
@@ -1126,7 +1125,7 @@ jobs:
 ```
 
 This uses the latest release. To pin a version, download
-`https://github.com/stsichler/git-filesync/releases/download/v0.16.0/git-filesync.py`
+`https://github.com/stsichler/git-filesync/releases/download/v0.17.0/git-filesync.py`
 instead. (For private upstream repositories the job needs a token with read
 access.)
 
@@ -1177,7 +1176,7 @@ the same version without installing it:
 
 ```sh
 git filesync add https://github.com/stsichler/git-filesync.git tools/git-filesync.py \
-    -p git-filesync.py --tag v0.16.0 --strict
+    -p git-filesync.py --tag v0.17.0 --strict
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
 ```
 

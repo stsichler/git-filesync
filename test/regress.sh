@@ -201,8 +201,8 @@ check "--help: basic and advanced commands" \
   "basic co   status   mv     advanced   set      hooks  "
 check "command help repeats the summary" "$(git filesync add -h | grep -c '^Link a file (or all files of a directory) to the upstream repository\.$')" "1"
 check "add stages, like git add" "$(git status --porcelain | oneline)" "A  .git-filesync A  src/lib.c "
-check "add: says how to commit" "$(echo "$OUT" | grep -cxE '    git commit|\(it offers the proposed commit message; a copy stays in \.git/FILESYNC_SQUASH_MSG\)')" "2"
-check "add: copy of the proposed message" "$(head -1 .git/FILESYNC_SQUASH_MSG)" "$(head -1 .git/SQUASH_MSG)"
+check "add: says how to commit" "$(echo "$OUT" | grep -cxE '    git commit|\(it offers the proposed commit message; a copy stays in \.git/FILESYNC_MSG\)')" "2"
+check "add: copy of the proposed message" "$(cat .git/FILESYNC_MSG)" "$(cat .git/SQUASH_MSG)"
 git commit -q --no-edit
 check "add + commit: status clean" "$(st)" ""
 check "add + commit: file and entry" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync src/lib.c "
@@ -244,7 +244,7 @@ check "conflict: message prepared for git commit" \
 git checkout -q src/lib.c 2>/dev/null
 git reset -q --hard
 check "git reset drops the prepared message" "$(ls "$(git rev-parse --git-dir)/SQUASH_MSG" 2>/dev/null)" ""
-check "... but the copy stays" "$(head -1 .git/FILESYNC_SQUASH_MSG | cut -d' ' -f1-3)" "[filesync] Sync src/lib.c"
+check "... but the copy stays" "$(head -1 .git/FILESYNC_MSG | cut -d' ' -f1-3)" "[filesync] Sync src/lib.c"
 
 # mapped to the local checkout, unpushed upstream commits are seen and warned
 git filesync source map "$URL" "$T/upstream" >/dev/null
@@ -653,7 +653,7 @@ check "apply -3 after upstream moved" \
   "$(cd ../m4 && git apply -3 ../p4.patch >/dev/null 2>&1 && sed -n 2p lib/foo.c; git reset -q --hard)" "B-local"
 
 # difftool: the working file itself is passed, --upstream uses temp copies
-check "difftool: real working file" "$(git filesync difftool src/foo.c | tr '\\' / \
+check "difftool: real working file" "$(git filesync difftool -y src/foo.c | tr '\\' / \
   | grep -cE "^TOOL synced-$(git -C ../m4 rev-parse --short HEAD~1) .*/s4/src/foo\.c$")" "1"
 check "difftool --upstream: temp copy" "$(git filesync difftool -y --upstream | grep -c "upstream-")" "1"
 
@@ -666,10 +666,11 @@ check "difftool prompt: Enter = yes" "$(printf '\n\n' | git filesync difftool | 
 check "difftool prompt: q quits" "$(printf 'q\n' | git filesync difftool | grep -c 'TOOL ')" "0"
 check "difftool prompt: EOF quits" "$(git filesync difftool </dev/null | grep -c 'TOOL ')" "0"
 check "difftool -y: no prompt" "$(git filesync difftool -y </dev/null | grep -c 'TOOL ')" "2"
-check "difftool with file: no prompt" "$(git filesync difftool src/foo.c </dev/null | grep -c 'TOOL ')" "1"
-check "difftool --prompt with file" "$(printf 'n\n' | git filesync difftool --prompt src/foo.c | grep -c 'TOOL ')" "0"
+check "difftool with file: asks too, like git difftool" "$(printf 'n\n' | git filesync difftool src/foo.c | grep -c 'TOOL ')" "0"
+check "difftool -y --prompt: the last counts" "$(printf 'n\n' | git filesync difftool -y --prompt src/foo.c | grep -c 'TOOL ')" "0"
 git config difftool.prompt false
 check "difftool.prompt=false respected" "$(git filesync difftool </dev/null | grep -c 'TOOL ')" "2"
+check "difftool --prompt beats difftool.prompt=false" "$(printf 'n\n' | git filesync difftool --prompt src/foo.c | grep -c 'TOOL ')" "0"
 git config --unset difftool.prompt
 check "difftool prompt names tool" "$(printf 'q\n' | git filesync difftool | grep -c "Launch 'fake'")" "1"
 git checkout -q -- src/bar.h
@@ -1336,20 +1337,20 @@ check "add by URL + branch: that source" "$(git config -f .git-filesync file.c.c
 check "add -b: a missing branch is an error" "$(rc git filesync add "$URL9" e.c -p t.c -b nope)" "2"
 git reset -q --hard
 
-# a SQUASH_MSG of git's own (e.g. merge --squash) is left alone
+# a SQUASH_MSG of git's own (e.g. merge --squash) gets the proposal too;
+# the copy in .git/FILESYNC_MSG is rewritten each time, the path shown
+# relative to the current directory
 echo "squashed" > "$(git rev-parse --git-dir)/SQUASH_MSG"
-check "foreign SQUASH_MSG: said so" \
-  "$(git filesync add "$URL9" f.c -p t.c | grep -c "SQUASH_MSG is in use")" "1"
-check "foreign SQUASH_MSG: kept" "$(cat "$(git rev-parse --git-dir)/SQUASH_MSG")" "squashed"
-# the command shown names its paths relative to the current directory, and works there
+quiet git filesync add "$URL9" f.c -p t.c
+check "foreign SQUASH_MSG: proposal added" \
+  "$(head -1 .git/SQUASH_MSG) $(grep -c '^\[filesync\] Add f\.c from' .git/SQUASH_MSG)" "squashed 1"
 mkdir sub
-CMD=$(cd sub && git filesync add "$URL9" g.c -p t.c | sed -n 's/^    git commit/git commit/p')
-check "foreign SQUASH_MSG, subdirectory: paths relative to it" \
-  "$(echo "$CMD" | grep -cE '^git commit -e -F "\.\./\.git/FILESYNC_MSG_[^"]*" -- g\.c \.\./\.git-filesync$')" "1"
-check "foreign SQUASH_MSG, subdirectory: the command commits" \
-  "$( (cd sub && eval "$CMD" >/dev/null) && git show --name-only --format= HEAD | sort | oneline)" ".git-filesync sub/g.c "
-rm -f "$(git rev-parse --git-dir)/SQUASH_MSG"
-git reset -q --hard
+check "subdirectory: copy shown relative to it" \
+  "$(cd sub && git filesync add "$URL9" g.c -p t.c | grep -c 'a copy stays in \.\./\.git/FILESYNC_MSG)$')" "1"
+git commit -q
+check "commit takes all proposals" "$(git log -1 --format=%B | grep -cE '^squashed$|^\[filesync\] Add (f|sub/g)\.c ')" "3"
+check "the copy stays, rewritten" "$(head -1 .git/FILESYNC_MSG) $(ls .git/FILESYNC_* | oneline)" "squashed .git/FILESYNC_MSG "
+git reset -q --hard HEAD~1
 
 # adds and a pull go into one commit, with all their proposals
 cd "$T"

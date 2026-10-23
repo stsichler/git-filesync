@@ -35,7 +35,8 @@ Commands (run inside the repository; without a command: status).
 PATH may be a file or a directory (= all linked files below it); options
 follow the command. No command commits: they stage (restore: with -S), like
 their git namesakes, and propose a commit message that a plain `git commit`
-offers (.git/SQUASH_MSG) - committing is up to you.
+offers (.git/SQUASH_MSG; a copy stays in .git/FILESYNC_MSG) - committing
+is up to you.
 
 Basic commands:
 
@@ -87,9 +88,9 @@ Basic commands:
 
     difftool [PATH...] [-- OPTS]  the same in the configured difftool
         --committed, --upstream, --commit, -b, --tag  as for diff
-        -y, --no-prompt         don't ask before each file (default: ask if
-                                no files are given)
-        --prompt                ask even for explicitly given files
+        -y, --no-prompt         don't ask before each file (default: ask,
+                                like git difftool; difftool.prompt)
+        --prompt                ask even with difftool.prompt = false
 
     restore PATH...             restore files to the synced upstream version
                                 (the base), like `git restore`; e.g. to
@@ -255,7 +256,7 @@ from typing import Optional
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -1664,11 +1665,6 @@ class Repo:
         attributes, no CR, no LFS pointer? (see check_plain)"""
         return bool(self.is_plain(rel)) and b"\r" not in data and not lfs_pointer(data)
 
-    def state_file(self, prefix, name):
-        """.git/<prefix><name> for state kept between commands (name made
-        safe as a file name)."""
-        return self.gitdir / (prefix + re.sub(r"[^A-Za-z0-9._-]", "_", name))
-
     def fix_eol(self, path):
         """Rewrite a file written by `git config -f` (LF) in working tree form,
         so core.autocrlf repositories don't warn about it."""
@@ -2552,52 +2548,35 @@ def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, dis
     return "\n".join(lines) + "\n"
 
 
-def message_file(repo, name, msg, rels=None):
-    """Keep the proposed commit message in .git/FILESYNC_MSG_<name>; returns
-    the file and the command that commits the files (default: name) and
-    their entries with it."""
-    msgfile = repo.state_file("FILESYNC_MSG_", name)
-    msgfile.write_bytes(msg.encode("utf-8"))
-    paths = " ".join(path_arg(repo, r) for r in ([name] if rels is None else rels) + [REGISTRY])
-    return msgfile, f'git commit -e -F "{shown_path(repo, msgfile)}" -- {paths}'
-
-
 def propose_message(repo, msg):
-    """Also put a proposed commit message into .git/SQUASH_MSG, which a plain
-    `git commit` (and IDEs) offer; git removes it after the next commit.
-    Proposals of several commands are collected. A SQUASH_MSG of git's own
-    (e.g. from merge --squash) is left alone. Returns True if done."""
-    squash = repo.gitdir / "SQUASH_MSG"
-    ours = repo.state_file("FILESYNC_", "SQUASH_MSG")     # copy of what we wrote
-    if squash.exists():
-        prev = squash.read_text(encoding="utf-8", errors="replace")
-        if not ours.exists() or ours.read_text(encoding="utf-8", errors="replace") != prev:
-            return False
-        if msg in prev:
-            return True
-        msg = prev.rstrip("\n") + "\n\n" + msg
-    for f in (squash, ours):
-        f.write_bytes(msg.encode("utf-8"))
-    return True
+    """Add a proposed commit message to .git/SQUASH_MSG, which a plain `git
+    commit` (and IDEs) offer - also to one of git's own (e.g. from merge
+    --squash): the commit takes both. Proposals of several commands are
+    collected until git removes it (after the next commit, and on reset).
+    A copy goes to .git/FILESYNC_MSG, which stays: each proposal rewrites
+    it. Returns the copy."""
+    squash, copy = repo.gitdir / "SQUASH_MSG", repo.gitdir / "FILESYNC_MSG"
+    data = msg.encode("utf-8")
+    prev = squash.read_bytes() if squash.exists() else b""
+    if data in prev:
+        data = prev
+    elif prev.strip():
+        data = prev.rstrip(b"\n") + b"\n\n" + data
+    for f in (squash, copy):
+        f.write_bytes(data)
+    return copy
 
 
-def commit_hint(repo, name, msg, rels=None):
-    """(command, note) for committing staged changes with the proposed
-    message: a plain `git commit` if the message could be prepared for it
-    (see propose_message), otherwise one with a message file."""
-    if propose_message(repo, msg):
-        # git drops SQUASH_MSG after any commit (also one that didn't use
-        # it) and on reset; our copy stays until the next proposal
-        copy = shown_path(repo, repo.state_file("FILESYNC_", "SQUASH_MSG"))
-        return "git commit", f"it offers the proposed commit message; a copy stays in {copy}"
-    _, cmd = message_file(repo, name, msg, rels)
-    return cmd, "a plain 'git commit' won't offer the proposed message: .git/SQUASH_MSG is in use"
+def commit_hint(repo, msg):
+    """Propose msg for the next commit (see propose_message); the note
+    about it, for after the command to commit."""
+    copy = shown_path(repo, propose_message(repo, msg))
+    return f"(it offers the proposed commit message; a copy stays in {copy})"
 
 
-def report_staged(repo, name, msg, done, rels=None, how="Commit with"):
+def report_staged(repo, name, msg, done):
     """Tell how to commit what a command staged without committing."""
-    cmd, note = commit_hint(repo, name, msg, rels)
-    print(f"{name}: {done}. {how}:\n    {cmd}\n({note})")
+    print(f"{name}: {done}. Commit with:\n    git commit\n{commit_hint(repo, msg)}")
 
 
 def commit_target(st, rev):
@@ -2769,12 +2748,11 @@ def report_pull(repo, reg, synced):
     name = rels[0] if len(rels) == 1 else plural(len(rels), "file")
     conflicted = [rel for rel, _, _, c in synced if c]
     if conflicted:
-        cmd, note = commit_hint(repo, name, msg, rels)
         add = " ".join(path_arg(repo, r) for r in conflicted)
         print(f"{paint('merge conflicts', 'boldred')} - resolve them, then run:\n"
-              f"    git add {add}\n    {cmd}\n({note})")
+              f"    git add {add}\n    git commit\n{commit_hint(repo, msg)}")
         return EXIT_PENDING
-    report_staged(repo, name, msg, paint("synced and staged", "green"), rels)
+    report_staged(repo, name, msg, paint("synced and staged", "green"))
     return EXIT_OK
 
 
@@ -2972,13 +2950,10 @@ def cmd_diff(ctx, repo, args):
 
 
 def difftool_prompting(repo, args):
-    """Ask before each file like `git difftool`: by default only when no files
-    were given; -y/--no-prompt and difftool.prompt=false turn it off,
-    --prompt turns it on."""
-    if args.prompt:
-        return True
-    if args.no_prompt or args.files:
-        return False
+    """Ask before each file like `git difftool`: unless -y/--no-prompt or
+    difftool.prompt=false; --prompt asks anyway (the last of them wins)."""
+    if args.prompt is not None:
+        return args.prompt
     cfg = out(repo.git(["config", "--type=bool", "difftool.prompt"], check=False))
     return cfg != "false"
 
@@ -3229,7 +3204,7 @@ def cmd_add(ctx, repo, args):
     # staged only, like git add; the proposed message is prepared for the commit
     msg = build_add_message(plan, src, name, url, ref, path, relink, args.strict, at or head)
     msg_name = rels[0] if len(rels) == 1 else (rel if rel != "." else "root")
-    report_staged(repo, msg_name, msg, paint("staged", "green"), rels)
+    report_staged(repo, msg_name, msg, paint("staged", "green"))
     return EXIT_OK
 
 
@@ -4223,10 +4198,10 @@ def run(argv=None):
                            help="a patch for 'git apply' in the upstream repository: "
                                 "upstream paths (not with --upstream)")
         else:
-            p.add_argument("-y", "--no-prompt", action="store_true",
+            p.add_argument("-y", "--no-prompt", dest="prompt", action="store_const", const=False,
                            help="don't ask before launching the tool for each file")
-            p.add_argument("--prompt", action="store_true",
-                           help="ask before each file even if files are given")
+            p.add_argument("--prompt", action="store_const", const=True,
+                           help="ask before each file even with difftool.prompt=false")
 
     p = add_command(sub, "add", parents=[common], help="link a file (or all files of a directory) "
                                                      "to the upstream repository")
