@@ -679,6 +679,11 @@ branch, name of a source), [`rm`](#rm), [`unlink`](#unlink), [`mv`](#mv). `edit`
 keeps whatever you write: a changed `commit` or `blob` changes what counts
 as an adaptation.
 
+Comments and your own layout in `.git-filesync` are kept: the commands
+change only the lines they have to. A removed entry takes its header, its
+keys and the lines between them along; comments and blank lines after its
+last key stay – e.g. one that introduces the next entry.
+
 ### `source`
 
 `source [ACTION …]` – list and change the `[source]` sections, like

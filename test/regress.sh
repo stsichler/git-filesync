@@ -1990,6 +1990,19 @@ echo local >> b.c
 check "diff: a branch the cache lacks is fetched" "$(git filesync diff b.c 2>&1 | grep -c '^+local$')" "1"
 git reset -q --hard
 
+# own comments in .git-filesync: a removed entry takes the comments between
+# its keys along, not those after them (one may introduce the next entry)
+new_repo "$T/s23c"
+for f in x y z; do addc "$TURL/m23.git" $f.c -p a.c; done
+awk '/^\[file "y.c"\]/ { print "# group Y" } { print } /^\[file "x.c"\]/ { print "\t# about x" }' \
+  .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync && echo "# trailing note" >> .git-filesync
+git commit -qam comments
+quiet git filesync unlink x.c z.c
+check "unlink: comments between the keys go along" "$(grep -c '# about x' .git-filesync)" "0"
+check "unlink: comments after the keys stay" "$(grep -cE '^# (group Y|trailing note)$' .git-filesync)" "2"
+check "unlink: only y.c left" "$(git config -f .git-filesync --get-regexp '^file\.' | cut -d. -f2 | sort -u | oneline)" "y "
+cd "$T/s23"
+
 if ln -s x "$T/lncheck" 2>/dev/null && [ -L "$T/lncheck" ]; then
   # .git-filesync comes from commits of others: as a symlink it is refused,
   # never written through

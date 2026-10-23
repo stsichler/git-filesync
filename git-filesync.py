@@ -1711,8 +1711,9 @@ def config_value(value):
 
 def edit_registry(data, pending, drop=()):
     """The registry's bytes with the sections in drop ({("file" | "source",
-    name)}) removed - like `git config --remove-section`: from the header
-    to the next section - and pending ({(rel, key): value}) written into the
+    name)}) removed - the header, the keys and the lines between them; the
+    comments and blank lines after the last key stay (one may introduce the
+    next section) - and pending ({(rel, key): value}) written into the
     [file "rel"] sections: a value replaced in its `key = value` line, a new
     key added at the end of its section, a new section appended. None if
     the file isn't laid out simply enough for that (a section or key twice,
@@ -1722,6 +1723,7 @@ def edit_registry(data, pending, drop=()):
         lines[-1] += b"\n"
     sections, current, keys = {}, None, {}     # rel -> [first, last line]; (rel, key) -> line
     headers = {}                    # (section, name) -> its line; None: any other header
+    last, sect = {}, None           # (section, name) -> its last key line
     for i, raw in enumerate(lines):
         line = raw.decode("utf-8", "replace").rstrip("\r\n")
         m = re.fullmatch(r'\s*\[\s*([A-Za-z][A-Za-z0-9-]*)\s+"((?:[^"\\]|\\.)*)"\s*\]\s*', line)
@@ -1729,16 +1731,20 @@ def edit_registry(data, pending, drop=()):
             name = (m.group(1).lower(), re.sub(r"\\(.)", r"\1", m.group(2)))
             if name in headers:
                 return None
-            headers[name] = i
+            headers[name], sect = i, name
             current = name[1] if name[0] == "file" and name not in drop else None
             if current is not None:
                 sections[current] = [i, i]
             continue
         if re.match(r"\s*\[", line):
             headers[(None, i)] = i
-            current = None
+            current = sect = None
             continue
-        if current is None or not line.strip() or re.match(r"\s*[#;]", line):
+        if not line.strip() or re.match(r"\s*[#;]", line):
+            continue
+        if sect is not None:
+            last[sect] = i
+        if current is None:
             continue
         m = re.fullmatch(r"\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*?))?\s*", line)
         if not m:
@@ -1749,13 +1755,11 @@ def edit_registry(data, pending, drop=()):
             return None      # twice, or a value we wouldn't write like that
         keys[key] = i
         sections[current][1] = i
-    starts = sorted(headers.values()) + [len(lines)]
     dropped = set()
     for name in drop:
         if name not in headers:
             return None
-        first = headers[name]
-        dropped.update(range(first, next(j for j in starts if j > first)))
+        dropped.update(range(headers[name], last.get(name, headers[name]) + 1))
     after, appended = {}, {}
     for (rel, k), v in pending.items():
         text = f"\t{k} = {config_value(v)}\n".encode()
@@ -1953,7 +1957,7 @@ class Registry:
             self.sources[name][key] = value
 
     def remove_source(self, name):
-        self._cfg("--remove-section", f"source.{name}")
+        self._remove_section("source", name)
         del self.sources[name]
 
     def rename_source(self, old, new):
