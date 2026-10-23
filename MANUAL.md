@@ -8,8 +8,8 @@ For motivation and installation see the [README](README.md).
 - [Concepts](#concepts)
   - [Upstream, downstream and links](#upstream-downstream-and-links)
   - [The `.git-filesync` file](#the-git-filesync-file)
+  - [Exact copies and adaptable files](#exact-copies-and-adaptable-files)
   - [Local modifications on top of the upstream version](#local-modifications-on-top-of-the-upstream-version)
-  - [Strict files](#strict-files)
 - [Commands](#commands)
   - [Common options](#common-options)
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool) · [`restore`](#restore)
@@ -54,7 +54,7 @@ file. Git-config format:
 [file "include/bar.h"]
 	source = owner/lib
 	path = include/bar.h
-	strict = true          # optional, see below
+	adaptable = true       # optional, see below
 	commit = …
 	blob = …
 [file "cfg/x.yml"]
@@ -94,10 +94,34 @@ file. Git-config format:
   and never written – a cloned repository's `.git-filesync` can't make
   `pull` touch other files.
 
+### Exact copies and adaptable files
+
+By default a linked file must stay an **exact copy** of its upstream
+version. Any change of it, committed or not, is reported as a violation:
+`status` marks it `NOT ALLOWED: not adaptable` (`-s`: `(not adaptable!)`,
+`--exit-code`: 1), the hooks report it, and `pull` refuses to sync it
+(other files of `pull --all` are still synced). Inspect with `diff`, then go
+back to the synced upstream version with [`restore -SW`](#restore) (or sync
+and discard in one step with `pull --overwrite`), discard only uncommitted
+changes with `git restore` – or allow changes by marking the file
+adaptable.
+
+An **adaptable** file may carry local adaptations, which `pull` keeps (see
+below). Mark a file with `add --adaptable`, or later with [`set
+--adaptable`](#set) (`--no-adaptable` takes it back):
+
+```sh
+git filesync set src/foo.c --adaptable
+```
+
+In `.git-filesync` this is `adaptable = true` in the `[file]` (as everywhere
+in git config, a bare `adaptable` without a value means true).
+
 ### Local modifications on top of the upstream version
 
-The file downstream doesn't have to be identical to the upstream version: it
-may carry local adaptations. Its entry in `.git-filesync` records the
+An [adaptable](#exact-copies-and-adaptable-files) file downstream doesn't
+have to be identical to the upstream version: it may carry local
+adaptations. Its entry in `.git-filesync` records the
 **base** of the file – "this file is based on upstream commit X" – not its
 content. Since file and entry are always committed together, every downstream
 commit precisely defines the local layer: file content minus upstream
@@ -112,27 +136,6 @@ Committed local changes are **adaptations**; changes not committed yet are
 adaptations by merging them with the new upstream version, and – like
 `git pull` – refuses files with uncommitted changes (see [`pull`](#pull)).
 `diff` and `difftool` show both kinds (see [`diff`](#diff)).
-
-### Strict files
-
-Some files should stay exact copies. Mark them with `add --strict`, or
-later with [`set --strict`](#set):
-
-```sh
-git filesync set src/foo.c --strict
-```
-
-In `.git-filesync` this is `strict = true` in the `[file]` (as everywhere in
-git config, a bare `strict` without a value means true).
-
-For a strict file, adaptations as well as uncommitted changes are reported
-as a violation: `status` marks them `NOT ALLOWED: strict` (`-s`: `(strict!)`,
-`--exit-code`: 1), the hooks report it, and `pull` refuses to merge (other
-files of `pull --all` are still synced). Inspect with `diff`, then go back
-to the synced upstream version with [`restore -SW`](#restore) (or sync and
-discard in one step with `pull --overwrite`), discard only uncommitted
-changes with `git restore`, or lift the restriction (`git filesync set
---no-strict FILE`).
 
 ## Commands
 
@@ -154,7 +157,7 @@ Basic commands – what you need day to day:
 
 | Command | Purpose |
 |---|---|
-| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, upstream path, strict |
+| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, upstream path, adaptable |
 | [`edit`](#edit) | edit `.git-filesync` in the editor |
 | [`source [ACTION …]`](#source) | list and add sources, rename them, change URL or branch |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
@@ -205,7 +208,7 @@ the command and lists them.
 |---|---|
 | `-s`, `--short` | short format, three columns |
 | `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one also the [newer tags](#newer-tags) on the source's branch |
-| `--exit-code` | exit with 1 if something is to sync or a strict file is modified |
+| `--exit-code` | exit with 1 if something is to sync or a file that isn't adaptable is modified |
 
 `status` looks at each linked file in three independent respects:
 
@@ -225,8 +228,8 @@ Upstream changes to sync:
 
 Locally adapted files:
   (use "git filesync diff --committed <file>..." to see the adaptations)
-  (use "git filesync restore -SW <file>..." to discard them)
-	adapted:    include/x.h  (NOT ALLOWED: strict)
+  (use "git filesync restore -SW <file>..." to discard them, or "git filesync set --adaptable <file>..." to allow them)
+	adapted:    include/x.h  (NOT ALLOWED: not adaptable)
 	adapted:    src/foo.c
 
 Uncommitted changes:
@@ -255,11 +258,11 @@ something to report, with three columns:
 P   src/a.c
 PM  src/b.c
  MM src/c.c
- M  include/x.h  (strict!)
+ M  include/x.h  (not adaptable!)
 ```
 
 Like `git status`, the exit code is 0 (2 on errors); `--exit-code` makes it
-1 when something is to sync or a strict file is modified (for scripts and
+1 when something is to sync or a file that isn't adaptable is modified (for scripts and
 [CI](#ci)).
 
 ### `pull`
@@ -440,7 +443,8 @@ given counts.
 
 `restore PATH…` – like `git restore`, but from the synced upstream version
 (the base recorded in `.git-filesync`) instead of the index: the files get
-that version back, e.g. to discard the adaptations of a strict file.
+that version back, e.g. to discard the changes of a file that isn't
+adaptable.
 `.git-filesync` stays as it is, nothing is committed – commit the result
 like any change. Unlike `pull --overwrite`, `restore` doesn't bring in a
 newer upstream version.
@@ -499,19 +503,21 @@ directory (see [below](#linking-a-directory)).
 | `--exclude PATTERN` | directory: skip files matching PATTERN; repeatable, beats `--include` |
 | `--commit REV` | upstream revision to base FILE on, instead of the head of the branch (or the tag) |
 | `--overwrite` | replace an existing FILE (for DIR: existing files) with the upstream version; uncommitted content is kept as a blob ([discarded content](#discarded-content)) |
-| `--strict` | the file must stay an exact copy (see [Strict files](#strict-files)) |
+| `--adaptable` | local adaptations allowed; also: keep an existing FILE that differs from the base (see [Exact copies and adaptable files](#exact-copies-and-adaptable-files)) |
 | `--force` | relink a file that is already linked |
 | `-n`, `--dry-run` | change nothing, only show what would be linked and on which upstream version it would be based |
 
 - The base is always the upstream version `pull` would sync to: the head of
   the branch (or the tag), or the revision given with `--commit`.
-- If FILE exists, it is kept as it is. If it differs from the base, a
-  warning says so, and the differences count as
-  [adaptations](#local-modifications-on-top-of-the-upstream-version) – which `pull` keeps. If FILE is an older
-  copy of the upstream file, that means: the upstream changes since then
-  would be kept reverted. Use `--overwrite` to take the upstream version
-  instead, or `--commit` to name the upstream version FILE is a copy of (then
-  `pull` brings the changes since).
+- If FILE exists, it must be the base, as a linked file must stay an exact
+  copy. If it differs, `add` refuses and names the ways on:
+  - `--adaptable` keeps it as it is: the differences count as
+    [adaptations](#local-modifications-on-top-of-the-upstream-version),
+    which `pull` keeps. If FILE is an older copy of the upstream file, that
+    means the upstream changes since then would be kept reverted;
+  - `--overwrite` takes the upstream version instead;
+  - `--commit` names the upstream version FILE is a copy of (then `pull`
+    brings the changes since).
 - If FILE doesn't exist, it is fetched from upstream. Its directory must
   exist, as for `cp`: `add` doesn't create a mistyped one (`error:
   directory 'src/new' does not exist`). `pull` and `restore` do create
@@ -530,14 +536,14 @@ directory (see [below](#linking-a-directory)).
   ```
 
   For an existing FILE the subject is `Link FILE to …` (`Relink …` with
-  `--force`); the message notes local modifications and `--strict`. Several
+  `--force`); the message notes local modifications and `--adaptable`. Several
   `add`s (and `pull`s) in a row go into one commit, with all their
   messages.
 
 ```sh
 git filesync add https://github.com/owner/lib.git src/foo.c -p lib/foo.c
 git commit                                            # with the proposed message
-git filesync add owner/lib include/bar.h --strict     # reuse [source "owner/lib"]
+git filesync add owner/lib include/bar.h --adaptable  # reuse [source "owner/lib"]
 git filesync add owner/lib src/ -p lib/util.h         # into an existing directory: src/util.h
 git filesync add https://github.com/owner/lib.git cfg/x.yml --tag v1.2.0
 ```
@@ -609,7 +615,7 @@ what would be moved.
 ### `set`
 
 `set PATH… OPTIONS` – change the link of linked files: their source, their
-tag, their upstream path, whether they are strict. It does for files what
+tag, their upstream path, whether they are adaptable. It does for files what
 [`source`](#source) does for sources: only `.git-filesync` is changed (and
 staged); `status` then shows what changes, and `pull` syncs.
 
@@ -620,7 +626,7 @@ staged); `status` then shows what changes, and `pull` syncs.
 | `--tag TAG` | [pin](#pinning-to-a-tag) the files to TAG (or a [pattern](#tag-patterns)) from now on; the source's branch is where [newer tags](#newer-tags) are looked for. A tag that doesn't exist upstream is refused |
 | `--no-tag` | follow the source's branch again |
 | `-p`, `--path PATH` | another upstream path (exactly one file; `\` counts as `/`, as for `add`) |
-| `--strict`, `--no-strict` | mark the files as [strict](#strict-files), or allow adaptations again |
+| `--adaptable`, `--no-adaptable` | allow [local adaptations](#exact-copies-and-adaptable-files), or not any more (the default) |
 | `-n`, `--dry-run` | only show what would change |
 
 As for [`add`](#add), URL and branch select the `[source]` the files use:
@@ -655,7 +661,7 @@ it still applies, so adaptations stay adaptations:
   renamed upstream doesn't need this: [`pull`](#pull) follows renames.)
 
 ```sh
-git filesync set src/foo.c --strict
+git filesync set src/foo.c --adaptable
 git filesync set src/ --source https://github.com/me/lib-fork.git    # all files below src/
 git filesync set src/foo.c -p lib/foo_v2.c
 git filesync set cfg/ --tag v1.3.0      # pin to v1.3.0 from now on; then pull
@@ -676,7 +682,7 @@ checked and staged, like after [`set`](#set):
 - Without changes, nothing happens.
 
 For the usual changes, the commands that know what they mean are safer:
-[`set`](#set) (source, tag, path, strict of files), [`source`](#source) (URL,
+[`set`](#set) (source, tag, path, adaptable of files), [`source`](#source) (URL,
 branch, name of a source), [`rm`](#rm), [`unlink`](#unlink), [`mv`](#mv). `edit`
 keeps whatever you write: a changed `commit` or `blob` changes what counts
 as an adaptation.
@@ -841,8 +847,8 @@ it to be there.
 ### `hooks`
 
 `hooks install` adds a `pre-push` hook (fetches) and a `post-merge` hook
-(cached state only). Both report pending syncs, errors and strict
-violations on stderr. If a hook of another tool already exists, the lines
+(cached state only). Both report pending syncs, errors and changes not
+allowed (files that aren't adaptable) on stderr. If a hook of another tool already exists, the lines
 to add are printed instead; `hooks install --force` adds them itself, right
 after the `#!` line – before anything else, as needed for `git lfs
 pre-push` (see below) and for hooks that end with `exec` or `exit`. Hooks
@@ -1115,7 +1121,7 @@ state. `--no-fetch` skips the network explicitly.
 
 Output is colored like `git status`: pending upstream changes yellow,
 adaptations cyan (information, not a problem), uncommitted changes red,
-strict violations and errors bold red.
+changes not allowed (files that aren't adaptable) and errors bold red.
 
 Colors follow `color.filesync`, falling back to `color.ui` (default: on for
 terminals); `--color[=always|never|auto]` and `--no-color` override that,
@@ -1144,7 +1150,7 @@ jobs:
 ```
 
 This uses the latest release. To pin a version, download
-`https://github.com/stsichler/git-filesync/releases/download/v0.18.3/git-filesync.py`
+`https://github.com/stsichler/git-filesync/releases/download/v0.19.0/git-filesync.py`
 instead. (For private upstream repositories the job needs a token with read
 access.)
 
@@ -1153,12 +1159,12 @@ access.)
 | Code | Meaning |
 |---|---|
 | `0` | ok |
-| `1` | unfinished: `pull` with conflicts; `status --exit-code` with something to sync (including files deleted upstream) or a strict violation; `diff -- --exit-code` with differences |
+| `1` | unfinished: `pull` with conflicts; `status --exit-code` with something to sync (including files deleted upstream) or a change not allowed (a file that isn't adaptable); `diff -- --exit-code` with differences |
 | `2` | error |
 | `141` | the output went into a pipe that was closed early (`… \| head`, a pager quit), like Git (128 + SIGPIPE); reading commands stop there, the others finish their work first |
 
 `--dry-run` / `-n` exit with 0, or 2 on errors – also for refusals they
-report (`pull --dry-run` on a strict violation, …); expected merge conflicts
+report (`pull --dry-run` on a file that isn't adaptable, …); expected merge conflicts
 are reported but don't change the exit code.
 
 ### Binary files
@@ -1195,7 +1201,7 @@ the same version without installing it:
 
 ```sh
 git filesync add https://github.com/stsichler/git-filesync.git tools/git-filesync.py \
-    -p git-filesync.py --tag v0.18.3 --strict
+    -p git-filesync.py --tag v0.19.0
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
 ```
 

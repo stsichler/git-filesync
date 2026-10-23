@@ -31,7 +31,7 @@
 #    3. Branch name as --commit
 #    4. source map: mappings to local checkouts of an upstream
 #    5. Offline operation
-#    6. diff / difftool / strict files
+#    6. diff / difftool / files that are not adaptable
 #    7. .git-filesync registry: sources, rm, unlink, mv, commit consistency
 #    8. Colors
 #    9. status like 'git status', pull like 'git pull'
@@ -44,7 +44,7 @@
 #   16. Dry runs: pull --dry-run, add / unlink / mv -n
 #   17. add DIR: all files of an upstream directory, --include / --exclude
 #   18. pull -b / --tag: another branch or tag, once; newer tags
-#   19. set: change source, tag, upstream path or strict of linked files
+#   19. set: change source, tag, upstream path or adaptable of linked files
 #   20. cache: show, list and clean up the cache of upstream clones
 #   21. Performance: git processes don't grow with the number of files
 #   22. Closed output pipe; discarded content kept
@@ -230,10 +230,17 @@ pullc src/lib.c >/dev/null
 check "commit msg lists commits" "$(git log -1 --format=%B | grep -c '^- Change')" "2"
 check "after pull" "$(st)" ""
 
-# a committed local adaptation is kept by the next pull (3-way merge)
+# by default a linked file must stay an exact copy: an adaptation is a
+# violation, and pull refuses it
 sedi 's/^g$/G-local/' src/lib.c
 git commit -qam tweak
 up 's/^a$/A/' "Change A"
+check "not adaptable: an adaptation is not allowed" "$(git filesync status -s)" "PM  src/lib.c  (not adaptable!)"
+check "not adaptable: the status names the way out" \
+  "$(git filesync status | grep -c 'git filesync set --adaptable <file>...')" "1"
+check "not adaptable: pull refuses" "$(rc git filesync pull src/lib.c)" "2"
+# adaptable: a committed local adaptation is kept by the next pull (3-way merge)
+quiet git filesync set src/lib.c --adaptable && git commit -qm adaptable
 check "pending + adapted" "$(st)" "PM"
 pullc src/lib.c >/dev/null
 check "clean merge result" "$(oneline < src/lib.c)" "A B C d e f G-local "
@@ -417,7 +424,7 @@ for mode in autocrlf textauto plain; do
     textauto) echo '* text=auto' > .gitattributes; git add .gitattributes ;;
   esac
   git commit -q --allow-empty -m i
-  addc "$URL2" w.c
+  addc --adaptable "$URL2" w.c
   check "$mode: clean after add" "$(st)" ""
 
   # upstream change; git's "CRLF will be replaced by LF" must not appear
@@ -459,7 +466,7 @@ section "3. Branch name as --commit"
 (cd m && git checkout -q -b develop && printf 'x\r\n' > w.c && git commit -qam d1 && git push -q origin develop)
 rm -rf s
 new_repo s
-addc "$URL2" w.c
+addc --adaptable "$URL2" w.c
 (cd ../m && printf 'y\r\n' > w.c && git commit -qam d2 && git push -q origin develop && git checkout -q main)
 quiet pullc --commit develop w.c
 check "--commit <branch> gets current head" "$(tr -d '\r' < w.c)" "y"
@@ -618,7 +625,7 @@ mv m3-away.git m3.git
 
 
 # =============================================================================
-section "6. diff / difftool / strict files"
+section "6. diff / difftool / files that are not adaptable"
 # =============================================================================
 cd "$T"
 
@@ -629,15 +636,15 @@ git config --global difftool.fake.cmd 'echo "TOOL $(basename "$(dirname "$LOCAL"
 git config --global diff.tool fake
 
 # upstream m4 (only reachable via mapping) with lib/foo.c and lib/bar.h;
-# s4 links them as src/foo.c and src/bar.h (strict)
+# s4 links them as src/foo.c (adaptable) and src/bar.h
 git init -q m4
 (cd m4 && mkdir lib && printf 'a\nb\nc\nd\ne\n' > lib/foo.c && printf 'x\n' > lib/bar.h \
   && git add . && git commit -qm init)
 new_repo s4
 git filesync source map file:///nowhere/m4.git "$T/m4" >/dev/null
 mkdir src
-addc file:///nowhere/m4.git src/foo.c -p lib/foo.c
-addc file:///nowhere/m4.git src/bar.h -p lib/bar.h --strict
+addc --adaptable file:///nowhere/m4.git src/foo.c -p lib/foo.c
+addc file:///nowhere/m4.git src/bar.h -p lib/bar.h
 
 # diff: synced version <-> local file
 check "diff: nothing when clean" "$(git filesync diff)" ""
@@ -681,22 +688,22 @@ git config --unset difftool.prompt
 check "difftool prompt names tool" "$(printf 'q\n' | git filesync difftool | grep -c "Launch 'fake'")" "1"
 git checkout -q -- src/bar.h
 
-# strict: any change of src/bar.h is a violation
-check "strict file clean: no violation" "$(st src/bar.h)" ""
+# src/bar.h is not adaptable: any change of it is a violation
+check "not adaptable, clean: no violation" "$(st src/bar.h)" ""
 echo y >> src/bar.h
-check "strict violation reported (uncommitted)" "$(git filesync status -s src/bar.h)" "  M src/bar.h  (strict!)"
-check "strict violation in long format" \
-  "$(git filesync status src/bar.h | grep -cE "^${TAB}modified:[[:space:]]+src/bar\.h  \(NOT ALLOWED: strict\)")" "1"
-check "strict violation exit code" "$(rc git filesync status --exit-code src/bar.h)" "1"
-check "strict violation in hook output" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'NOT ALLOWED')" "1"
-check "pull refuses strict merge" "$(rc pullc src/bar.h)" "2"
-check "strict refusal: how to go on" \
+check "violation reported (uncommitted)" "$(git filesync status -s src/bar.h)" "  M src/bar.h  (not adaptable!)"
+check "violation in long format" \
+  "$(git filesync status src/bar.h | grep -cE "^${TAB}modified:[[:space:]]+src/bar\.h  \(NOT ALLOWED: not adaptable\)")" "1"
+check "violation exit code" "$(rc git filesync status --exit-code src/bar.h)" "1"
+check "violation in hook output" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'NOT ALLOWED')" "1"
+check "pull refuses to merge into a file not adaptable" "$(rc pullc src/bar.h)" "2"
+check "refusal: how to go on" \
   "$(pullc src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or sync anyway with 'git filesync pull --overwrite src/bar.h'")" "1"
-check "pull --all continues after strict error" "$(pullc --all 2>&1 | grep -c '^error:')" "0"
-check "non-strict file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
+check "pull --all continues after the refusal" "$(pullc --all 2>&1 | grep -c '^error:')" "0"
+check "adaptable file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
 git commit -qm "adapt bar" src/bar.h
-check "strict violation (committed)" "$(git filesync status -s src/bar.h)" " M  src/bar.h  (strict!)"
-check "status: restore hint for a strict file" \
+check "violation (committed)" "$(git filesync status -s src/bar.h)" " M  src/bar.h  (not adaptable!)"
+check "status: restore hint for a file not adaptable" \
   "$(git filesync status src/bar.h | grep -c 'use "git filesync restore -SW <file>..." to discard them')" "1"
 
 # restore: back to the synced upstream version, like git restore (default:
@@ -721,7 +728,7 @@ check "restore DIR: deleted file back" "$(git filesync diff src/bar.h) $(ls src/
 git reset -q --hard
 check "restore: not linked" "$(rc git filesync restore README)" "2"
 
-# pull --overwrite restores the upstream version, in strict and other files
+# pull --overwrite restores the upstream version, in files adaptable or not
 quiet pullc --overwrite src/bar.h
 check "pull --overwrite restores" "$(cat src/bar.h)" "x"
 check "overwrite commit message" "$(git log -1 --format=%s)" \
@@ -730,7 +737,7 @@ check "after overwrite clean" "$(st src/bar.h)" ""
 sedi 's/^a$/A-local/' src/foo.c
 git commit -qm 'adapt a' src/foo.c
 quiet pullc --overwrite src/foo.c
-check "--overwrite discards in non-strict file" "$(git filesync diff)" ""
+check "--overwrite discards in an adaptable file" "$(git filesync diff)" ""
 
 
 # =============================================================================
@@ -772,7 +779,7 @@ check "mv: a missing directory is refused, like git mv" \
 printf '*.gen\n' > .git/info/exclude
 echo own > own.gen
 check "add: an ignored file is linked and staged like any other" \
-  "$(rc git filesync add "$SRC" own.gen -p lib/foo.c) $(git status --porcelain own.gen)" "0 A  own.gen"
+  "$(rc git filesync add --adaptable "$SRC" own.gen -p lib/foo.c) $(git status --porcelain own.gen)" "0 A  own.gen"
 git reset -q --hard && rm -f own.gen .git/info/exclude
 check "add: a file where the directory should be" \
   "$(git filesync add -n "$SRC" include/renamed.h/x.h -p lib/foo.c 2>&1 | grep -c "^error: cannot add 'include/renamed.h/x.h': 'include/renamed.h' is not a directory$")" "1"
@@ -835,7 +842,7 @@ git config -f .git-filesync file.src/foo.c.source mylib
 git config -f .git-filesync file.src/bar.h.source mylib
 git commit -qam "rename source"
 check "status -v: source key as label" \
-  "$(git filesync status -v | grep -c 'src/foo.c *(from mylib:lib/foo.c (main)')" "1"
+  "$(git filesync status -v | grep -c 'src/foo.c *(from mylib:lib/foo.c (main, adaptable)')" "1"
 quiet pullc src/foo.c
 check "pull: source key in commit message" \
   "$(git log -1 --format=%s)" "[filesync] Sync src/foo.c from mylib@$(git -C ../m4 log -1 --format=%h -- lib/foo.c)"
@@ -844,15 +851,19 @@ check "add finds the source by URL, not by key" \
   "$(git config -f .git-filesync file.include/x.h.source)" "mylib"
 check "add by URL: no new source" "$(git config -f .git-filesync --get-regexp '^source\..*\.url' | lines)" "1"
 
-# add over an existing, different file: message notes modifications and strict
+# add over an existing, different file: refused by default; --adaptable
+# links it as it is, the differences count as adaptations
 echo mine > include/y.h
-addc --strict mylib include/y.h -p lib/bar.h
+check "add existing, different file: refused" \
+  "$(git filesync add mylib include/y.h -p lib/bar.h 2>&1 | grep -c '^error: include/y.h: differs from upstream .* - use --adaptable to keep it')" "1"
+check "add refused: not linked" "$(git config -f .git-filesync file.include/y.h.path)" ""
+addc --adaptable mylib include/y.h -p lib/bar.h
 check "add existing file: subject" "$(git log -1 --format=%s | sed 's/@[0-9a-f]*$//')" "[filesync] Link include/y.h to mylib"
 check "add existing file: notes" \
-  "$(git log -1 --format=%B | grep -cE '^(Contains local modifications|Strict:)')" "2"
+  "$(git log -1 --format=%B | grep -cE '^(Contains local modifications|Adaptable: local adaptations allowed)')" "2"
 check "add existing file: committed as is" "$(git show HEAD:include/y.h)" "mine"
 check "add existing file: warned" \
-  "$(git filesync add -n --force mylib include/y.h -p lib/bar.h 2>&1 | grep -c '^warning: include/y.h differs from upstream .*--overwrite')" "1"
+  "$(git filesync add -n --force --adaptable mylib include/y.h -p lib/bar.h 2>&1 | grep -c '^warning: include/y.h differs from upstream .*local adaptations')" "1"
 # --overwrite replaces it with the upstream version; --force: it is linked already
 check "add --overwrite of a linked file needs --force" "$(rc git filesync add --overwrite mylib include/y.h -p lib/bar.h)" "2"
 quiet git filesync add --force --overwrite mylib include/y.h -p lib/bar.h
@@ -891,29 +902,29 @@ section "9. status like 'git status', pull like 'git pull'"
 # =============================================================================
 cd "$T"
 
-# upstream m5 with a.c .. e.c (lines 1..5), all linked in s5; e.c is strict
+# upstream m5 with a.c .. e.c (lines 1..5), all linked in s5; e.c is not
+# adaptable, the others are
 git init -q m5
 (cd m5 && for f in a b c d e; do printf '1\n2\n3\n4\n5\n' > $f.c; done && git add . && git commit -qm i)
 new_repo s5
 git filesync source map file:///nowhere/m5.git "$T/m5" >/dev/null
-for f in a b c d e; do
-  quiet git filesync add file:///nowhere/m5.git $f.c
+for f in a b c d; do
+  quiet git filesync add --adaptable file:///nowhere/m5.git $f.c
 done
-git config -f .git-filesync file.e.c.strict true
-git add .git-filesync
+quiet git filesync add file:///nowhere/m5.git e.c
 git commit -qm link
 check "status: clean summary" "$(git filesync status)" "nothing to sync, all 5 linked files unmodified"
 check "status -s: nothing when clean" "$(git filesync status -s)" ""
 
 # one file per combination of the three status columns:
 #   a.c  pending                 d.c  pending + uncommitted change
-#   b.c  pending + adapted       e.c  adapted (strict -> violation)
+#   b.c  pending + adapted       e.c  adapted (not adaptable -> violation)
 #   c.c  adapted + uncommitted change
 (cd ../m5 && sedi 's/^5$/5-up/' a.c b.c d.c && git commit -qam up)
 sedi 's/^1$/1-adapt/' b.c c.c e.c; git commit -qam adapt          # committed adaptations
 sedi 's/^3$/3-wip/' c.c d.c                                          # uncommitted changes
 check "status -s: three columns" "$(git filesync status -s | tr '\n' '|')" \
-  "P   a.c|PM  b.c| MM c.c|P M d.c| M  e.c  (strict!)|"
+  "P   a.c|PM  b.c| MM c.c|P M d.c| M  e.c  (not adaptable!)|"
 
 # long format: sections like git status
 OUT=$(git filesync status)
@@ -922,7 +933,7 @@ check "status: upstream hints, diff first" "$(echo "$OUT" | grep -A2 '^Upstream 
   '  (use "git filesync diff --upstream <file>..." to see what pull would bring)   (use "git filesync pull <file>..." to sync) '
 check "status: commit count" "$(echo "$OUT" | grep -cE "^${TAB}pending:[[:space:]]+b\.c  \(1 commit\)")" "1"
 check "status: adapted section" "$(echo "$OUT" | grep -A6 '^Locally adapted files:' | grep -cE "^${TAB}adapted:")" "3"
-check "status: strict note on adapted" "$(echo "$OUT" | grep -cE "^${TAB}adapted:[[:space:]]+e\.c  \(NOT ALLOWED: strict\)")" "1"
+check "status: not-allowed note on adapted" "$(echo "$OUT" | grep -cE "^${TAB}adapted:[[:space:]]+e\.c  \(NOT ALLOWED: not adaptable\)")" "1"
 check "status: uncommitted section" "$(echo "$OUT" | grep -A5 '^Uncommitted changes:' | grep -cE "^${TAB}modified:")" "2"
 check "status: no 'nothing to sync' when pending" "$(echo "$OUT" | grep -c 'nothing to sync')" "0"
 check "status: exit code 0 like git" "$(rc git filesync status)" "0"
@@ -1041,12 +1052,13 @@ check "glob chars: pull commits only the file" \
 check "glob chars: other file stays uncommitted" "$(git status --porcelain f1.txt)" " M f1.txt"
 git checkout -q -- f1.txt
 
-# 'strict' without a value is true, as everywhere in git config
+# 'adaptable' without a value is true, as everywhere in git config
 echo local >> a.txt
 git commit -qam adapt
+check "adapted, not adaptable" "$(git filesync status -s a.txt)" " M  a.txt  (not adaptable!)"
 sedi '/^\[file "a.txt"\]/a\
-strict' .git-filesync
-check "bare 'strict' means true" "$(git filesync status -s a.txt)" " M  a.txt  (strict!)"
+adaptable' .git-filesync
+check "bare 'adaptable' means true" "$(git filesync status -s a.txt)" " M  a.txt"
 git checkout -q -- .git-filesync
 
 # synced version not readable -> warning, not a silent 'adapted'; --overwrite recovers
@@ -1144,7 +1156,7 @@ if git lfs version >/dev/null 2>&1; then
         [ $dlfs = yes ] && git lfs track d.txt >/dev/null && git add .gitattributes
         git commit -q --allow-empty -m i
         [ $via = map ] && git filesync source map "$TURL/ml.git" "$T/ml" >/dev/null
-        addc "$TURL/ml.git" d.txt
+        addc --adaptable "$TURL/ml.git" d.txt
         check "$tag: content after add" "$(head -1 d.txt)" "l1"
         check "$tag: downstream storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
         check "$tag: clean" "$(st)" ""
@@ -1170,7 +1182,7 @@ if git lfs version >/dev/null 2>&1; then
         git commit -qm i
         [ $via = map ] && git filesync source map "$TURL/ml.git" "$T/ml" >/dev/null
         check "$tag: add over an older version: differs from the head" \
-          "$(git filesync add "$TURL/ml.git" d.txt 2>&1 | grep -c 'd.txt differs from upstream')" "1"
+          "$(git filesync add "$TURL/ml.git" d.txt 2>&1 | grep -c '^error: d.txt: differs from upstream')" "1"
         git reset -q --hard
         quiet git filesync add --overwrite "$TURL/ml.git" d.txt
         git commit -q --no-edit
@@ -1348,7 +1360,7 @@ quiet git filesync add --tag v1 lib9 v1.c -p t.c
 check "add by name with a tag: the file pinned" \
   "$(git config -f .git-filesync file.v1.c.source) $(git config -f .git-filesync file.v1.c.tag)" "lib9 v1"
 check "add by name with a tag: content at the tag" "$(oneline < v1.c)" "1 2 3 "
-quiet git filesync add --force --tag v2 lib9 v1.c -p t.c
+quiet git filesync add --force --overwrite --tag v2 lib9 v1.c -p t.c
 check "relink with another tag" "$(git config -f .git-filesync file.v1.c.tag)" "v2"
 printf '[source "dup"]\n\turl = %s\n\tbranch = main\n' "$URL9" >> .git-filesync
 quiet git filesync add dup v.c -p t.c
@@ -1409,7 +1421,7 @@ git clone -q m10.git co10 2>/dev/null
 URL10=$TURL/m10.git
 
 new_repo s10
-addc "$URL10" r.c -p lib/r.c
+addc --adaptable "$URL10" r.c -p lib/r.c
 addc "$URL10" gone.c -p lib/gone.c
 SRC10=$(git config -f .git-filesync file.r.c.source)
 
@@ -1522,9 +1534,11 @@ check "add DIR again: subject" "$(git log -1 --format=%s | sed 's/@.*//')" "[fil
 check "add DIR: nothing new" "$(git filesync add nowhere/m11 proto "${PROTO[@]}" 2>&1)" \
   "3 files already linked, skipped (use --force to relink)"
 
-# an existing file is linked as it is; '/x.md' is anchored at the directory
+# an existing, different file: refused, or with --adaptable linked as it
+# is; '/x.md' is anchored at the directory
 mkdir docs && echo mine > docs/x.md
-quiet fsd add nowhere/m11 docs --include /x.md && git commit -q --no-edit
+check "add DIR: an existing, different file is refused" "$(rc fsd add nowhere/m11 docs --include /x.md)" "2"
+quiet fsd add --adaptable nowhere/m11 docs --include /x.md && git commit -q --no-edit
 check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
 check "add DIR: existing file adapted" "$(st docs)" " M"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Link docs/x.md to nowhere/m11"
@@ -1563,12 +1577,12 @@ git clone -q m12.git co12 2>/dev/null
 URL12=$TURL/m12.git
 
 new_repo s12
-for f in a b c; do addc --tag v1.0 "$URL12" $f.c; done
+for f in a b c; do addc --adaptable --tag v1.0 "$URL12" $f.c; done
 SRC12=$(git config -f .git-filesync file.a.c.source)
 
 # newer tags by their place in the commit graph, on the source's branch -
 # names are opaque, so a pre-release counts like any tag: status -v, pull
-check "status -v: newest tag" "$(git filesync status -v | grep -c '(tag v1.0 on main, newest v2.0-rc1)')" "3"
+check "status -v: newest tag" "$(git filesync status -v | grep -c '(tag v1.0 on main, newest v2.0-rc1, adaptable)')" "3"
 check "plain status: no hint" "$(git filesync status | grep -c newest)" "0"
 check "source -v: the branch" "$(git filesync source -v)" "$(printf '%s\t%s (main, 3 files)' "$SRC12" "$URL12")"
 check "pull: hint" "$(git filesync pull --all 2>&1 | grep -c "^hint: 3 files pinned to tag v1.0; \
@@ -1583,11 +1597,11 @@ the newest tag on branch main is v2.0-rc1 (use 'git filesync set --tag v2.0-rc1 
   && git tag f1 && git checkout -q main && git merge -q --no-ff -m "merge feature" feature \
   && git tag rel-2 HEAD^1 && git tag v1.2 v1.1 && git push -q origin main maint feature --tags)
 check "branch: only its line, merged side branch ignored" \
-  "$(git filesync status -v | grep -c '(tag v1.0 on main, newest rel-2 = v2.0-rc1)')" "3"
+  "$(git filesync status -v | grep -c '(tag v1.0 on main, newest rel-2 = v2.0-rc1, adaptable)')" "3"
 check "pull: hint, tags on one commit" "$(git filesync pull --all 2>&1 | grep -c "^hint: 3 files pinned \
 to tag v1.0; the newest tag on branch main is rel-2 = v2.0-rc1 (use 'git filesync set --tag rel-2 ")" "1"
 git filesync source set-branch "$SRC12" maint >/dev/null
-check "branch maint" "$(git filesync status -v | grep -c '(tag v1.0 on maint, newest v1.0.1)')" "3"
+check "branch maint" "$(git filesync status -v | grep -c '(tag v1.0 on maint, newest v1.0.1, adaptable)')" "3"
 git filesync set a.c --tag v1.0.1 >/dev/null
 check "newest tag pinned: no newer" "$(git filesync status -v a.c | grep -c newest)" "0"
 git filesync source set-branch "$SRC12" main >/dev/null
@@ -1607,7 +1621,7 @@ git commit -qm "pinned to v1.0 on main"
 (cd ../co12 && git tag local-3)
 git filesync source map "$URL12" "$T/co12" >/dev/null
 check "mapped: newest tag from the checkout" \
-  "$(git filesync status -v | grep -c '(tag v1.0 on main, newest local-3)')" "3"
+  "$(git filesync status -v | grep -c '(tag v1.0 on main, newest local-3, adaptable)')" "3"
 git filesync source map "$URL12" --unset >/dev/null
 (cd ../co12 && git tag -d local-3 >/dev/null)
 
@@ -1639,7 +1653,7 @@ check "-b: registry unchanged" \
 
 # refusals and dry runs change nothing
 check "pull -v: where from, synced so far" "$(git filesync pull -v -n a.c | head -1)" \
-  "a.c: from $SRC12:a.c (tag v1.0 on main, newest rel-2 = v2.0-rc1), synced at $(git -C ../co12 log -1 --format=%h main -- a.c)"
+  "a.c: from $SRC12:a.c (tag v1.0 on main, newest rel-2 = v2.0-rc1, adaptable), synced at $(git -C ../co12 log -1 --format=%h main -- a.c)"
 check "pull -v: syncs too" \
   "$(git filesync pull -v a.c >/dev/null 2>&1; echo $?) $(git diff --cached --name-only | oneline)" \
   "0 .git-filesync a.c "
@@ -1720,7 +1734,7 @@ git checkout -q .git-filesync
 
 
 # =============================================================================
-section "19. set: change source, tag, upstream path or strict of linked files"
+section "19. set: change source, tag, upstream path or adaptable of linked files"
 # =============================================================================
 cd "$T"
 
@@ -1747,16 +1761,15 @@ SRC13=$(git config -f .git-filesync file.a.c.source)
 COMMIT13=$(git config -f .git-filesync file.a.c.commit)
 
 check "set: nothing to change" "$(rc git filesync set a.c)" "2"
-check "set --strict" "$(git filesync set a.c --strict | head -1)" "a.c: strict"
-check "set --strict: entry" "$(git config -f .git-filesync file.a.c.strict)" "true"
+check "set --adaptable" "$(git filesync set a.c --adaptable | head -1)" "a.c: adaptable"
+check "set --adaptable: entry" "$(git config -f .git-filesync file.a.c.adaptable)" "true"
 check "set: only staged" "$(git status --porcelain | oneline) $(git log -1 --format=%s | cut -c1-16)" "M  .git-filesync  [filesync] Add b"
-check "set --strict again: nothing" "$(git filesync set a.c --strict)" "nothing to change"
-check "set --no-strict" "$(git filesync set a.c --no-strict | head -1) $(git config -f .git-filesync file.a.c.strict)" "a.c: not strict "
-quiet git filesync set a.c --strict
+check "set --adaptable again: nothing" "$(git filesync set a.c --adaptable)" "nothing to change"
+check "set --no-adaptable" "$(git filesync set a.c --no-adaptable | head -1) $(git config -f .git-filesync file.a.c.adaptable)" "a.c: not adaptable "
 echo z >> a.c
-git commit -qam "adapt strict file"
-check "strict refusal names set --no-strict" \
-  "$(pullc a.c 2>&1 | grep -c "'git filesync set --no-strict a.c'")" "1"
+git commit -qam "adapt a file that isn't adaptable"
+check "refusal names set --adaptable" \
+  "$(pullc a.c 2>&1 | grep -c "'git filesync set --adaptable a.c'")" "1"
 git reset -q --hard HEAD~1
 
 # another upstream path: the synced version is looked up as for add
@@ -1802,19 +1815,19 @@ check "set -b: an unknown branch is refused" "$(rc git filesync set b.c -b other
 
 # dry run changes nothing
 git commit -qm tag
-check "set -n" "$(git filesync set a.c --strict -n)" "would: a.c: strict"
+check "set -n" "$(git filesync set a.c --adaptable -n)" "would: a.c: adaptable"
 check "set -n: nothing changed" "$(git status --porcelain)" ""
 
 # edit: .git-filesync in the editor (here: scripts as GIT_EDITOR), then
 # checked and staged
 check "edit without changes" "$(git filesync edit)" ".git-filesync: no changes"
 check "edit: failing editor" "$(GIT_EDITOR=false git filesync edit 2>&1)" "error: the editor failed; nothing staged"
-printf 'git config -f "$1" file.a.c.strict true\n' > "$T/ed-strict.sh"
-OUT=$(GIT_EDITOR="sh $T/ed-strict.sh" git filesync edit 2>&1)
-check "edit: change staged" "$(git diff --cached --name-only) $(git config -f .git-filesync file.a.c.strict)" \
+printf 'git config -f "$1" file.a.c.adaptable true\n' > "$T/ed-adaptable.sh"
+OUT=$(GIT_EDITOR="sh $T/ed-adaptable.sh" git filesync edit 2>&1)
+check "edit: change staged" "$(git diff --cached --name-only) $(git config -f .git-filesync file.a.c.adaptable)" \
   ".git-filesync true"
 check "edit: says so" "$(echo "$OUT" | grep -c '^.git-filesync staged')" "1"
-git commit -qm "strict by edit"
+git commit -qm "adaptable by edit"
 printf 'git config -f "$1" --unset source.%s.url\n' "$SRC13" > "$T/ed-nourl.sh"
 check "edit: gaps are warned about" \
   "$(GIT_EDITOR="sh $T/ed-nourl.sh" git filesync edit 2>&1 | grep -c "warning: .git-filesync: \[source \"$SRC13\"\] has no url")" "1"
@@ -2049,7 +2062,7 @@ git commit -qam rename
 printf '.git-filesync eol=crlf\n' > .gitattributes && git add .gitattributes
 awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
 git commit -qam crlf
-quiet git filesync set y.c --strict
+quiet git filesync set y.c --adaptable
 check "eol=crlf: .git-filesync stays CRLF, only the changed line" \
   "$(nocr .git-filesync) $(git diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' ')" "0 1 0"
 git reset -q --hard
@@ -2057,7 +2070,7 @@ new_repo "$T/s23a"
 git config core.autocrlf true
 addc "$TURL/m23.git" a.c
 tr -d '\r' < .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
-quiet git filesync set a.c --strict
+quiet git filesync set a.c --adaptable
 git add .git-filesync 2> "$T/warn23"
 check "autocrlf: an LF .git-filesync becomes CRLF, git doesn't warn" \
   "$(nocr .git-filesync) $(grep -c 'will be replaced' "$T/warn23")" "0 0"

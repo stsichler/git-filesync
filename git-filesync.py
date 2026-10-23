@@ -23,13 +23,14 @@ upstream repository:
         path = lib/foo.c       ; path in the upstream repository
         tag = v1.2             ; optional: pinned to the tag (with * ? [...]:
                                ; the newest matching tag on the branch)
-        strict = true          ; optional: no local modifications allowed
+        adaptable = true       ; optional: local adaptations allowed
         commit = <upstream commit of the last sync>
         blob = <blob id of the upstream file at that commit>
 
-A link records the upstream version the file is based on (commit/blob);
+A link records the upstream version the file is based on (commit/blob).
+A file must stay an exact copy of it, unless it is marked adaptable: then
 local adaptations on top of it are allowed and kept by a 3-way merge on
-pull, unless the file is marked strict.
+pull.
 
 Commands (run inside the repository; without a command: status).
 PATH may be a file or a directory (= all linked files below it); options
@@ -52,8 +53,8 @@ Basic commands:
                                 (pinned ones with the newest tag: the first
                                 tagged commit after theirs on the source
                                 branch's first-parent line)
-        --exit-code             exit 1 if something is to sync or a strict
-                                file is modified
+        --exit-code             exit 1 if something is to sync or a file
+                                that isn't adaptable is modified
 
     pull PATH... | --all        sync to the upstream version of the files and
                                 stage them, like `git merge --squash`; the
@@ -94,7 +95,8 @@ Basic commands:
 
     restore PATH...             restore files to the synced upstream version
                                 (the base), like `git restore`; e.g. to
-                                discard adaptations of a strict file;
+                                discard changes to a file that isn't
+                                adaptable;
                                 uncommitted content is kept as a blob
                                 (`discarded: FILE (git show ID ...)`)
         -S, --staged            restore the index instead of the working tree
@@ -106,8 +108,10 @@ Basic commands:
                                 source with that URL and branch/tag, else a
                                 new one named 'owner/repo' after the URL, with
                                 a number appended if taken); the base is the
-                                upstream head (or --commit): an existing FILE
-                                is kept, its differences count as adaptations;
+                                upstream head (or --commit); a FILE that
+                                exists must be that version (else refused:
+                                --adaptable keeps it, its differences count
+                                as adaptations; --overwrite replaces it);
                                 a missing FILE is fetched (its directory must
                                 exist, as for cp); FILE and
                                 .git-filesync are staged like `git add` - a
@@ -130,7 +134,8 @@ Basic commands:
                                 of the head
         --overwrite             replace an existing FILE with the upstream
                                 version (uncommitted content: as restore)
-        --strict                FILE must stay an exact copy
+        --adaptable             local adaptations allowed (default: FILE
+                                must stay an exact copy)
         --force                 relink an already linked file
         -n, --dry-run           only show what would be linked
 
@@ -164,7 +169,7 @@ Advanced commands:
         --no-tag                follow the source's branch again
         -p, --path PATH         another upstream path (one file); its
                                 current version becomes the base, as for add
-        --strict, --no-strict   mark as strict / allow adaptations again
+        --adaptable, --no-adaptable  allow local adaptations / not any more
         -n, --dry-run           only show what would change
 
     edit                        open .git-filesync in the editor (like `git
@@ -206,8 +211,8 @@ Advanced commands:
                                 installed, outdated, not installed, or
                                 hooks of other tools without our lines
     hooks install               install the hooks (or update them):
-                                reminders about pending syncs, strict
-                                violations, errors; pre-push also warns if a
+                                reminders about pending syncs, changes
+                                not allowed, errors; pre-push also warns if a
                                 pushed file is synced to an upstream commit
                                 that isn't on the upstream server
                                 (filesync.pushCheck = warn | error, which
@@ -260,7 +265,7 @@ from typing import Optional
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.18.3"
+__version__ = "0.19.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -2095,9 +2100,10 @@ class Link:
     blob = property(lambda self: self.v.get("blob", ""))
 
     @property
-    def strict(self):
-        """The file must stay an exact copy of the upstream version."""
-        return self.v.get("strict", "").lower() in ("true", "yes", "on", "1")
+    def adaptable(self):
+        """Local adaptations allowed; otherwise the file must stay an exact
+        copy of the upstream version (the default)."""
+        return self.v.get("adaptable", "").lower() in ("true", "yes", "on", "1")
 
     def set(self, name, value):
         self.reg.set_file(self.rel, name, value)
@@ -2177,7 +2183,7 @@ class FileState:
     old: str                  # synced upstream commit and blob (the base)
     old_blob: str
     new_path: str             # upstream path, the new one if renamed there
-    strict: bool
+    adaptable: bool           # local adaptations allowed (else: an exact copy)
     error: Optional[str] = None
     warnings: list = field(default_factory=list)
     src: object = None        # Source of the upstream repository
@@ -2196,7 +2202,7 @@ class FileState:
     head_blob: Optional[str] = None
     changed: bool = False     # upstream version differs from the base
     pending: bool = False     # something for pull to do
-    violation: bool = False   # strict file modified
+    violation: bool = False   # modified, but not adaptable
     once: Optional[str] = None  # pull -b/--tag: the branch or tag synced to, once
     target: Optional[str] = None    # ... and its commit
 
@@ -2263,7 +2269,7 @@ def evaluate(ctx, repo, link):
     local     - working file vs. synced upstream version ('clean' | 'modified'
                 | 'missing'); what a pull has to merge"""
     st = FileState(link=link, rel=link.rel, old=link.commit, old_blob=link.blob,
-                   new_path=link.path, strict=link.strict)
+                   new_path=link.path, adaptable=link.adaptable)
     url, ref, path = link.url, link.ref, link.path
     problem = path_problem(link.rel)
     if problem:
@@ -2315,7 +2321,7 @@ def evaluate(ctx, repo, link):
     except FsError as e:
         st.error = str(e)
         return st
-    st.violation = st.strict and (st.committed == "adapted" or st.local == "modified")
+    st.violation = not st.adaptable and (st.committed == "adapted" or st.local == "modified")
     where = f"{ref[0]} '{ref[1]}'"
     tip = src.resolve()
     if not tip:
@@ -2400,7 +2406,7 @@ def upstream_state(st):
 def violation_text(st):
     what = (["adapted"] if st.committed == "adapted" else []) + \
         (["uncommitted changes"] if st.worktree != "clean" and st.local == "modified" else [])
-    return f"{', '.join(what) or 'local modifications'} NOT ALLOWED (strict)"
+    return f"{', '.join(what) or 'local modifications'} NOT ALLOWED (not adaptable)"
 
 
 def describe(st):
@@ -2464,17 +2470,17 @@ def print_short(repo, sts):
             line = paint(code[0], "yellow") + paint(code[1], "cyan") + paint(code[2], "red")
             if code[0] == "E":
                 line = paint(code, "boldred")
-            print(f"{line} {shown(repo, st.rel)}" + (paint("  (strict!)", "boldred") if st.violation else ""))
+            print(f"{line} {shown(repo, st.rel)}" + (paint("  (not adaptable!)", "boldred") if st.violation else ""))
 
 
 def link_text(st):
     """Where a linked file comes from, for status -v and pull -v."""
     via = f" via {st.src.label}" if st.src and st.src.local else ""
-    strict = ", strict" if st.strict else ""
+    adaptable = ", adaptable" if st.adaptable else ""
     newest = f", newest {newest_text(st.newest, st.link.line)}" if st.newest else ""
     names = st.src.tag_names if st.src else None
     return (f"from {st.link.name}:{st.link.path} "
-            f"({ref_text(st.link.ref, st.link.line, names)}{newest}{strict}){via}")
+            f"({ref_text(st.link.ref, st.link.line, names)}{newest}{adaptable}){via}")
 
 
 def print_long(repo, sts, verbose):
@@ -2510,13 +2516,15 @@ def print_long(repo, sts, verbose):
                if any(r[0] == "deleted" for r in up_rows) else []),
             up_rows, "yellow")
 
-    strict_note = ("NOT ALLOWED: strict", "boldred")
+    not_allowed = ("NOT ALLOWED: not adaptable", "boldred")
     adapted = [st for st in ok if st.committed == "adapted"]
     section("Locally adapted files:",
             ['use "git filesync diff --committed <file>..." to see the adaptations']
-            + (['use "git filesync restore -SW <file>..." to discard them']
-               if any(st.strict for st in adapted) else []),
-            [("adapted", st.rel) + (strict_note if st.strict else (None, None)) for st in adapted],
+            + (['use "git filesync restore -SW <file>..." to discard them, or '
+                '"git filesync set --adaptable <file>..." to allow them']
+               if any(not st.adaptable for st in adapted) else []),
+            [("adapted", st.rel) + ((None, None) if st.adaptable else not_allowed)
+             for st in adapted],
             "cyan")
 
     labels = {"modified": "modified", "deleted": "deleted", "added": "new file"}
@@ -2525,7 +2533,7 @@ def print_long(repo, sts, verbose):
             ['use "git filesync diff <file>..." to see all local changes',
              'use "git restore <file>..." to discard uncommitted changes'],
             [(labels[st.worktree], st.rel) +
-             (strict_note if st.strict and st.local == "modified" else (None, None))
+             (not_allowed if not st.adaptable and st.local == "modified" else (None, None))
              for st in dirty], "red")
 
     warnings = [(st.rel, w) for st in ok for w in st.warnings]
@@ -2548,7 +2556,7 @@ def print_long(repo, sts, verbose):
 
 def cmd_status(ctx, repo, args):
     """Like `git status`: exit code 0 unless --exit-code (1 = something to
-    sync or a strict violation) or an error (2)."""
+    sync or a change not allowed) or an error (2)."""
     reg = Registry(repo)
     links = select_links(repo, reg, args.paths)
     if not links:
@@ -2715,13 +2723,13 @@ def pull_one(repo, reg, st, args):
                       f"'git filesync rm {rel}'")
     local_mod = st.local == "modified"
     discard = args.overwrite and local_mod
-    if st.strict and local_mod and not discard:
+    if not st.adaptable and local_mod and not discard:
         rel = path_arg(repo, st.rel)
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {rel}'; discard them with "
                       f"'git filesync restore -SW {rel}', or sync anyway with "
                       f"'git filesync pull --overwrite {rel}'; or allow them with "
-                      f"'git filesync set --no-strict {rel}'")
+                      f"'git filesync set --adaptable {rel}'")
     if new_blob == st.old_blob and path == link.path and st.worktree != "missing" \
             and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
@@ -3159,7 +3167,7 @@ def find_base(repo, src, rev, rel, path, target, overwrite=False):
 Planned = namedtuple("Planned", "rel path commit blob content modified replaced")
 
 
-def build_add_message(plan, src, name, url, ref, mpath, relink, strict, at):
+def build_add_message(plan, src, name, url, ref, mpath, relink, adaptable, at):
     """Commit message for add; plan: [Planned]; at: the upstream revision a
     directory was linked at."""
     fetched = all(p.content is not None and not p.replaced for p in plan)
@@ -3183,8 +3191,8 @@ def build_add_message(plan, src, name, url, ref, mpath, relink, strict, at):
         lines += ["", "Contains local modifications of this repository."]
     if len(plan) == 1 and plan[0].replaced:
         lines += ["", "The existing file was replaced by the upstream version."]
-    if strict:
-        lines += ["", "Strict: must stay an exact copy of the upstream version."]
+    if adaptable:
+        lines += ["", "Adaptable: local adaptations allowed."]
     return "\n".join(lines) + "\n"
 
 
@@ -3228,13 +3236,20 @@ def cmd_add(ctx, repo, args):
         require_dir(repo, target.parent, rel)   # like cp
         plan = [Planned(rel, path, *find_base(repo, src, at or head, rel, path, target,
                                               args.overwrite))]
+    # an existing file must be the upstream version - unless it may be adapted
     modified = [p for p in plan if p.modified]
     if modified:
+        base = src.short(at or head)
         what = modified[0].rel if len(plan) == 1 else \
             plural(len(modified), "existing file") + (f" below {rel}" if rel != "." else "")
-        warn(f"{what} differ{'s' if len(modified) == 1 else ''} from upstream "
-             f"{src.short(at or head)}; the differences count as local adaptations (use "
-             "--overwrite to take the upstream version, or --commit to choose another one)")
+        if not args.adaptable:
+            it = "it" if len(modified) == 1 else "them"
+            raise FsError("".join(f"{p.rel}: differs from upstream {base}\n" for p in modified[:-1])
+                          + f"{modified[-1].rel}: differs from upstream {base} - use --adaptable "
+                          f"to keep {it} (the differences become local adaptations), --overwrite "
+                          f"to take the upstream version, or --commit to base {it} on another one")
+        warn(f"{what} differ{'s' if len(modified) == 1 else ''} from upstream {base}; "
+             "the differences count as local adaptations")
     rels = [p.rel for p in plan]
     name = named or reg.source_name(url, branch)
     shown_ref = ref_text(ref, line, src.tag_names)
@@ -3260,8 +3275,8 @@ def cmd_add(ctx, repo, args):
             link.set(k, v)
         if args.tag:
             link.set("tag", args.tag)
-        if args.strict:
-            link.set("strict", "true")
+        if args.adaptable:
+            link.set("adaptable", "true")
         if p.content is not None:
             fetched.append((p.rel, repo.normalize(p.content, p.rel)))
     # fetched files written and staged at once; existing ones staged as
@@ -3280,7 +3295,7 @@ def cmd_add(ctx, repo, args):
               f"file{'s' if len(rels) > 1 else ''} unchanged, nothing to commit")
         return EXIT_OK
     # staged only, like git add; the proposed message is prepared for the commit
-    msg = build_add_message(plan, src, name, url, ref, path, relink, args.strict, at or head)
+    msg = build_add_message(plan, src, name, url, ref, path, relink, args.adaptable, at or head)
     msg_name = rels[0] if len(rels) == 1 else (rel if rel != "." else "root")
     report_staged(repo, msg_name, msg, paint("staged", "green"))
     return EXIT_OK
@@ -3534,7 +3549,7 @@ def keep_base(src, link):
 
 def cmd_set(ctx, repo, args):
     """Change the link of linked files - their source (URL and branch), tag,
-    upstream path or strict flag. A file uses the [source] with its URL and
+    upstream path or whether it is adaptable. A file uses the [source] with its URL and
     branch: found, created, or - when all files of a source move - that
     source changed; one left without files is removed. Only .git-filesync
     is changed (and staged); the synced version (the base) is kept where it
@@ -3542,9 +3557,9 @@ def cmd_set(ctx, repo, args):
     another upstream that has it (a fork, a moved repository); with another
     path it is looked up like for add."""
     if not (args.source or args.branch or args.tag or args.no_tag or args.path
-            or args.strict is not None):
+            or args.adaptable is not None):
         raise FsError("nothing to change: give --source, -b, --tag/--no-tag, -p or "
-                      "--strict/--no-strict")
+                      "--adaptable/--no-adaptable")
     reg = Registry(repo)
     reg.dry_run = args.dry_run
     links = select_links(repo, reg, args.files)
@@ -3627,11 +3642,11 @@ def cmd_set(ctx, repo, args):
             for k, v in (("path", path), ("commit", commit), ("blob", blob)):
                 lk.set(k, v)
             changed = True
-    if args.strict is not None:
+    if args.adaptable is not None:
         for lk in links:
-            if lk.strict != args.strict:
-                lk.set("strict", "true" if args.strict else None)
-                print(f"{would}{lk.rel}: {'strict' if args.strict else 'not strict'}")
+            if lk.adaptable != args.adaptable:
+                lk.set("adaptable", "true" if args.adaptable else None)
+                print(f"{would}{lk.rel}: {'adaptable' if args.adaptable else 'not adaptable'}")
                 changed = True
     if not changed:
         print("nothing to change")
@@ -3917,7 +3932,7 @@ def cmd_cache(args):
 
 def hook_reminders(ctx, repo):
     """Terse notes on stderr about linked files needing attention: something
-    to sync, a strict violation, an error."""
+    to sync, a change not allowed, an error."""
     links = Registry(repo).links()
     prefetch(ctx, repo, links)
     sts = [evaluate(ctx, repo, link) for link in links]
@@ -3929,7 +3944,7 @@ def hook_reminders(ctx, repo):
         print("filesync: run 'git filesync pull <file>' to sync", file=sys.stderr)
     if any(st.violation for st in attention):
         print("filesync: see 'git filesync status' and 'git filesync diff <file>' "
-              "for strict violations", file=sys.stderr)
+              "for changes not allowed", file=sys.stderr)
 
 
 def pushed_revs(hook_args):
@@ -4250,7 +4265,8 @@ def run(argv=None):
     p.add_argument("-v", "--verbose", action="store_true",
                    help="also list all linked files with their sources")
     p.add_argument("--exit-code", action="store_true",
-                   help="exit with 1 if something is to sync or a strict file is modified")
+                   help="exit with 1 if something is to sync or a file that isn't adaptable is "
+                        "modified")
 
     p = add_command(sub, "pull", parents=[common], help="sync file(s) from upstream")
     p.add_argument("files", nargs="*", metavar="PATH", help="linked files or directories")
@@ -4318,11 +4334,11 @@ def run(argv=None):
     p.add_argument("--overwrite", action="store_true",
                    help="replace an existing file with the upstream version")
     p.add_argument("--force", action="store_true", help="relink an already linked file")
-    p.add_argument("--strict", action="store_true",
-                   help="file must stay an exact copy (no local modifications)")
+    p.add_argument("--adaptable", action="store_true",
+                   help="local adaptations allowed (default: the file must stay an exact copy)")
 
     p = add_command(sub, "set", parents=[common], help="change the link of linked files: source, "
-                                                     "tag, upstream path, strict")
+                                                     "tag, upstream path, adaptable")
     p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
     p.add_argument("--source", metavar="URL|SOURCE",
                    help="take the files from another upstream (a fork, a moved repository), "
@@ -4338,10 +4354,10 @@ def run(argv=None):
     p.add_argument("-p", "--path", help="another upstream path (one file); its current "
                                         "version becomes the base, as for add")
     g = p.add_mutually_exclusive_group()
-    g.add_argument("--strict", action="store_const", const=True,
-                   help="the files must stay exact copies")
-    g.add_argument("--no-strict", dest="strict", action="store_const", const=False,
-                   help="allow local adaptations again")
+    g.add_argument("--adaptable", action="store_const", const=True,
+                   help="allow local adaptations")
+    g.add_argument("--no-adaptable", dest="adaptable", action="store_const", const=False,
+                   help="the files must stay exact copies again (the default)")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
 
     add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then check "

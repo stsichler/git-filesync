@@ -50,7 +50,7 @@ way.
 |---|---|---|
 | Unit | a whole repository, in its own directory | single files, each at any path in your repository |
 | What your repository contains | a pointer to a commit in the other repository | a real copy of the file, committed like any other file |
-| Local changes | made and committed in the other repository | allowed in your repository as committed adaptations, kept on every sync by a 3-way merge – or forbidden per file (`strict`) |
+| Local changes | made and committed in the other repository | a linked file stays an exact copy by default; per file allowed as committed adaptations (`adaptable`), kept on every sync by a 3-way merge |
 | Cloning and building | needs `--recurse-submodules` and access to every submodule repository | a plain clone is complete and works on its own, even if an upstream repository is no longer reachable |
 | Updating | moves the pointer; your log shows only the new commit id | `pull` per file; the commit contains the actual change, its proposed message lists the upstream commits it brings |
 | For everyone else | `git submodule update` after clones, pulls and branch switches | nothing – only whoever syncs needs git-filesync |
@@ -86,8 +86,9 @@ afterwards.
   (`v1.*`); `pull --tag` tries another tag once
 - Proposed commit message lists all upstream commits touching the file since
   the last sync
-- Local adaptations on top of the upstream version are kept via 3-way merge,
-  shown with `diff` / `difftool` – or forbidden per file (`strict`)
+- Linked files stay exact copies by default; files marked `adaptable` may
+  carry local adaptations, kept via 3-way merge, shown with `diff` /
+  `difftool`
 - Files renamed upstream are followed, deleted ones reported
 - Commands named like Git commands behave like them (`status`, `pull`,
   `diff`, `difftool`, `restore`, `rm`, `mv`); dry runs for `pull`, `add`,
@@ -129,7 +130,7 @@ your `PATH`. Either way the tool is invoked as `git filesync …`; check with
 changes of each version.
 
 You can also clone the repository and point the alias at the script in
-it: `main` is the current development state, a tag like `v0.18.3` a
+it: `main` is the current development state, a tag like `v0.19.0` a
 release. Or let git-filesync keep a copy of itself in your project, so
 everyone has the same version – see
 [Shipping git-filesync with your repository](MANUAL.md#shipping-git-filesync-with-your-repository).
@@ -186,7 +187,7 @@ Advanced commands:
 
 | Command | Purpose |
 |---|---|
-| `set PATH… OPTIONS` | change source, upstream path or strict of linked files |
+| `set PATH… OPTIONS` | change source, upstream path or adaptable of linked files |
 | `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
 | `source [ACTION …]` | list and add sources; rename, change URL or branch |
 | `source map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
@@ -195,7 +196,7 @@ Advanced commands:
 
 `git filesync <command> -h` describes a command and lists its options. The
 **[manual](MANUAL.md)** describes all commands and options in detail,
-along with the `.git-filesync` file, local modifications, strict files,
+along with the `.git-filesync` file, exact copies and adaptable files,
 local checkouts, Git LFS, line endings and CI.
 
 ## Development
@@ -207,8 +208,8 @@ test/regress.sh            # Linux/macOS (bash); needs git, python3, git-lfs for
 ```
 
 The script builds throwaway upstream/downstream repositories in a temp directory
-and checks linking, status, pull, merge, conflicts, diff / difftool, strict
-files, `.git-filesync` handling (sources, unlink, mv, commit consistency),
+and checks linking, status, pull, merge, conflicts, diff / difftool, exact
+copies and adaptable files, `.git-filesync` handling (sources, unlink, mv, commit consistency),
 unsafe registry entries, wildcard characters in file names, local checkout
 mappings, offline operation, eol handling (autocrlf /
 text=auto / plain), Git LFS in all combinations, colors, hooks, tags,
