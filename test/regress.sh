@@ -2017,6 +2017,15 @@ git commit -q --no-edit
 quiet git filesync source rename "$(git config -f .git-filesync file.y.c.source)" mine23
 check "source rename: the header keeps its comment" "$(grep -c '^\[source "mine23"\]   # our upstream$' .git-filesync)" "1"
 check "source rename: the entries follow" "$(git config -f .git-filesync file.y.c.source) $(st y.c)" "mine23 "
+# a .git-filesync with CRLF line ends (an editor on Windows) keeps them:
+# a change is one line, not the whole file
+git commit -qam rename
+awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
+git -c core.autocrlf=false commit -qam crlf
+quiet git filesync set y.c --strict
+check "CRLF .git-filesync: only the changed line" \
+  "$(git -c core.autocrlf=false diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' ')" "1 0"
+git reset -q --hard
 cd "$T/s23"
 
 if ln -s x "$T/lncheck" 2>/dev/null && [ -L "$T/lncheck" ]; then

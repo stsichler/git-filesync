@@ -1918,7 +1918,10 @@ class Registry:
         self._pending = {}        # ("file" | "source", name, key) -> value, see _set
         self._drop = set()        # (section, name): sections to remove, see remove_file
         self._renames = {}        # (section, old name) -> new name, see _rename
+        self._eol = None          # line ends of the file as it was (see finish)
         if self.path.exists():
+            first = self.path.read_bytes().split(b"\n", 1)[0]
+            self._eol = b"\r\n" if first.endswith(b"\r") else b"\n"
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
             if p.returncode:
                 raise FsError(f"{REGISTRY}: cannot parse: "
@@ -2050,11 +2053,19 @@ class Registry:
             git(["config", "-f", self.path, f"{sect}.{name}.{k}", v])
 
     def finish(self):
-        """Fix line endings and stage the registry (or its removal when empty)."""
+        """Fix line endings and stage the registry (or its removal when
+        empty): a file that was there keeps its own (e.g. CRLF from an
+        editor on Windows), a new one gets those of a checkout here."""
         self.flush()
         if self.path.exists():
             if not self.sources and not self.files:
                 self.path.unlink()
+            elif self._eol:
+                data = self.path.read_bytes()
+                lf = data.replace(b"\r\n", b"\n")
+                eol = lf if self._eol == b"\n" else lf.replace(b"\n", b"\r\n")
+                if eol != data:
+                    self.path.write_bytes(eol)
             else:
                 self.repo.fix_eol(self.path)
         self.repo.git(["add", "-A", "--", REGISTRY])
