@@ -684,7 +684,8 @@ change only the lines they have to. A changed value keeps the indentation,
 spacing and comment of its line, a renamed entry the comment of its header.
 A removed entry takes its header, its keys and the lines between them
 along; comments and blank lines after its last key stay – e.g. one that
-introduces the next entry.
+introduces the next entry. The line ends stay too (see [Line
+endings](#line-endings)).
 
 ### `source`
 
@@ -1091,6 +1092,12 @@ upstream, `core.autocrlf` or `text=auto` downstream). The upstream content
 is always compared and merged in the form the downstream repository would
 store it, and written as a checkout there would produce it – no false
 "local modifications", no eol-only conflicts.
+
+`.git-filesync` keeps its own line ends: lines the commands add get the
+ones most of its lines have (CRLF from an editor on Windows stays CRLF),
+the others keep theirs. Only where git stores the file the same either way
+(`core.autocrlf`, a `text` attribute) does it get the line ends of a
+checkout, so that git doesn't warn about them.
 
 ### Offline operation
 

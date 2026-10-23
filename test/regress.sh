@@ -2023,9 +2023,42 @@ git commit -qam rename
 awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
 git -c core.autocrlf=false commit -qam crlf
 quiet git filesync set y.c --strict
-check "CRLF .git-filesync: only the changed line" \
-  "$(git -c core.autocrlf=false diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' ')" "1 0"
+nocr() { awk '!/\r$/' .git-filesync | lines; }           # lines without CRLF
+numstat() { git -c core.autocrlf=false diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' '; }
+check "CRLF .git-filesync: only the changed line" "$(numstat) $(nocr)" "1 0 0"
 git reset -q --hard
+(cd ../m23 && echo d >> a.c && git commit -qam d && git push -q ../m23.git main)
+quiet git filesync pull y.c
+check "CRLF: a changed value, in its own line" "$(numstat) $(nocr)" "2 2 0"
+git reset -q --hard
+quiet git filesync add "$TURL/m23.git" v.c -p a.c
+check "CRLF: a new entry, with CRLF" "$(numstat | cut -d' ' -f2) $(nocr)" "0 0"
+git commit -q --no-edit
+quiet git filesync unlink v.c
+check "CRLF: a removed entry" "$(numstat | cut -d' ' -f1) $(nocr)" "0 0"
+git reset -q --hard
+# an unusual layout (a section twice): written with git config, which
+# writes LF - its lines get CRLF too
+printf '[file "y.c"]\r\n' >> .git-filesync && git -c core.autocrlf=false commit -qam twice
+quiet git filesync set y.c --strict
+check "CRLF, written with git config: only the changed line" "$(numstat) $(nocr)" "1 0 0"
+git reset -q --hard
+# mixed line ends (an LF line among CRLF ones): each line keeps its own
+awk 'NR == 1 { sub(/\r$/, "") } { print }' .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
+git -c core.autocrlf=false commit -qam mixed
+quiet git filesync set y.c --strict
+check "mixed line ends: only the changed line" "$(numstat) $(nocr)" "1 0 1"
+git reset -q --hard
+# with core.autocrlf, a .git-filesync with LF gets the line ends of a
+# checkout: git stores it the same, and doesn't warn about it any more
+new_repo "$T/s23a"
+git config core.autocrlf true
+addc "$TURL/m23.git" a.c
+tr -d '\r' < .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
+quiet git filesync set a.c --strict
+check "autocrlf: LF .git-filesync gets CRLF, git sees one line" \
+  "$(nocr) $(git diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' ')" "0 1 0"
+cd "$T/s23c"
 cd "$T/s23"
 
 if ln -s x "$T/lncheck" 2>/dev/null && [ -L "$T/lncheck" ]; then

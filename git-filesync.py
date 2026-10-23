@@ -1689,11 +1689,18 @@ class Repo:
         return bool(self.is_plain(rel)) and b"\r" not in data and not lfs_pointer(data)
 
     def fix_eol(self, path):
-        """Rewrite a file written by `git config -f` (LF) in working tree form,
-        so core.autocrlf repositories don't warn about it."""
-        data = path.read_bytes().replace(b"\r\n", b"\n")
-        conv = self.to_worktree(data, self.rel(path))
-        if conv != path.read_bytes():
+        """Give a file written here the line ends of a checkout, so that
+        core.autocrlf repositories don't warn about it - only if git stores
+        it the same either way: a file whose line ends git keeps as they are
+        (e.g. CRLF without autocrlf) keeps its own, line by line."""
+        data = path.read_bytes()
+        rel = self.rel(path)
+        conv = self.to_worktree(data.replace(b"\r\n", b"\n"), rel)
+        if conv == data:
+            return
+        stored = [out(self.git(["hash-object", f"--path={rel}", "--stdin"], data=d))
+                  for d in (data, conv)]
+        if stored[0] == stored[1]:
             path.write_bytes(conv)
 
 
@@ -1743,6 +1750,27 @@ def replace_value(line, value):
     return indent + key + rest[:eq.end()] + config_value(value) + old[len(old.rstrip()):] + rest[j:]
 
 
+def common_eol(lines):
+    """The line end most lines (with their ends) have: CRLF or LF."""
+    crlf = sum(1 for raw in lines if raw.endswith(b"\r\n"))
+    return b"\r\n" if crlf > len(lines) - crlf else b"\n"
+
+
+def keep_line_ends(original, data):
+    """data - original as git config rewrote it, with LF - with the line
+    ends of original: a line that was there keeps its own, a new one gets
+    the most common one."""
+    olines = original.splitlines(keepends=True)
+    eol, ends, out_lines = common_eol(olines), {}, []
+    for raw in olines:            # (a last line without one gets one)
+        body = raw.rstrip(b"\r\n")
+        ends.setdefault(body, []).append(raw[len(body):] or eol)
+    for raw in data.splitlines(keepends=True):
+        body = raw.rstrip(b"\r\n")
+        out_lines.append(body + (ends[body].pop(0) if ends.get(body) else eol))
+    return b"".join(out_lines)
+
+
 def edit_registry(data, pending, drop=(), renames=None):
     """The registry's bytes with these changes - only the lines concerned,
     so that comments and the layout of the file stay:
@@ -1758,8 +1786,9 @@ def edit_registry(data, pending, drop=(), renames=None):
     key twice, keys on the header line, an unclosed quote)."""
     renames = renames or {}
     lines = data.splitlines(keepends=True)
+    eol = common_eol(lines)                # for new lines: the file's own
     if lines and not lines[-1].endswith(b"\n"):
-        lines[-1] += b"\n"
+        lines[-1] += eol
     headers, keys, last = {}, {}, {}   # section -> its line; (section, key) -> line;
     sect = None                        # section -> its last key line
     for i, raw in enumerate(lines):
@@ -1798,7 +1827,7 @@ def edit_registry(data, pending, drop=(), renames=None):
     for (s, n, k), v in pending.items():
         sec = (s, n)
         if sec in drop or sec not in headers:          # (again) a new section
-            appended.setdefault(sec, []).append(f"\t{k} = {config_value(v)}\n".encode())
+            appended.setdefault(sec, []).append(f"\t{k} = {config_value(v)}".encode() + eol)
         elif (sec, k) in keys:
             i = keys[(sec, k)]
             eol = lines[i][len(lines[i].rstrip(b"\r\n")):]
@@ -1808,14 +1837,14 @@ def edit_registry(data, pending, drop=(), renames=None):
             lines[i] = new.encode() + eol
         else:
             after.setdefault(last.get(sec, headers[sec]), []).append(
-                f"\t{k} = {config_value(v)}\n".encode())
+                f"\t{k} = {config_value(v)}".encode() + eol)
     out_lines = []
     for i, raw in enumerate(lines):
         if i not in dropped:
             out_lines.append(raw)
             out_lines += after.get(i, [])
     for (s, n), texts in appended.items():
-        out_lines.append(f"[{s} {quoted_name(n)}]\n".encode())
+        out_lines.append(f"[{s} {quoted_name(n)}]".encode() + eol)
         out_lines += texts
     return b"".join(out_lines)
 
@@ -1918,10 +1947,7 @@ class Registry:
         self._pending = {}        # ("file" | "source", name, key) -> value, see _set
         self._drop = set()        # (section, name): sections to remove, see remove_file
         self._renames = {}        # (section, old name) -> new name, see _rename
-        self._eol = None          # line ends of the file as it was (see finish)
         if self.path.exists():
-            first = self.path.read_bytes().split(b"\n", 1)[0]
-            self._eol = b"\r\n" if first.endswith(b"\r") else b"\n"
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
             if p.returncode:
                 raise FsError(f"{REGISTRY}: cannot parse: "
@@ -2051,21 +2077,16 @@ class Registry:
             git(["config", "-f", self.path, "--rename-section", f"{sect}.{old}", f"{sect}.{new}"])
         for (sect, name, k), v in pending.items():
             git(["config", "-f", self.path, f"{sect}.{name}.{k}", v])
+        # git writes LF: the lines keep their own line ends, new ones the file's
+        self.path.write_bytes(keep_line_ends(original, self.path.read_bytes()))
 
     def finish(self):
-        """Fix line endings and stage the registry (or its removal when
-        empty): a file that was there keeps its own (e.g. CRLF from an
-        editor on Windows), a new one gets those of a checkout here."""
+        """Fix line endings (see Repo.fix_eol) and stage the registry (or
+        its removal when empty)."""
         self.flush()
         if self.path.exists():
             if not self.sources and not self.files:
                 self.path.unlink()
-            elif self._eol:
-                data = self.path.read_bytes()
-                lf = data.replace(b"\r\n", b"\n")
-                eol = lf if self._eol == b"\n" else lf.replace(b"\n", b"\r\n")
-                if eol != data:
-                    self.path.write_bytes(eol)
             else:
                 self.repo.fix_eol(self.path)
         self.repo.git(["add", "-A", "--", REGISTRY])
