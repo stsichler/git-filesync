@@ -1148,10 +1148,12 @@ class Context:
     def __init__(self, args, repo=None):
         self.repo_top = repo.top if repo else None
         # restore, and diff of local changes, only need the synced versions,
-        # which never change (a blob missing in the cache is fetched lazily)
+        # which never change (a blob missing in the cache is fetched lazily):
+        # fetched only if the cache lacks the branch (lazy)
         offline = args.cmd == "restore" or \
             args.cmd in ("diff", "difftool") and not args.upstream
-        self.fetch = not getattr(args, "no_fetch", False) and not offline
+        no_fetch = getattr(args, "no_fetch", False)
+        self.fetch, self.lazy = not (no_fetch or offline), offline and not no_fetch
         # fetch even for a tag already cached, to learn about newer tags
         self.want_tags = getattr(args, "verbose", False) or args.cmd == "pull"
         self._sources = {}
@@ -1257,17 +1259,17 @@ class Context:
             return Source(local, f"refs/remotes/origin/{branch}", label, local=True,
                           note=f"no local branch '{branch}' there, using origin/{branch} "
                                "as last fetched")
-        return Source(self._cache(url), f"refs/remotes/origin/{branch}",
-                      name or repo_label(url))
+        return Source(self._cache(url, need=f"refs/remotes/origin/{branch}"),
+                      f"refs/remotes/origin/{branch}", name or repo_label(url))
 
     @staticmethod
     def cache_dir(url):
         return cache_root() / (hashlib.sha1(norm_url(url).encode()).hexdigest()[:16] + ".git")
 
-    def _cache(self, url, tag=None):
+    def _cache(self, url, tag=None, need=None):
         """The cache clone of url, fetched once per run - not for a tag
         already there (tags are taken as immutable), unless newer tags are
-        of interest (want_tags)."""
+        of interest (want_tags); with lazy, only if it lacks the ref need."""
         d = self.cache_dir(url)
         if d in self._ready:
             return d
@@ -1293,13 +1295,17 @@ class Context:
                          env=env, check=False).returncode == 0:
             touch_used(d)
             return d       # not marked ready: a branch of the same URL still fetches
-        elif self.fetch:
+        elif self.lazy and need and git(["-C", d, "rev-parse", "--verify", "--quiet", need],
+                                        env=env, check=False).returncode == 0:
+            touch_used(d)
+            return d       # not marked ready: another ref may be missing
+        elif self.fetch or self.lazy:
             p = git(["-C", d] + fetch, env=env, check=False)
             if p.returncode:
                 warn(f"fetching {url} failed, using cached state")
                 self._fetch_failed.add(d)
         touch_used(d)
-        if self.fetch:
+        if self.fetch or self.lazy:
             auto_prune()
         self._ready.add(d)
         return d
@@ -1440,10 +1446,19 @@ class Repo:
         return self._dirty[rel]
 
     def user_path(self, s):
-        return (self.base / s).resolve()
+        """A path given by the user, absolute: relative to the current
+        directory, '..' resolved by name; symlinks only in its directories,
+        not the path itself (a linked file may be a symlink, as for git)."""
+        p = Path(os.path.normpath(self.base / s))
+        return p.parent.resolve() / p.name if p.name else p.resolve()
 
     def rel(self, path):
-        return Path(os.path.relpath(Path(path).resolve(), self.top)).as_posix()
+        """Path relative to the top-level directory (as git names it);
+        outside the working tree: '../...', or absolute on another drive."""
+        try:
+            return Path(os.path.relpath(path, self.top)).as_posix()
+        except ValueError:        # Windows: another drive
+            return Path(path).as_posix()
 
     def worktree_blob(self, path, write=False):
         """Blob id of the (clean-filtered) working tree file, None if missing.
@@ -1620,7 +1635,9 @@ class Repo:
         if not entries:
             return
         rels, oids = [r for r, _ in entries], [o for _, o in entries]
-        modes = {r: e[0] for r, e in self.index_entries(rels).items()}
+        # an executable file stays one; a symlink or submodule there becomes a file
+        modes = {r: e[0] for r, e in self.index_entries(rels).items()
+                 if e[0] in ("100644", "100755")}
         info = "".join(f"{modes.get(rel, '100644')} {oid}\t{rel}\0"
                        for rel, oid in zip(rels, oids)).encode()
         names = "".join(r + "\0" for r in rels).encode()
@@ -1833,12 +1850,21 @@ def path_problem(rel):
     return None
 
 
+def registry_path(repo):
+    """.git-filesync - refused if it is a symlink: it comes from a commit,
+    possibly made by others, and is written to (also: as git writes it)."""
+    path = repo.top / REGISTRY
+    if path.is_symlink():
+        raise FsError(f"{REGISTRY} is a symbolic link - refused (it must be a file)")
+    return path
+
+
 class Registry:
     """The repository's .git-filesync: [source] and [file] sections."""
 
     def __init__(self, repo):
         self.repo = repo
-        self.path = repo.top / REGISTRY
+        self.path = registry_path(repo)
         self.sources, self.files = {}, {}
         self.dry_run = False      # only change the in-memory state
         self._pending = {}        # (rel, key) -> new commit/blob id, see set_file
@@ -3600,7 +3626,7 @@ def registry_problems(reg):
 def cmd_edit(ctx, repo, args):
     """Open .git-filesync in the editor (like `git config --edit`), then
     check and stage it."""
-    path = repo.top / REGISTRY
+    path = registry_path(repo)
     if not path.exists():
         raise FsError(f"no {REGISTRY} yet - link files with 'git filesync add'")
     before = path.read_bytes()

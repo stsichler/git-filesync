@@ -48,6 +48,7 @@
 #   20. cache: show, list and clean up the cache of upstream clones
 #   21. Performance: git processes don't grow with the number of files
 #   22. Closed output pipe; discarded content kept
+#   23. A cache that lacks a branch; symlinks in this repository
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -1945,6 +1946,47 @@ echo own > x
 check "add --overwrite: replaced untracked file reported" \
   "$(git filesync add --overwrite file:///nowhere/m22.git x -p f1 | grep -c '^discarded: x ')" "1"
 git reset -q --hard
+
+
+# =============================================================================
+section "23. A cache that lacks a branch; symlinks in this repository"
+# =============================================================================
+cd "$T"
+
+git init -q m23 && (cd m23 && echo a > a.c && git add . && git commit -qm init)
+git clone -q --bare m23 m23.git && git -C m23.git config uploadpack.allowFilter true
+new_repo s23
+addc "$TURL/m23.git" a.c
+# diff of local changes doesn't fetch - unless the cache lacks the branch
+# (here: b.c linked to a branch made after our cache was)
+(cd ../m23 && git checkout -qb dev && echo b > b.c && git add b.c && git commit -qm b \
+  && git push -q ../m23.git dev)
+(FILESYNC_CACHE=$T/cache-23 addc -b dev "$TURL/m23.git" b.c)
+echo local >> b.c
+check "diff: a branch the cache lacks is fetched" "$(git filesync diff b.c 2>&1 | grep -c '^+local$')" "1"
+git reset -q --hard
+
+if ln -s x "$T/lncheck" 2>/dev/null && [ -L "$T/lncheck" ]; then
+  # .git-filesync comes from commits of others: as a symlink it is refused,
+  # never written through
+  new_repo "$T/s23l"
+  printf '[x]\n\ty = 1\n' > "$T/outside23.cfg"
+  ln -s "$T/outside23.cfg" .git-filesync && git add .git-filesync && git commit -qm "symlink"
+  check "symlinked .git-filesync: refused" "$(rc git filesync add "$TURL/m23.git" c.c -p a.c)" "2"
+  check "symlinked .git-filesync: its target untouched" "$(lines < "$T/outside23.cfg")" "2"
+  # a linked file that is a symlink: named by its own path (not its
+  # target's), and synced as a file - its target stays as it is
+  cd "$T/s23"
+  rm a.c && echo x > there && ln -s there a.c && git add a.c there && git commit -qm "a.c a symlink"
+  (cd ../m23 && git checkout -q main && echo more >> a.c && git commit -qam more && git push -q ../m23.git main)
+  check "symlink: named by its own path" "$(st a.c)" "PM"
+  quiet git filesync pull --overwrite a.c
+  check "symlink: synced as a file" "$(git ls-files -s a.c | cut -c1-6) $([ -L a.c ] && echo link || echo file)" \
+    "100644 file"
+  check "symlink: its target untouched" "$(cat there)" "x"
+else
+  echo "skipped: no symlinks here"
+fi
 
 
 # =============================================================================
