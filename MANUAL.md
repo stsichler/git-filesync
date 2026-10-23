@@ -401,7 +401,8 @@ whether the adaptations would merge cleanly; on conflicts it points to
 both diffs.
 
 **Upstreaming local changes:** `--for-upstream` names the files by their
-upstream path, giving a patch that can be applied there (with
+current upstream path (the new one, if a file was renamed there), giving a
+patch that can be applied there (with
 `--committed`: only the committed adaptations):
 
 ```sh

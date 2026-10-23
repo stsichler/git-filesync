@@ -1417,6 +1417,13 @@ check "renamed upstream: long format" \
   "$(git filesync status r.c | grep -cE "^${TAB}renamed:[[:space:]]+r\.c  \(lib/r\.c -> lib/renamed\.c, 2 commits\)")" "1"
 check "deleted upstream: short code" "$(st gone.c)" "X"
 check "deleted upstream: unlink hint" "$(git filesync status | grep -c 'git filesync unlink <file>')" "1"
+# a patch for upstream applies to its current path, also after a rename there
+sedi 's/^e$/E-local/' r.c
+git filesync diff --for-upstream r.c > "$T/r.patch"
+check "diff --for-upstream: the upstream path after a rename" \
+  "$(grep -c '^+++ b/lib/renamed.c$' "$T/r.patch") $(cd ../co10 && git apply -3 "$T/r.patch" >/dev/null 2>&1 && grep -c E-local lib/renamed.c)" "1 1"
+(cd ../co10 && git reset -q --hard)
+git checkout -q r.c
 check "deleted upstream: status rc 0" "$(rc git filesync status)" "0"
 check "deleted upstream: --exit-code" "$(rc git filesync status --exit-code gone.c)" "1"
 check "deleted upstream: hook" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'gone.c: upstream deleted')" "1"

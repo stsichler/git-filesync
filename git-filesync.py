@@ -2976,7 +2976,7 @@ def diff_pairs(ctx, repo, args):
             error(f"{st.rel}: {e}")
             rc = EXIT_ERROR
             continue
-        name = link.path if args.for_upstream else st.rel
+        name = st.new_path if args.for_upstream else st.rel    # upstream: also after a rename there
         pairs.append((st, name, base, other))
     contents = [c for _, _, base, other in pairs for c in (base, other) if c is not None]
     ids = dict(zip(map(id, contents), repo.store_many(contents)))
