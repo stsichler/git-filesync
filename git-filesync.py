@@ -3264,14 +3264,16 @@ def cmd_add(ctx, repo, args):
             link.set("strict", "true")
         if p.content is not None:
             fetched.append((p.rel, repo.normalize(p.content, p.rel)))
-        print(f"{paint('linked', 'green')} {p.rel} -> {name}:{p.path} ({shown_ref})")
     # fetched files written and staged at once; existing ones staged as
-    # they are in the working tree
+    # they are in the working tree - also if ignored, as fetched ones are:
+    # linking a file means tracking it
     repo.write_files(fetched)
     done = {r for r, _ in fetched}
     if any(r not in done for r in rels):
-        repo.git(["add", "--"] + [lit(r) for r in rels if r not in done])
+        repo.git(["add", "-f", "--"] + [lit(r) for r in rels if r not in done])
     reg.finish()
+    for p in plan:                # said once it is done
+        print(f"{paint('linked', 'green')} {p.rel} -> {name}:{p.path} ({shown_ref})")
     if repo.git(["diff", "--cached", "--quiet", "HEAD", "--"] + [lit(r) for r in rels]
                  + [REGISTRY], check=False).returncode == 0:
         print(f"{rel}: link{'s' if len(rels) > 1 else ''} and "

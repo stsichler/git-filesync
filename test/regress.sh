@@ -769,6 +769,11 @@ git commit -qm mv
 check "mv: a missing directory is refused, like git mv" \
   "$(git filesync mv include/renamed.h nope/r.h 2>&1)-$(git status --porcelain)" \
   "error: destination directory does not exist, source=include/renamed.h, destination=nope/r.h-"
+printf '*.gen\n' > .git/info/exclude
+echo own > own.gen
+check "add: an ignored file is linked and staged like any other" \
+  "$(rc git filesync add "$SRC" own.gen -p lib/foo.c) $(git status --porcelain own.gen)" "0 A  own.gen"
+git reset -q --hard && rm -f own.gen .git/info/exclude
 check "add: a file where the directory should be" \
   "$(git filesync add -n "$SRC" include/renamed.h/x.h -p lib/foo.c 2>&1 | grep -c "^error: cannot add 'include/renamed.h/x.h': 'include/renamed.h' is not a directory$")" "1"
 check "add DIR: a missing parent directory is refused" \
