@@ -850,6 +850,8 @@ section "8. Colors"
 ESC=$(printf '\033')
 check "no color when piped" "$(git filesync status | grep -c "$ESC")" "0"
 check "--color=always" "$(git filesync status --color=always | grep -q "$ESC" && echo yes)" "yes"
+check "--color alone: always, like git" "$(git filesync status --color | grep -q "$ESC" && echo yes)" "yes"
+check "--color takes no path as its value" "$(rc git filesync status --color src/foo.c)" "0"
 check "color.ui=always via git -c" "$(git -c color.ui=always filesync status | grep -q "$ESC" && echo yes)" "yes"
 check "color.filesync=never beats color.ui" \
   "$(git -c color.ui=always -c color.filesync=never filesync status | grep -c "$ESC")" "0"

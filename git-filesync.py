@@ -316,14 +316,11 @@ def color_option(argv):
     """The --color / --no-color given in argv (the last one wins), before
     parsing it: the help needs colors decided before argparse prints it."""
     mode = "auto"
-    for i, a in enumerate(argv):
+    for a in argv:
         if a == "--":
             break
         if a == "--no-color":
             mode = "never"
-        elif a == "--color":
-            nxt = argv[i + 1] if i + 1 < len(argv) else None
-            mode = nxt if nxt in ("always", "never", "auto") else "always"
         elif a.startswith("--color="):
             mode = a[len("--color="):]
     return mode
@@ -1237,8 +1234,9 @@ class Context:
                 raise FsError(f"tag pattern '{branch}' needs a branch to look for it on")
             if local:
                 src = Source(local, f"refs/tags/{branch}", f"local checkout {local}", local=True)
-            else:         # a pattern: always fetched, for new matching tags
-                src = Source(self._cache(url, tag=None if pattern else branch),
+            else:         # a pattern: always fetched (lazy: if the branch is missing)
+                src = Source(self._cache(url, tag=None if pattern else branch,
+                                         need=pattern and f"refs/remotes/origin/{line}"),
                              f"refs/tags/{branch}", name or repo_label(url))
             if pattern:
                 src.tag_names = src.newest_matching(branch, line)
@@ -4166,6 +4164,10 @@ def run(argv=None):
                         help="do not fetch upstream repositories, use cached state")
 
     argv = list(sys.argv[1:] if argv is None else argv)
+    # like git: --color takes a value only as --color=WHEN; alone it is
+    # always, and what follows is no value of it (status --color a.c)
+    end = argv.index("--") if "--" in argv else len(argv)
+    argv = [a if a != "--color" else "--color=always" for a in argv[:end]] + argv[end:]
     # the help in colors exactly when the output on stdout would be colored
     # (argparse has colors from Python 3.14 on, and checks the terminal too)
     color = {"color": color_wanted(color_option(argv), sys.stdout)} \
