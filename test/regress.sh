@@ -48,7 +48,7 @@
 #   20. cache: show, list and clean up the cache of upstream clones
 #   21. Performance: git processes don't grow with the number of files
 #   22. Closed output pipe; discarded content kept
-#   23. A cache that lacks a branch; symlinks in this repository
+#   23. A cache that lacks a branch; symlinks in this repository; parallel clones
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -1951,7 +1951,7 @@ git reset -q --hard
 
 
 # =============================================================================
-section "23. A cache that lacks a branch; symlinks in this repository"
+section "23. A cache that lacks a branch; symlinks in this repository; parallel clones"
 # =============================================================================
 cd "$T"
 
@@ -1989,6 +1989,18 @@ if ln -s x "$T/lncheck" 2>/dev/null && [ -L "$T/lncheck" ]; then
 else
   echo "skipped: no symlinks here"
 fi
+
+# runs in parallel that clone the same URL into an empty cache (e.g. CI
+# jobs sharing it): one clone wins, the others use it (run directly: the
+# guard would take the others' writes for its own)
+cd "$T"
+for i in 1 2 3 4; do new_repo "$T/s23p$i" >/dev/null; cd "$T"; done
+for i in 1 2 3 4; do
+  (cd "$T/s23p$i" && FILESYNC_CACHE=$T/cache-23p "$PYTHON" "$S" add "$TURL/m23.git" a.c >/dev/null 2>&1; \
+   echo $? > "$T/s23p$i.rc") &
+done
+wait
+check "parallel first clones: all succeed" "$(cat "$T"/s23p?.rc | oneline)" "0 0 0 0 "
 
 
 # =============================================================================

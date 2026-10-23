@@ -1285,7 +1285,11 @@ class Context:
                      "+refs/heads/*:refs/remotes/origin/*"], env=env)
                 git(["-C", tmp] + fetch, env=env)
                 self._drop_heads(tmp)
-                tmp.rename(d)
+                try:
+                    tmp.rename(d)
+                except OSError as e:      # a parallel run may have cloned it meanwhile
+                    if not d.is_dir():
+                        raise FsError(f"cannot create the cache clone {d}: {e}")
             finally:
                 if tmp.exists():
                     shutil.rmtree(tmp, ignore_errors=True)
