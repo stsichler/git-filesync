@@ -766,9 +766,11 @@ git commit -qm mv
 
 # directories: add and mv put files into existing ones only, like cp and
 # git mv; add DIR may create DIR itself; pull and restore recreate them
-check "mv: a missing directory is refused" \
+check "mv: a missing directory is refused, like git mv" \
   "$(git filesync mv include/renamed.h nope/r.h 2>&1)-$(git status --porcelain)" \
-  "error: directory 'nope' does not exist-"
+  "error: destination directory does not exist, source=include/renamed.h, destination=nope/r.h-"
+check "add: a file where the directory should be" \
+  "$(git filesync add -n "$SRC" include/renamed.h/x.h -p lib/foo.c 2>&1 | grep -c "^error: cannot add 'include/renamed.h/x.h': 'include/renamed.h' is not a directory$")" "1"
 check "add DIR: a missing parent directory is refused" \
   "$(git filesync add -n "$SRC" nope/lib -p lib 2>&1 | grep -c "^error: directory 'nope' does not exist$")" "1"
 check "add DIR: DIR itself may be new" "$(git filesync add -n "$SRC" newdir -p lib | grep -c '^would link newdir/')" "3"
@@ -2001,6 +2003,20 @@ quiet git filesync unlink x.c z.c
 check "unlink: comments between the keys go along" "$(grep -c '# about x' .git-filesync)" "0"
 check "unlink: comments after the keys stay" "$(grep -cE '^# (group Y|trailing note)$' .git-filesync)" "2"
 check "unlink: only y.c left" "$(git config -f .git-filesync --get-regexp '^file\.' | cut -d. -f2 | sort -u | oneline)" "y "
+# a changed value keeps the spacing and the comment of its line; a renamed
+# section keeps the comment of its header
+sedi 's/^[[:space:]]*commit = \(.*\)$/    commit   =  \1   ; mine/' .git-filesync
+sedi 's/^\(\[source "[^"]*"\]\)$/\1   # our upstream/' .git-filesync
+git commit -qam layout
+(cd ../m23 && git checkout -q main && echo c >> a.c && git commit -qam c && git push -q ../m23.git main)
+quiet git filesync pull y.c
+check "pull: a changed value keeps spacing and comment" \
+  "$(grep -c '^    commit   =  [0-9a-f]*   ; mine$' .git-filesync) $(git config -f .git-filesync file.y.c.commit)" \
+  "1 $(git -C ../m23 rev-parse HEAD)"
+git commit -q --no-edit
+quiet git filesync source rename "$(git config -f .git-filesync file.y.c.source)" mine23
+check "source rename: the header keeps its comment" "$(grep -c '^\[source "mine23"\]   # our upstream$' .git-filesync)" "1"
+check "source rename: the entries follow" "$(git config -f .git-filesync file.y.c.source) $(st y.c)" "mine23 "
 cd "$T/s23"
 
 if ln -s x "$T/lncheck" 2>/dev/null && [ -L "$T/lncheck" ]; then

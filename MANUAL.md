@@ -680,9 +680,11 @@ keeps whatever you write: a changed `commit` or `blob` changes what counts
 as an adaptation.
 
 Comments and your own layout in `.git-filesync` are kept: the commands
-change only the lines they have to. A removed entry takes its header, its
-keys and the lines between them along; comments and blank lines after its
-last key stay – e.g. one that introduces the next entry.
+change only the lines they have to. A changed value keeps the indentation,
+spacing and comment of its line, a renamed entry the comment of its header.
+A removed entry takes its header, its keys and the lines between them
+along; comments and blank lines after its last key stay – e.g. one that
+introduces the next entry.
 
 ### `source`
 
@@ -1136,7 +1138,7 @@ jobs:
 ```
 
 This uses the latest release. To pin a version, download
-`https://github.com/stsichler/git-filesync/releases/download/v0.18.0/git-filesync.py`
+`https://github.com/stsichler/git-filesync/releases/download/v0.18.1/git-filesync.py`
 instead. (For private upstream repositories the job needs a token with read
 access.)
 
@@ -1187,7 +1189,7 @@ the same version without installing it:
 
 ```sh
 git filesync add https://github.com/stsichler/git-filesync.git tools/git-filesync.py \
-    -p git-filesync.py --tag v0.18.0 --strict
+    -p git-filesync.py --tag v0.18.1 --strict
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
 ```
 

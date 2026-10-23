@@ -260,7 +260,7 @@ from typing import Optional
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
-__version__ = "0.18.0"
+__version__ = "0.18.1"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -1709,77 +1709,113 @@ def config_value(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
 
 
-def edit_registry(data, pending, drop=()):
-    """The registry's bytes with the sections in drop ({("file" | "source",
-    name)}) removed - the header, the keys and the lines between them; the
-    comments and blank lines after the last key stay (one may introduce the
-    next section) - and pending ({(rel, key): value}) written into the
-    [file "rel"] sections: a value replaced in its `key = value` line, a new
-    key added at the end of its section, a new section appended. None if
-    the file isn't laid out simply enough for that (a section or key twice,
-    a value with quotes or a comment, keys on the header line)."""
+HEADER_RX = re.compile(r'(\s*\[\s*)([A-Za-z][A-Za-z0-9-]*)(\s+)"((?:[^"\\]|\\.)*)"(\s*\]\s*(?:[#;].*)?)')
+KEY_RX = re.compile(r"(\s*)([A-Za-z][A-Za-z0-9-]*)(\s*(?:[=#;].*)?)")
+
+
+def quoted_name(name):
+    """A section's name as written in its header: '"src/foo.c"'."""
+    return '"' + name.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def replace_value(line, value):
+    """A `key = value` line with another value: indentation, spacing and a
+    comment at the end of the line stay as they are. None if the line is
+    odd (an unclosed quote)."""
+    m = KEY_RX.fullmatch(line)
+    indent, key, rest = m.groups()
+    eq = re.match(r"\s*=\s*", rest)
+    if not eq:                    # a key without '= value' (boolean): rest is a comment
+        return f"{indent}{key} = {config_value(value)}{rest}"
+    j, quoted = eq.end(), False
+    while j < len(rest):          # the value ends at a comment outside quotes
+        if rest[j] == "\\":
+            j += 2
+            continue
+        if rest[j] == '"':
+            quoted = not quoted
+        elif rest[j] in "#;" and not quoted:
+            break
+        j += 1
+    if quoted:
+        return None
+    old = rest[eq.end():j]
+    return indent + key + rest[:eq.end()] + config_value(value) + old[len(old.rstrip()):] + rest[j:]
+
+
+def edit_registry(data, pending, drop=(), renames=None):
+    """The registry's bytes with these changes - only the lines concerned,
+    so that comments and the layout of the file stay:
+    drop     {(section, name)}: sections removed - the header, the keys and
+             the lines between them; comments and blank lines after the
+             last key stay (one may introduce the next section);
+    renames  {(section, old name): new name}: only the name in the header
+             changes;
+    pending  {(section, name, key): value}: a value replaced in its line,
+             a new key added after the section's last one, a new section
+             appended.
+    None if the file isn't laid out simply enough for that (a section or
+    key twice, keys on the header line, an unclosed quote)."""
+    renames = renames or {}
     lines = data.splitlines(keepends=True)
     if lines and not lines[-1].endswith(b"\n"):
         lines[-1] += b"\n"
-    sections, current, keys = {}, None, {}     # rel -> [first, last line]; (rel, key) -> line
-    headers = {}                    # (section, name) -> its line; None: any other header
-    last, sect = {}, None           # (section, name) -> its last key line
+    headers, keys, last = {}, {}, {}   # section -> its line; (section, key) -> line;
+    sect = None                        # section -> its last key line
     for i, raw in enumerate(lines):
-        line = raw.decode("utf-8", "replace").rstrip("\r\n")
-        m = re.fullmatch(r'\s*\[\s*([A-Za-z][A-Za-z0-9-]*)\s+"((?:[^"\\]|\\.)*)"\s*\]\s*', line)
+        eol = raw[len(raw.rstrip(b"\r\n")):]
+        line = raw[:len(raw) - len(eol)].decode("utf-8", "replace")
+        m = HEADER_RX.fullmatch(line)
         if m:
-            name = (m.group(1).lower(), re.sub(r"\\(.)", r"\1", m.group(2)))
+            old = (m.group(2).lower(), re.sub(r"\\(.)", r"\1", m.group(4)))
+            name = (old[0], renames.get(old, old[1]))
             if name in headers:
                 return None
+            if name != old:
+                lines[i] = (m.group(1) + m.group(2) + m.group(3) + quoted_name(name[1])
+                            + m.group(5)).encode() + eol
             headers[name], sect = i, name
-            current = name[1] if name[0] == "file" and name not in drop else None
-            if current is not None:
-                sections[current] = [i, i]
             continue
         if re.match(r"\s*\[", line):
             headers[(None, i)] = i
-            current = sect = None
+            sect = None
             continue
-        if not line.strip() or re.match(r"\s*[#;]", line):
+        if not line.strip() or re.match(r"\s*[#;]", line) or sect is None:
             continue
-        if sect is not None:
-            last[sect] = i
-        if current is None:
-            continue
-        m = re.fullmatch(r"\s*([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*?))?\s*", line)
-        if not m:
+        m = KEY_RX.fullmatch(line)
+        if not m or (sect, m.group(2).lower()) in keys:
             return None
-        key = (current, m.group(1).lower())
-        if key in keys or key in pending and m.group(2) is not None \
-                and m.group(2) != config_value(m.group(2)):
-            return None      # twice, or a value we wouldn't write like that
-        keys[key] = i
-        sections[current][1] = i
+        keys[(sect, m.group(2).lower())] = i
+        last[sect] = i
+    if any((s, new) not in headers for (s, _), new in renames.items()):
+        return None
     dropped = set()
     for name in drop:
         if name not in headers:
             return None
         dropped.update(range(headers[name], last.get(name, headers[name]) + 1))
     after, appended = {}, {}
-    for (rel, k), v in pending.items():
-        text = f"\t{k} = {config_value(v)}\n".encode()
-        if (rel, k) in keys:
-            i = keys[(rel, k)]
-            raw = lines[i]
-            lines[i] = raw[:len(raw) - len(raw.lstrip())] + text.lstrip(b"\t")[:-1] + \
-                raw[len(raw.rstrip(b"\r\n")):]
-        elif rel in sections:
-            after.setdefault(sections[rel][1], []).append(text)
+    for (s, n, k), v in pending.items():
+        sec = (s, n)
+        if sec in drop or sec not in headers:          # (again) a new section
+            appended.setdefault(sec, []).append(f"\t{k} = {config_value(v)}\n".encode())
+        elif (sec, k) in keys:
+            i = keys[(sec, k)]
+            eol = lines[i][len(lines[i].rstrip(b"\r\n")):]
+            new = replace_value(lines[i][:len(lines[i]) - len(eol)].decode("utf-8", "replace"), v)
+            if new is None:
+                return None
+            lines[i] = new.encode() + eol
         else:
-            appended.setdefault(rel, []).append(text)
+            after.setdefault(last.get(sec, headers[sec]), []).append(
+                f"\t{k} = {config_value(v)}\n".encode())
     out_lines = []
     for i, raw in enumerate(lines):
         if i not in dropped:
             out_lines.append(raw)
             out_lines += after.get(i, [])
-    for rel, texts in appended.items():
-        name = rel.replace("\\", "\\\\").replace('"', '\\"')
-        out_lines.append(f'[file "{name}"]\n'.encode())
+    for (s, n), texts in appended.items():
+        out_lines.append(f"[{s} {quoted_name(n)}]\n".encode())
         out_lines += texts
     return b"".join(out_lines)
 
@@ -1877,8 +1913,11 @@ class Registry:
         self.path = registry_path(repo)
         self.sources, self.files = {}, {}
         self.dry_run = False      # only change the in-memory state
-        self._pending = {}        # (rel, key) -> new commit/blob id, see set_file
-        self._drop = set()        # ("file" | "source", name): sections to remove, see remove_file
+        # written later, all at once (see flush): pull, add, rm, unlink and
+        # set change many entries
+        self._pending = {}        # ("file" | "source", name, key) -> value, see _set
+        self._drop = set()        # (section, name): sections to remove, see remove_file
+        self._renames = {}        # (section, old name) -> new name, see _rename
         if self.path.exists():
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
             if p.returncode:
@@ -1889,29 +1928,23 @@ class Registry:
     def links(self):
         return [Link(self, rel) for rel in sorted(self.files)]
 
-    def _cfg(self, *args):
-        if self.dry_run:
-            return
-        self.flush()
-        if not self.path.exists():
-            self.path.write_bytes(REGISTRY_HEADER.encode())
-        git(["config", "-f", self.path] + list(args))
-
-    def set_file(self, rel, name, value):
-        """Set (value None: remove) a key of a [file]. Values are written
-        later, all at once (see flush) - pull, add and set change several
-        keys of many files."""
-        if value is not None and not self.dry_run:
-            self._pending[(rel, name)] = value
-            self.files.setdefault(rel, {})[name] = value
-            return
+    def _set(self, sect, name, key, value):
+        """Set (value None: remove) a key of a [file] or [source] - written
+        later (see flush); a removed key's line goes at once, with git."""
+        store = self.files if sect == "file" else self.sources
         if value is None:
-            if name in self.files.get(rel, {}):
-                self._cfg("--unset-all", f"file.{rel}.{name}")
-                del self.files[rel][name]
-        else:
-            self._cfg(f"file.{rel}.{name}", value)
-            self.files.setdefault(rel, {})[name] = value
+            if key in store.get(name, {}):
+                del store[name][key]
+                if not self.dry_run:
+                    self.flush()
+                    git(["config", "-f", self.path, "--unset-all", f"{sect}.{name}.{key}"])
+            return
+        store.setdefault(name, {})[key] = value
+        if not self.dry_run:
+            self._pending[(sect, name, key)] = value
+
+    def set_file(self, rel, key, value):
+        self._set("file", rel, key, value)
 
     def find_source(self, url, branch, exclude=None):
         """Key of a [source] with url and branch, None if there is none."""
@@ -1941,28 +1974,19 @@ class Registry:
         if found:
             return found
         name = self.new_source_name(url)
-        self._cfg(f"source.{name}.url", url)
-        self._cfg(f"source.{name}.branch", branch)
-        self.sources[name] = {"url": url, "branch": branch}
+        self._set("source", name, "url", url)
+        self._set("source", name, "branch", branch)
         return name
 
     def set_source(self, name, key, value):
-        """Set (value None: remove) a key of a [source]."""
-        if value is None:
-            if key in self.sources[name]:
-                self._cfg("--unset-all", f"source.{name}.{key}")
-                del self.sources[name][key]
-        else:
-            self._cfg(f"source.{name}.{key}", value)
-            self.sources[name][key] = value
+        self._set("source", name, key, value)
 
     def remove_source(self, name):
         self._remove_section("source", name)
         del self.sources[name]
 
     def rename_source(self, old, new):
-        self._cfg("--rename-section", f"source.{old}", f"source.{new}")
-        self.sources[new] = self.sources.pop(old)
+        self._rename("source", old, new)
         for rel, f in self.files.items():
             if f.get("source") == old:
                 self.set_file(rel, "source", new)
@@ -1981,28 +2005,37 @@ class Registry:
     def _remove_section(self, sect, name):
         if self.dry_run:
             return
-        if sect == "file":        # values set before are gone with it
-            self._pending = {k: v for k, v in self._pending.items() if k[0] != name}
+        # values set before are gone with it
+        self._pending = {k: v for k, v in self._pending.items() if k[:2] != (sect, name)}
         self._drop.add((sect, name))
 
+    def _rename(self, sect, old, new):
+        """Rename a section: only the name in its header changes."""
+        self.flush()              # what is pending still goes by the old name
+        store = self.files if sect == "file" else self.sources
+        store[new] = store.pop(old)
+        if not self.dry_run:
+            self._renames[(sect, old)] = new
+            self.flush()
+
     def rename_file(self, old, new):
-        self._cfg("--rename-section", f"file.{old}", f"file.{new}")
-        self.files[new] = self.files.pop(old)
+        self._rename("file", old, new)
 
     def flush(self):
-        """Remove the sections and write the [file] values pending (see
-        remove_file, set_file) at once, editing the file directly instead of
-        one `git config` for each - checked by reading it back with git,
-        which must give exactly the state here; otherwise (an unusual layout
-        of the file) one by one with git. Removals first: a value pending
-        for a removed [file] was set after the removal."""
-        pending, self._pending = self._pending, {}
-        drop, self._drop = self._drop, set()
-        if not (pending or drop):
+        """Write what is pending - removed and renamed sections, values (see
+        remove_file, _rename, _set) - at once, editing only the lines
+        concerned (see edit_registry) instead of one `git config` for each -
+        checked by reading it back with git, which must give exactly the
+        state here; otherwise (an unusual layout of the file) one by one
+        with git. Removals first: a value pending for a removed section was
+        set after the removal."""
+        pending, drop, renames = self._pending, self._drop, self._renames
+        self._pending, self._drop, self._renames = {}, set(), {}
+        if not (pending or drop or renames):
             return
         original = self.path.read_bytes() if self.path.exists() \
             else REGISTRY_HEADER.encode()
-        edited = edit_registry(original, pending, drop)
+        edited = edit_registry(original, pending, drop, renames)
         if edited is not None:
             self.path.write_bytes(edited)
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
@@ -2011,8 +2044,10 @@ class Registry:
         self.path.write_bytes(original)
         for sect, name in sorted(drop):
             git(["config", "-f", self.path, "--remove-section", f"{sect}.{name}"])
-        for (rel, k), v in pending.items():
-            git(["config", "-f", self.path, f"file.{rel}.{k}", v])
+        for (sect, old), new in renames.items():
+            git(["config", "-f", self.path, "--rename-section", f"{sect}.{old}", f"{sect}.{new}"])
+        for (sect, name, k), v in pending.items():
+            git(["config", "-f", self.path, f"{sect}.{name}.{k}", v])
 
     def finish(self):
         """Fix line endings and stage the registry (or its removal when empty)."""
@@ -3178,7 +3213,7 @@ def cmd_add(ctx, repo, args):
         rel = repo.rel(target)
     if target.is_dir() or patterns or not upstream_file and src.is_dir(at or head, path):
         # like cp -r: DIR may be new, the directory it goes into must exist
-        require_dir(repo, target if target.is_dir() else target.parent)
+        require_dir(repo, target if target.is_dir() else target.parent, rel)
         plan, relink = plan_dir(repo, reg, src, args, at or head, rel, path, target)
         if not plan:
             return EXIT_OK
@@ -3188,7 +3223,7 @@ def cmd_add(ctx, repo, args):
             raise FsError(f"'{rel}' is already linked (use --force to relink)")
         if target.is_dir():
             raise FsError(f"cannot link '{rel}': is a directory")
-        require_dir(repo, target.parent)        # like cp
+        require_dir(repo, target.parent, rel)   # like cp
         plan = [Planned(rel, path, *find_base(repo, src, at or head, rel, path, target,
                                               args.overwrite))]
     modified = [p for p in plan if p.modified]
@@ -3247,9 +3282,11 @@ def cmd_add(ctx, repo, args):
     return EXIT_OK
 
 
-def require_dir(repo, path):
-    """add and mv put a file into an existing directory only, like cp and
-    git mv: a mistyped directory isn't created."""
+def require_dir(repo, path, rel):
+    """add puts rel into an existing directory path only, like cp: a
+    mistyped directory isn't created."""
+    if path.exists() and not path.is_dir():
+        raise FsError(f"cannot add '{rel}': '{repo.rel(path)}' is not a directory")
     if not path.is_dir():
         raise FsError(f"directory '{repo.rel(path)}' does not exist")
 
@@ -3451,7 +3488,8 @@ def cmd_mv(ctx, repo, args):
         raise FsError(f"cannot move to '{new}': {problem}")
     if new in reg.files or dst.exists():
         raise FsError(f"'{new}' already exists")
-    require_dir(repo, dst.parent)                # like git mv
+    if not dst.parent.is_dir():                  # like git mv
+        raise FsError(f"destination directory does not exist, source={old}, destination={new}")
     if args.dry_run:
         print(f"would move {old} -> {new}")
         return EXIT_OK
