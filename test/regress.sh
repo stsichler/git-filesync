@@ -2017,47 +2017,25 @@ git commit -q --no-edit
 quiet git filesync source rename "$(git config -f .git-filesync file.y.c.source)" mine23
 check "source rename: the header keeps its comment" "$(grep -c '^\[source "mine23"\]   # our upstream$' .git-filesync)" "1"
 check "source rename: the entries follow" "$(git config -f .git-filesync file.y.c.source) $(st y.c)" "mine23 "
-# a .git-filesync with CRLF line ends (an editor on Windows) keeps them:
-# a change is one line, not the whole file
+# .git-filesync is written with the line ends of a checkout: CRLF by a git
+# attribute stays CRLF (only the changed line differs), and with
+# core.autocrlf an LF one becomes CRLF, so that git doesn't warn about it
 git commit -qam rename
+printf '.git-filesync eol=crlf\n' > .gitattributes && git add .gitattributes
 awk '{ sub(/\r$/, ""); printf "%s\r\n", $0 }' .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
-git -c core.autocrlf=false commit -qam crlf
+git commit -qam crlf
 quiet git filesync set y.c --strict
-nocr() { awk '!/\r$/' .git-filesync | lines; }           # lines without CRLF
-numstat() { git -c core.autocrlf=false diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' '; }
-check "CRLF .git-filesync: only the changed line" "$(numstat) $(nocr)" "1 0 0"
+check "eol=crlf: .git-filesync stays CRLF, only the changed line" \
+  "$(awk '!/\r$/' .git-filesync | lines) $(git diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' ')" "0 1 0"
 git reset -q --hard
-(cd ../m23 && echo d >> a.c && git commit -qam d && git push -q ../m23.git main)
-quiet git filesync pull y.c
-check "CRLF: a changed value, in its own line" "$(numstat) $(nocr)" "2 2 0"
-git reset -q --hard
-quiet git filesync add "$TURL/m23.git" v.c -p a.c
-check "CRLF: a new entry, with CRLF" "$(numstat | cut -d' ' -f2) $(nocr)" "0 0"
-git commit -q --no-edit
-quiet git filesync unlink v.c
-check "CRLF: a removed entry" "$(numstat | cut -d' ' -f1) $(nocr)" "0 0"
-git reset -q --hard
-# an unusual layout (a section twice): written with git config, which
-# writes LF - its lines get CRLF too
-printf '[file "y.c"]\r\n' >> .git-filesync && git -c core.autocrlf=false commit -qam twice
-quiet git filesync set y.c --strict
-check "CRLF, written with git config: only the changed line" "$(numstat) $(nocr)" "1 0 0"
-git reset -q --hard
-# mixed line ends (an LF line among CRLF ones): each line keeps its own
-awk 'NR == 1 { sub(/\r$/, "") } { print }' .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
-git -c core.autocrlf=false commit -qam mixed
-quiet git filesync set y.c --strict
-check "mixed line ends: only the changed line" "$(numstat) $(nocr)" "1 0 1"
-git reset -q --hard
-# with core.autocrlf, a .git-filesync with LF gets the line ends of a
-# checkout: git stores it the same, and doesn't warn about it any more
 new_repo "$T/s23a"
 git config core.autocrlf true
 addc "$TURL/m23.git" a.c
 tr -d '\r' < .git-filesync > "$T/reg23" && cp "$T/reg23" .git-filesync
 quiet git filesync set a.c --strict
-check "autocrlf: LF .git-filesync gets CRLF, git sees one line" \
-  "$(nocr) $(git diff --cached --numstat .git-filesync | cut -f1,2 | tr '\t' ' ')" "0 1 0"
+git add .git-filesync 2> "$T/warn23"
+check "autocrlf: an LF .git-filesync becomes CRLF, git doesn't warn" \
+  "$(awk '!/\r$/' .git-filesync | lines) $(grep -c 'will be replaced' "$T/warn23")" "0 0"
 cd "$T/s23c"
 cd "$T/s23"
 

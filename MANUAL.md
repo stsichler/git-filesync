@@ -684,8 +684,7 @@ change only the lines they have to. A changed value keeps the indentation,
 spacing and comment of its line, a renamed entry the comment of its header.
 A removed entry takes its header, its keys and the lines between them
 along; comments and blank lines after its last key stay – e.g. one that
-introduces the next entry. The line ends stay too (see [Line
-endings](#line-endings)).
+introduces the next entry.
 
 ### `source`
 
@@ -1093,11 +1092,9 @@ is always compared and merged in the form the downstream repository would
 store it, and written as a checkout there would produce it – no false
 "local modifications", no eol-only conflicts.
 
-`.git-filesync` keeps its own line ends: lines the commands add get the
-ones most of its lines have (CRLF from an editor on Windows stays CRLF),
-the others keep theirs. Only where git stores the file the same either way
-(`core.autocrlf`, a `text` attribute) does it get the line ends of a
-checkout, so that git doesn't warn about them.
+`.git-filesync` is written with the line ends of a checkout, by the git
+attributes and `core.autocrlf` (e.g. CRLF with `.git-filesync eol=crlf`
+in `.gitattributes`); a file with other line ends gets them as a whole.
 
 ### Offline operation
 
@@ -1145,7 +1142,7 @@ jobs:
 ```
 
 This uses the latest release. To pin a version, download
-`https://github.com/stsichler/git-filesync/releases/download/v0.18.1/git-filesync.py`
+`https://github.com/stsichler/git-filesync/releases/download/v0.18.2/git-filesync.py`
 instead. (For private upstream repositories the job needs a token with read
 access.)
 
@@ -1196,7 +1193,7 @@ the same version without installing it:
 
 ```sh
 git filesync add https://github.com/stsichler/git-filesync.git tools/git-filesync.py \
-    -p git-filesync.py --tag v0.18.1 --strict
+    -p git-filesync.py --tag v0.18.2 --strict
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
 ```
 
