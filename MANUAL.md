@@ -517,7 +517,8 @@ directory (see [below](#linking-a-directory)).
   directory 'src/new' does not exist`). `pull` and `restore` do create
   missing directories – the entry is there already, as for `git checkout`.
 - Like `git add`, `add` stages FILE (as it is in the working tree) and its
-  entry in `.git-filesync`, but doesn't commit. A plain `git commit` then
+  entry in `.git-filesync`, but doesn't commit – also a file matched by
+  `.gitignore`: linking a file means tracking it. A plain `git commit` then
   opens the editor with the proposed commit message (`git commit --no-edit`
   takes it as it is; see [Proposed commit
   messages](#proposed-commit-messages)):
