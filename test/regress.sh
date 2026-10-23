@@ -2017,6 +2017,16 @@ git commit -q --no-edit
 quiet git filesync source rename "$(git config -f .git-filesync file.y.c.source)" mine23
 check "source rename: the header keeps its comment" "$(grep -c '^\[source "mine23"\]   # our upstream$' .git-filesync)" "1"
 check "source rename: the entries follow" "$(git config -f .git-filesync file.y.c.source) $(st y.c)" "mine23 "
+# ... also when a key is removed in the same run (set -b ... --no-tag)
+git commit -qam rename
+(cd ../m23 && git tag t23 && git push -q ../m23.git t23)
+quiet git filesync set y.c --tag t23
+sedi 's/^[[:space:]]*branch = main$/    branch   =  main   ; our line/' .git-filesync
+git commit -qam "pinned, own layout"
+quiet git filesync set y.c -b dev --no-tag
+check "set -b --no-tag: the changed line keeps its layout" \
+  "$(grep -c '^    branch   =  dev   ; our line$' .git-filesync) $(git config -f .git-filesync file.y.c.tag)" "1 "
+git reset -q --hard
 # nocr FILE - its lines without CRLF (counted with tr: awk and grep in Git
 # Bash drop the CR when they read)
 nocr() { echo $(( $(lines < "$1") - $(tr -cd '\r' < "$1" | wc -c) )); }

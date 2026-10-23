@@ -1936,10 +1936,10 @@ class Registry:
         store = self.files if sect == "file" else self.sources
         if value is None:
             if key in store.get(name, {}):
-                del store[name][key]
                 if not self.dry_run:
-                    self.flush()
+                    self.flush()      # what is pending first, while the key is still there
                     git(["config", "-f", self.path, "--unset-all", f"{sect}.{name}.{key}"])
+                del store[name][key]
             return
         store.setdefault(name, {})[key] = value
         if not self.dry_run:
