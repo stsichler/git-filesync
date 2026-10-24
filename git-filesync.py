@@ -30,7 +30,9 @@ upstream repository:
 A link records the upstream version the file is based on (commit/blob).
 A file must stay an exact copy of it, unless it is marked adaptable: then
 local adaptations on top of it are allowed and kept by a 3-way merge on
-pull.
+pull. An entry without commit and blob (e.g. written by hand, to link
+many files at once) is a new link: pull syncs it the first time, as add
+would.
 
 Commands (run inside the repository; without a command: status).
 PATH may be a file or a directory (= all linked files below it); options
@@ -48,9 +50,9 @@ Basic commands:
         -s, --short             short format: upstream/committed/worktree
                                 columns (upstream: P pending, O older,
                                 D diverged, R renamed, X deleted
-                                upstream; E error; committed: M adapted;
-                                working tree: M modified, D missing, ?
-                                not committed yet)
+                                upstream, N new link; E error;
+                                committed: M adapted; working tree: M
+                                modified, D missing, ? not committed yet)
         -v, --verbose           also list all linked files with their sources
                                 (pinned ones with the newest tag: the first
                                 tagged commit after theirs on the source
@@ -66,7 +68,8 @@ Basic commands:
                                 are merged (conflicts: resolve, then git
                                 add), uncommitted
                                 changes refused, a missing file too (see
-                                restore); a file renamed upstream is
+                                restore); a new link is synced the first
+                                time as by add; a file renamed upstream is
                                 followed, one deleted there is reported
         --all                   all files with something to sync (with
                                 --commit, -b, --tag: all files)
@@ -2117,6 +2120,12 @@ class Link:
     blob = property(lambda self: self.v.get("blob", ""))
 
     @property
+    def unsynced(self):
+        """A new link, never synced: no base (commit and blob) yet - written
+        by hand, e.g. many at once; pull does the first sync, as add would."""
+        return not self.commit and not self.blob
+
+    @property
     def adaptable(self):
         """Local adaptations allowed; otherwise the file must stay an exact
         copy of the upstream version (the default)."""
@@ -2201,6 +2210,7 @@ class FileState:
     old_blob: str
     new_path: str             # upstream path, the new one if renamed there
     adaptable: bool           # local adaptations allowed (else: an exact copy)
+    unsynced: bool = False    # a new link, no base yet (see Link.unsynced)
     error: Optional[str] = None
     warnings: list = field(default_factory=list)
     src: object = None        # Source of the upstream repository
@@ -2227,7 +2237,7 @@ class FileState:
     def missing(self):
         """The linked file is not in the working tree - never allowed, also
         for an adaptable file: restore it, or remove the link."""
-        return self.local == "missing" and not self.error
+        return self.local == "missing" and not self.error and not self.unsynced
 
     @property
     def attention(self):
@@ -2298,7 +2308,7 @@ def evaluate(ctx, repo, link):
                 | 'missing'); what a pull has to merge. A missing file (deleted
                 or not, committed or not) is never allowed (see missing)"""
     st = FileState(link=link, rel=link.rel, old=link.commit, old_blob=link.blob,
-                   new_path=link.path, adaptable=link.adaptable)
+                   new_path=link.path, adaptable=link.adaptable, unsynced=link.unsynced)
     url, ref, path = link.url, link.ref, link.path
     problem = path_problem(link.rel)
     if problem:
@@ -2330,7 +2340,7 @@ def evaluate(ctx, repo, link):
     try:
         exists = link.target.is_file()
         head = st.head_blob = repo.head_blob(link.rel)
-        if head:
+        if head and not st.unsynced:      # no base: nothing to compare with
             st.committed = "unmodified" if base_matches(
                 head, lambda: repo.read_blob(head)) else "adapted"
         if not exists:
@@ -2341,6 +2351,8 @@ def evaluate(ctx, repo, link):
             st.worktree = "modified"
         if not exists:
             st.local = "missing"
+        elif st.unsynced:
+            pass                          # compared with upstream by pull, as by add
         elif st.worktree == "clean":
             st.local = "clean" if st.committed == "unmodified" else "modified"
         elif base_matches(repo.worktree_blob(link.target), link.target.read_bytes):
@@ -2386,7 +2398,7 @@ def evaluate(ctx, repo, link):
         else:
             st.count_args = (st.old, st.new, *dict.fromkeys((link.path, path)))
             st.diverged = not src.is_ancestor(st.old, st.new)
-    else:
+    elif not st.unsynced:
         st.warnings.append(f"last synced commit {st.old[:12] or '-'} not found in "
                            f"{src.label} (unpushed?)")
     st.changed = st.new_blob != st.old_blob
@@ -2412,6 +2424,8 @@ def evaluate(ctx, repo, link):
 
 def upstream_state(st):
     """(label, note) of a pending upstream change, None if there is none."""
+    if st.unsynced:
+        return "new", "not synced yet"
     if st.moved:
         kind, path, commit = st.moved
         if kind == "deleted":
@@ -2465,7 +2479,7 @@ def short_code(st):
     if st.error:
         return "E  "
     up = upstream_state(st)
-    x = {"pending": "P", "older": "O", "changed": "D", "renamed": "R",
+    x = {"pending": "P", "older": "O", "changed": "D", "new": "N", "renamed": "R",
          "deleted": "X"}[up[0]] if up else " "
     y = "M" if st.committed == "adapted" else " "     # like git's index column
     z = "D" if st.missing else {"modified": "M", "added": "?"}.get(st.worktree, " ")
@@ -2530,7 +2544,8 @@ def print_long(repo, sts, verbose):
 
     ok = [st for st in sts if not st.error]
     if verbose:
-        rows = [(st.committed or "uncommitted", st.rel, link_text(st), "dim") for st in ok]
+        rows = [("new" if st.unsynced else st.committed or "uncommitted", st.rel,
+                 link_text(st), "dim") for st in ok]
         section("Linked files:", [], rows, None)
 
     up_rows = []
@@ -2763,6 +2778,8 @@ def pull_one(repo, reg, st, args):
                       f"({src.short(st.moved[2])}) - keep the file with "
                       f"'git filesync unlink {rel}', or delete it too with "
                       f"'git filesync rm {rel}'")
+    if st.unsynced:
+        return first_sync(repo, st, args, new, new_blob, path)
     local_mod = st.local == "modified"
     discard = args.overwrite and local_mod
     if not st.adaptable and local_mod and not discard:
@@ -2835,6 +2852,47 @@ def pull_one(repo, reg, st, args):
                          discard), conflicts, content
 
 
+def first_sync(repo, st, args, new, new_blob, path):
+    """pull of a new link (no base yet, see Link.unsynced) does what add
+    would do: the version pulled becomes the base; a missing file is
+    fetched, an existing one must be that version - else refused as by
+    add: --overwrite takes the upstream version, an adaptable file keeps
+    its differences as adaptations. Returns as pull_one; content None: the
+    existing file is staged as it is."""
+    link, src = st.link, st.src
+    target = link.target
+    fetch, modified = not target.is_file(), False
+    if not fetch:
+        try:
+            modified = not matches_base(
+                repo, src, SimpleNamespace(blob=new_blob, path=path, rel=st.rel),
+                repo.worktree_blob(target), target.read_bytes)
+        except BaseUnavailable:
+            raise FsError(f"{st.rel}: upstream version {new_blob[:12]} not available")
+    replace = modified and args.overwrite
+    if modified and not (replace or st.adaptable):
+        rel = path_arg(repo, st.rel)
+        raise FsError(f"{st.rel}: not synced yet, and differs from upstream {src.short(new)} - "
+                      f"use 'git filesync pull --overwrite {rel}' to take the upstream "
+                      f"version, or 'git filesync set --adaptable {rel}' to keep it (the "
+                      "differences become local adaptations)")
+    note = "fetched" if fetch else "existing file replaced" if replace else \
+        "existing file, with local adaptations" if modified else "existing file"
+    if args.dry_run:
+        print(f"{st.rel}: would sync to {link.name}@{src.short(new)} (not synced yet; {note})")
+        return None
+    content = repo.normalize(src.read_content(new_blob, path), st.rel) \
+        if fetch or replace else None
+    if replace:
+        save_discarded(repo, [st.rel])
+    link.set("commit", new)
+    link.set("blob", new_blob)
+    print(f"{st.rel}: {paint('synced', 'green')} (first sync; {note})")
+    plan = [Planned(st.rel, path, new, new_blob, content, modified and not replace, replace)]
+    return build_add_message(plan, src, link.name, link.url, link.ref, path, False,
+                             st.adaptable, new), 0, content
+
+
 def pull_message(parts, names):
     """The commit message of a pull: a file's own message, or for several
     files a subject over all and each file's message as a section of it."""
@@ -2857,9 +2915,14 @@ def newest_hint(rels, tag, line, newest):
 def write_synced(repo, contents, conflicted):
     """Write the synced files ({rel: content in this repository's stored
     form}) to the working tree and stage them - those with merge conflicts
-    only written (see Repo.write_files)."""
-    repo.write_files([(r, c) for r, c in contents.items() if r not in conflicted])
+    only written (see Repo.write_files); content None: an existing file
+    synced for the first time, staged as it is (see first_sync)."""
+    repo.write_files([(r, c) for r, c in contents.items()
+                      if c is not None and r not in conflicted])
     repo.write_files([(r, c) for r, c in contents.items() if r in conflicted], stage=False)
+    kept = [r for r, c in contents.items() if c is None]
+    if kept:
+        repo.git(["add", "-f", "--"] + [lit(r) for r in kept])
 
 
 def report_pull(repo, reg, synced):
@@ -2926,8 +2989,9 @@ def cmd_pull(ctx, repo, args):
             continue
         done += 1
         if args.verbose:
-            at = st.src.short(st.old) if st.has_old else link.blob[:8]
-            print(paint(f"{st.rel}: {link_text(st)}, synced at {at}", "dim"))
+            at = "not synced yet" if st.unsynced else \
+                f"synced at {st.src.short(st.old) if st.has_old else link.blob[:8]}"
+            print(paint(f"{st.rel}: {link_text(st)}, {at}", "dim"))
         try:
             if once:
                 st.target, st.once = target_rev(ctx, link, args), once_text(args)
@@ -2957,7 +3021,8 @@ def cmd_pull(ctx, repo, args):
 
 def diff_pairs(ctx, repo, args):
     """(st, name, base, other) blob ids for every linked file with a difference.
-    base = last synced upstream version; other = local file (None if missing),
+    base = last synced upstream version (None: not synced yet, --upstream);
+    other = local file (None if missing),
     or with --upstream the upstream version pull would sync to (with the same
     --commit / -b / --tag). All as actual content in this repo's normalized
     form (LFS resolved), so eol conventions and LFS pointers don't show up."""
@@ -3002,6 +3067,8 @@ def diff_pairs(ctx, repo, args):
                     continue
             if not st.new_blob or st.new_blob == st.old_blob:   # unchanged or deleted
                 continue
+        elif st.unsynced:             # no base yet: no local changes against it
+            continue
         elif args.committed:
             if st.committed != "adapted":
                 continue
@@ -3010,8 +3077,9 @@ def diff_pairs(ctx, repo, args):
         # both sides as actual content in this repo's form (LFS resolved),
         # stored all at once below
         try:
-            try:
-                base = repo.normalize(st.src.read_content(st.old_blob, link.path), st.rel)
+            try:          # a new link (--upstream): the whole file is new
+                base = None if st.unsynced else \
+                    repo.normalize(st.src.read_content(st.old_blob, link.path), st.rel)
             except FsError:
                 raise FsError(f"synced version {st.old_blob[:12]} unavailable")
             if args.upstream:
@@ -3033,7 +3101,8 @@ def diff_pairs(ctx, repo, args):
         pairs.append((st, name, base, other))
     contents = [c for _, _, base, other in pairs for c in (base, other) if c is not None]
     ids = dict(zip(map(id, contents), repo.store_many(contents)))
-    return rc, [(st, name, ids[id(base)], ids[id(other)] if other is not None else None)
+    return rc, [(st, name, ids[id(base)] if base is not None else None,
+                 ids[id(other)] if other is not None else None)
                 for st, name, base, other in pairs]
 
 
@@ -3055,7 +3124,7 @@ def cmd_diff(ctx, repo, args):
     rc, pairs = diff_pairs(ctx, repo, args)
     if not pairs:
         return rc
-    left = make_tree(repo, [(n, b) for _, n, b, _ in pairs])
+    left = make_tree(repo, [(n, b) for _, n, b, _ in pairs if b])
     right = make_tree(repo, [(n, o) for _, n, _, o in pairs if o])
     if args.for_upstream:
         prefixes = []                  # standard a/ b/: `git apply` upstream
@@ -3124,9 +3193,10 @@ def cmd_difftool(ctx, repo, args):
             def tmpfile(label, oid):
                 f = Path(td) / label / Path(name).name    # keep the extension
                 f.parent.mkdir(parents=True, exist_ok=True)
-                f.write_bytes(repo.to_worktree(repo.read_blob(oid), st.rel))
+                f.write_bytes(repo.to_worktree(repo.read_blob(oid), st.rel) if oid else b"")
                 return str(f)
-            left = tmpfile(f"synced-{src.short(st.old) if st.has_old else st.old_blob[:8]}", base)
+            left = tmpfile("not-synced-yet" if st.unsynced else
+                           f"synced-{src.short(st.old) if st.has_old else st.old_blob[:8]}", base)
             if args.upstream:
                 right = tmpfile(f"upstream-{src.short(st.new)}", other)
             elif args.committed:
@@ -3430,6 +3500,11 @@ def cmd_restore(ctx, repo, args):
     srcs, bases = {}, {}           # rel -> Source, base content in this repo's form
     repo.check_plain(lk.rel for lk in links)
     for link in links:
+        if link.unsynced:
+            error(f"{link.rel}: not synced yet, nothing to restore - sync it with "
+                  f"'git filesync pull {path_arg(repo, link.rel)}'")
+            rc = EXIT_ERROR
+            continue
         try:
             srcs[link.rel] = ctx.source(link.url, link.ref, link.name, link.line)
         except FsError as e:
@@ -3588,7 +3663,10 @@ def commit_in(src, link):
 def keep_base(src, link):
     """A link moves to another upstream (src): its synced version stays the
     base, with the commit it has there (see commit_in) - or, if src doesn't
-    have it, a warning: the previous sync point counts as unknown."""
+    have it, a warning: the previous sync point counts as unknown. A new
+    link (not synced yet) has none."""
+    if link.unsynced:
+        return
     commit = commit_in(src, link)
     if not commit:
         warn(f"{link.rel}: synced version {link.blob[:12]} not found in "
@@ -3685,12 +3763,19 @@ def cmd_set(ctx, repo, args):
         if not head:
             raise FsError(ref_missing(lk.ref, src))
         path = upstream_path(args.path)
-        commit, blob, _, modified, _ = find_base(repo, src, head, lk.rel, path, lk.target)
+        if lk.unsynced:           # no base yet: pull takes the path's version
+            if not src.blob_at(head, path):
+                raise FsError(f"no file '{path}' in {src.label} at {src.short(head)}")
+            commit, blob, modified = "", "", False
+        else:
+            commit, blob, _, modified, _ = find_base(repo, src, head, lk.rel, path, lk.target)
         if (path, commit, blob) != (lk.path, lk.commit, lk.blob):
-            print(f"{would}{lk.rel}: path {lk.path} -> {path}, based on {src.short(commit)}"
+            print(f"{would}{lk.rel}: path {lk.path} -> {path}"
+                  + (f", based on {src.short(commit)}" if commit else "")
                   + (", with local modifications" if modified else ""))
             for k, v in (("path", path), ("commit", commit), ("blob", blob)):
-                lk.set(k, v)
+                if v:
+                    lk.set(k, v)
             changed = True
     if args.adaptable is not None:
         for lk in links:
@@ -3744,8 +3829,9 @@ def registry_problems(reg):
             problems.append(f"{what}: no [source \"{v.get('source', '')}\"]")
         if not v.get("path"):
             problems.append(f"{what} has no path")
-        if not (v.get("commit") and v.get("blob")):
-            problems.append(f"{what} lacks commit or blob (the synced version)")
+        if bool(v.get("commit")) != bool(v.get("blob")):
+            problems.append(f"{what} has only one of commit and blob (both: the synced "
+                            "version; neither: a new link, synced by pull)")
     return problems
 
 

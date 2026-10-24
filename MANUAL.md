@@ -83,6 +83,17 @@ file. Git-config format:
   it (not the branch tip at sync time). One file version thus always gives
   the same entry, and commits that don't touch the file – unpushed, rebased
   or not – don't matter.
+- An entry **without** `commit` and `blob` is a **new link**, not synced
+  yet: `status` shows it as `new`, and `pull` syncs it the first time,
+  exactly as [`add`](#add) would – a missing file is fetched, an existing
+  one must be the upstream version (else `pull` refuses, as `add` does:
+  `--overwrite` takes the upstream version; with `adaptable = true` the
+  file is kept, its differences count as adaptations). That way many files
+  can be linked at once: write their entries with [`edit`](#edit) – only
+  `source` and `path` (and `tag`, `adaptable` as needed), e.g. by copy and
+  paste – then `pull --all`. Such a link has nothing to
+  [`restore`](#restore) or `diff` against yet (`diff --upstream` shows the
+  whole file).
 - Everything else may be edited by hand – with [`edit`](#edit), or e.g.
   `git config -f .git-filesync file.src/foo.c.path lib/new_name.c` (a file
   renamed upstream is [followed by `pull`](#files-renamed-or-deleted-upstream)
@@ -137,8 +148,8 @@ adaptations by merging them with the new upstream version, and – like
 `git pull` – refuses files with uncommitted changes (see [`pull`](#pull)).
 `diff` and `difftool` show both kinds (see [`diff`](#diff)).
 
-A linked file must exist, adaptable or not: one that is **missing** in
-the working tree – deleted, the deletion committed or not – is never
+A linked file must exist once it is synced, adaptable or not: one that
+is **missing** in the working tree – deleted, the deletion committed or not – is never
 allowed, as its link is still there. Bring it back with
 [`restore`](#restore), or remove the link with [`unlink`](#unlink) (or the
 link and the file with [`rm`](#rm)).
@@ -220,7 +231,7 @@ the command and lists them.
 
 | Respect | Compares | States |
 |---|---|---|
-| upstream | synced upstream version ↔ current upstream | up to date, `pending`, `older`, `changed`, `renamed`, `deleted` |
+| upstream | synced upstream version ↔ current upstream | up to date, `pending`, `older`, `changed`, `renamed`, `deleted`, `new` (a [new link](#the-git-filesync-file), not synced yet) |
 | committed | synced upstream version ↔ committed file (`HEAD`) | `unmodified`, `adapted` |
 | working tree | committed file ↔ working file | clean, `modified`, `new file`; not there: `missing` |
 
@@ -261,7 +272,7 @@ something to report, with three columns:
 
 | Column | Meaning |
 |---|---|
-| 1 – upstream | `P` pending, `O` upstream branch older than last sync, `D` history diverged or previous sync point unknown, `R` renamed upstream, `X` deleted upstream, `E` error |
+| 1 – upstream | `P` pending, `O` upstream branch older than last sync, `D` history diverged or previous sync point unknown, `R` renamed upstream, `X` deleted upstream, `N` new link (not synced yet), `E` error |
 | 2 – committed | `M` adapted (committed modifications, like git's index column) |
 | 3 – working tree | `M` modified, `D` missing (deleted; marked `(missing!)`), `?` not committed yet |
 
@@ -339,7 +350,8 @@ sync), or discard them with `git restore`.
 
 **Missing files:** `pull` refuses a [missing](#local-modifications-on-top-of-the-upstream-version)
 file – bring it back with `restore` first (or remove the link with
-`unlink`); `pull --all` leaves it alone.
+`unlink`); `pull --all` leaves it alone. A [new link](#the-git-filesync-file)
+(no `commit` and `blob` yet) is no missing file: `pull` fetches it.
 
 **Revisions:** `--commit` accepts branch names (`develop` means the current
 upstream `develop`), tags and commit ids. Recorded is the commit that last
@@ -699,8 +711,9 @@ checked and staged, like after [`set`](#set):
 - If it can no longer be read, `edit` fails and stages nothing; run it
   again to fix the file.
 - Gaps that `status` would report – a file whose `[source]` doesn't exist,
-  a source without `url` or without branch (or with a tag, as before 0.14), a file without `path`,
-  `commit` or `blob`, a source no file uses – are shown as warnings.
+  a source without `url` or without branch (or with a tag, as before 0.14), a file without `path`
+  or with only one of `commit` and `blob` (neither: a [new
+  link](#the-git-filesync-file)), a source no file uses – are shown as warnings.
 - Without changes, nothing happens.
 
 For the usual changes, the commands that know what they mean are safer:

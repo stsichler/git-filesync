@@ -2142,6 +2142,56 @@ check "parallel first clones: all succeed" "$(cat "$T"/s23p?.rc | oneline)" "0 0
 
 
 # =============================================================================
+section "24. New links written by hand: pull does the first sync, as add would"
+# =============================================================================
+cd "$T"
+
+git init -q m24 && (cd m24 && mkdir lib && for f in a b c d e; do echo $f > lib/$f.c; done \
+  && git add . && git commit -qm init)
+new_repo s24
+addc "$TURL/m24" a.c -p lib/a.c
+SRC24=$(git config -f .git-filesync file.a.c.source)
+# entries without commit and blob: new links; b.c missing (fetched), c.c and
+# e.c differ from upstream, d.c is the upstream version already
+mkdir sub
+for f in sub/b c d e; do
+  printf '[file "%s.c"]\n\tsource = %s\n\tpath = lib/%s.c\n' $f "$SRC24" "${f#sub/}" >> .git-filesync
+done
+echo own > c.c && echo d > d.c && echo own > e.c
+check "edit: a new link is no gap" \
+  "$(GIT_EDITOR="echo '# more' >>" git filesync edit 2>&1 | grep -c '^warning:.*commit')" "0"
+check "edit: only one of commit and blob is a gap" \
+  "$(GIT_EDITOR="printf '\\tcommit = 1234\\n' >>" git filesync edit 2>&1 | grep -c '^warning: .*\[file "e.c"\] has only one of commit and blob')" "1"
+git config -f .git-filesync --unset file.e.c.commit
+git commit -qam "new links by hand" && git add c.c d.c e.c && git commit -qm "files"
+check "new link: status -s" "$(git filesync status -s | oneline)" "N   c.c N   d.c N   e.c N   sub/b.c "
+check "new link: long format" "$(git filesync status | grep -cE "^${TAB}new:[[:space:]]+sub/b\.c  \(not synced yet\)$")" "1"
+check "new link: missing file is no error" "$(git filesync status | grep -c 'Missing files')" "0"
+check "new link: to sync (--exit-code)" "$(rc git filesync status --exit-code)" "1"
+check "new link: diff of local changes shows nothing" "$(git filesync diff -- --name-only)" ""
+check "new link: diff --upstream shows the whole file" \
+  "$(git filesync diff --upstream sub/b.c | grep -E '^(new file|\+b)' | oneline)" "new file mode 100644 +b "
+check "new link: restore refuses" "$(git filesync restore sub/b.c 2>&1)" \
+  "error: sub/b.c: not synced yet, nothing to restore - sync it with 'git filesync pull sub/b.c'"
+check "new link: pull -n" "$(git filesync pull -n sub/b.c)" \
+  "sub/b.c: would sync to $SRC24@$(git -C m24 rev-parse --short HEAD 2>/dev/null || git -C ../m24 rev-parse --short HEAD) (not synced yet; fetched)"
+check "new link: pull --all syncs, refuses the differing one(s)" \
+  "$(rc git filesync pull --all)-$(cat sub/b.c)-$(git diff --cached --name-only | oneline)" "2-b-.git-filesync sub/b.c "
+check "new link: differing file refused like add" \
+  "$(git filesync pull c.c 2>&1 | grep -c "^error: c.c: not synced yet, and differs from upstream .* use 'git filesync pull --overwrite c.c' to take the upstream version, or 'git filesync set --adaptable c.c' to keep it")" "1"
+check "new link: base recorded" "$(git config -f .git-filesync file.sub/b.c.blob)" "$(git -C ../m24 rev-parse HEAD:lib/b.c)"
+check "new link: proposed message like add" \
+  "$(grep -cE '^\[filesync\] Sync 2 files|^Add sub/b.c from|^Link d.c to' .git/SQUASH_MSG)" "3"
+quiet git filesync set c.c --adaptable
+check "new link, adaptable: kept, differences are adaptations" \
+  "$(rc git filesync pull c.c)-$(cat c.c)" "0-own"
+check "new link: --overwrite takes the upstream version" "$(rc git filesync pull --overwrite e.c)-$(cat e.c)" "0-e"
+git commit -q --no-edit
+check "new links synced" "$(git filesync status -s | oneline)" " M  c.c "
+check "new links synced: exit code" "$(rc git filesync status --exit-code)" "0"
+
+
+# =============================================================================
 # summary
 # =============================================================================
 section "Upstream repositories untouched"
