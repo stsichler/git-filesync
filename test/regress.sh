@@ -697,12 +697,14 @@ check "violation in long format" \
 check "violation exit code" "$(rc git filesync status --exit-code src/bar.h)" "1"
 check "violation in hook output" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'NOT ALLOWED')" "1"
 check "pull refuses to merge into a file not adaptable" "$(rc pullc src/bar.h)" "2"
-check "refusal: how to go on" \
-  "$(pullc src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or sync anyway with 'git filesync pull --overwrite src/bar.h'")" "1"
+check "refusal: how to go on (uncommitted: no pull --overwrite, which refuses them)" \
+  "$(pullc src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or only the uncommitted ones with 'git restore src/bar.h'$")" "1"
 check "pull --all continues after the refusal" "$(pullc --all 2>&1 | grep -c '^error:')" "0"
 check "adaptable file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
 git commit -qm "adapt bar" src/bar.h
 check "violation (committed)" "$(git filesync status -s src/bar.h)" " M  src/bar.h  (not adaptable!)"
+check "refusal (committed): pull --overwrite or set --adaptable" \
+  "$(pullc src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or sync anyway with 'git filesync pull --overwrite src/bar.h'; or allow them with 'git filesync set --adaptable src/bar.h'$")" "1"
 check "status: restore hint for a file not adaptable" \
   "$(git filesync status src/bar.h | grep -c 'use "git filesync restore -SW <file>..." to discard them')" "1"
 
@@ -781,6 +783,15 @@ echo own > own.gen
 check "add: an ignored file is linked and staged like any other" \
   "$(rc git filesync add --adaptable "$SRC" own.gen -p lib/foo.c) $(git status --porcelain own.gen)" "0 A  own.gen"
 git reset -q --hard && rm -f own.gen .git/info/exclude
+check "mv: NEW/ must be an existing directory, like git mv" \
+  "$(git filesync mv include/renamed.h r.h/ 2>&1)-$([ -e r.h ] && echo created)" \
+  "error: destination directory does not exist, source=include/renamed.h, destination=r.h/-"
+check "mv: NEW/ an existing directory" "$(git filesync mv -n include/renamed.h src/)" \
+  "would move include/renamed.h -> src/renamed.h"
+check "add: FILE/ for an upstream file must be an existing directory, like cp" \
+  "$(git filesync add "$SRC" newdir/ -p lib/foo.c 2>&1)-$([ -e newdir ] && echo created)" \
+  "error: directory 'newdir' does not exist-"
+check "add: FILE/ an existing directory" "$(git filesync add -n "$SRC" include/ -p lib/foo.c | grep -c '^would link include/foo.c ')" "1"
 check "add: a file where the directory should be" \
   "$(git filesync add -n "$SRC" include/renamed.h/x.h -p lib/foo.c 2>&1 | grep -c "^error: cannot add 'include/renamed.h/x.h': 'include/renamed.h' is not a directory$")" "1"
 check "add DIR: a missing parent directory is refused" \
@@ -1650,6 +1661,12 @@ quiet pullc --all -b main
 check "-b: synced to the branch" "$(oneline < a.c)" "1-local 2 3 4 5-rc "
 check "-b: registry unchanged" \
   "$(git config -f .git-filesync source.$SRC12.branch) $(git config -f .git-filesync file.a.c.tag)" "main v1.0"
+check "pull --all with paths is refused" "$(rc git filesync pull --all a.c)-$(git status --porcelain)" "2-"
+quiet pullc --all --commit v1.1
+check "pull --all --commit: all files, once" \
+  "$(cat a.c b.c c.c | oneline) $(git config -f .git-filesync file.a.c.tag)" \
+  "1-local 2 3 4 5-v11 1 2 3 4 5-v11 1 2 3 4 5  v1.0"
+quiet pullc --all -b main
 
 # refusals and dry runs change nothing
 check "pull -v: where from, synced so far" "$(git filesync pull -v -n a.c | head -1)" \
@@ -1676,7 +1693,8 @@ check "difftool --upstream --tag: temp copy of the tag's version" \
   "$(git filesync difftool -y --upstream --tag v1.0 a.c | grep -c "upstream-$(git -C ../co12 rev-parse --short v1.0)")" "1"
 check "diff --upstream --tag: nothing changed" "$(git status --porcelain)" ""
 check "diff --tag without --upstream" "$(rc git filesync diff --tag v1.0 a.c)" "2"
-check "diff --upstream --commit: one file only" "$(rc git filesync diff --upstream --commit v1.0)" "2"
+check "diff --upstream --commit: all files" \
+  "$(git filesync diff --upstream --commit v1.1 -- --name-only)" "a.c"
 check "diff --upstream: missing tag" "$(rc git filesync diff --upstream --tag v9 a.c)" "2"
 
 # pull --dry-run with a conflict points to both diffs, with the same options

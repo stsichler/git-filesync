@@ -101,10 +101,10 @@ version. Any change of it, committed or not, is reported as a violation:
 `status` marks it `NOT ALLOWED: not adaptable` (`-s`: `(not adaptable!)`,
 `--exit-code`: 1), the hooks report it, and `pull` refuses to sync it
 (other files of `pull --all` are still synced). Inspect with `diff`, then go
-back to the synced upstream version with [`restore -SW`](#restore) (or sync
-and discard in one step with `pull --overwrite`), discard only uncommitted
-changes with `git restore` – or allow changes by marking the file
-adaptable.
+back to the synced upstream version with [`restore -SW`](#restore) (or,
+for committed changes, sync and discard in one step with `pull
+--overwrite`), discard only uncommitted changes with `git restore` – or
+allow changes by marking the file adaptable.
 
 An **adaptable** file may carry local adaptations, which `pull` keeps (see
 below). Mark a file with `add --adaptable`, or later with [`set
@@ -157,9 +157,9 @@ Basic commands – what you need day to day:
 
 | Command | Purpose |
 |---|---|
-| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, upstream path, adaptable |
+| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, tag, upstream path, adaptable |
 | [`edit`](#edit) | edit `.git-filesync` in the editor |
-| [`source [ACTION …]`](#source) | list and add sources, rename them, change URL or branch |
+| [`source [ACTION …]`](#source) | list sources, rename them, change URL or branch |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
 | [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear |
 | [`hooks [ACTION]`](#hooks) | the hooks: show, install, remove; reminders, push check |
@@ -197,7 +197,7 @@ the command and lists them.
 
 | Option | Commands | Effect |
 |---|---|---|
-| `--no-fetch` | `status`, `pull`, `diff`/`difftool --upstream`, `add`, `set`, `source set-url`/`set-branch` | don't fetch, use the cached state (offline); `restore` and `diff` of local changes never fetch – the synced versions don't change |
+| `--no-fetch` | `status`, `pull`, `diff`/`difftool --upstream`, `add`, `set`, `source set-url`/`set-branch` | don't fetch, use the cached state (offline); an upstream repository not in the [cache](#cache) yet is cloned anyway. `restore` and `diff` of local changes fetch only if the cache lacks the branch – the synced versions don't change |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
 ### `status`
@@ -304,8 +304,8 @@ In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 
 | Option | Effect |
 |---|---|
-| `--all` | all linked files with something to sync |
-| `--commit REV` | sync to this upstream revision instead – branch, tag or commit id, also backwards; exactly one file. The link keeps its branch or tag |
+| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths |
+| `--commit REV` | sync to this upstream revision, once (as `-b`) – branch, tag or commit id, also backwards. The link keeps its branch or tag |
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH, once: the files keep following their own branch or tag (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG, once (as `-b`) |
 | `--overwrite` | discard local adaptations and take the upstream version as is (also when the file is up to date) |
@@ -362,8 +362,9 @@ then `pull`.
 
 With `--all`, every file is synced, also those up to date with their own
 branch or tag. A branch or tag that doesn't exist upstream is refused; `-b`
-and `--tag` can't be combined. `pull --commit REV` does the same for one
-file and any revision.
+and `--tag` can't be combined. `pull --commit REV` does the same for any
+revision – a commit id belongs to one upstream repository, so files of
+other ones get an error (and the others are synced).
 
 ```sh
 git filesync pull --tag v1.3.0 --all       # all files to v1.3.0, once
@@ -396,8 +397,8 @@ work as usual. With `--exit-code` or `--quiet` after `--`, exit code 1 means
 differences, like `git diff`.
 
 `--commit`, `-b` and `--tag` select the upstream version exactly like the
-same options of [`pull`](#pull) (`--commit` for one file only, files
-renamed upstream are followed), so replacing `pull` with
+same options of [`pull`](#pull) (files renamed upstream are followed),
+so replacing `pull` with
 `diff --upstream` in a command line previews its changes. They only work
 with `--upstream`; `.git-filesync` stays untouched. `pull --dry-run` tells
 whether the adaptations would merge cleanly; on conflicts it points to
@@ -504,7 +505,7 @@ directory (see [below](#linking-a-directory)).
 | `--commit REV` | upstream revision to base FILE on, instead of the head of the branch (or the tag) |
 | `--overwrite` | replace an existing FILE (for DIR: existing files) with the upstream version; uncommitted content is kept as a blob ([discarded content](#discarded-content)) |
 | `--adaptable` | local adaptations allowed; also: keep an existing FILE that differs from the base (see [Exact copies and adaptable files](#exact-copies-and-adaptable-files)) |
-| `--force` | relink a file that is already linked |
+| `--force` | relink a file that is already linked – like `unlink` and `add`: the entry is made anew, with `--tag` and `--adaptable` as given now |
 | `-n`, `--dry-run` | change nothing, only show what would be linked and on which upstream version it would be based |
 
 - The base is always the upstream version `pull` would sync to: the head of
@@ -520,7 +521,8 @@ directory (see [below](#linking-a-directory)).
     brings the changes since).
 - If FILE doesn't exist, it is fetched from upstream. Its directory must
   exist, as for `cp`: `add` doesn't create a mistyped one (`error:
-  directory 'src/new' does not exist`). `pull` and `restore` do create
+  directory 'src/new' does not exist`); a FILE ending in `/` for an upstream
+  file must be an existing directory, which the file goes into. `pull` and `restore` do create
   missing directories – the entry is there already, as for `git checkout`.
 - Like `git add`, `add` stages FILE (as it is in the working tree) and its
   entry in `.git-filesync`, but doesn't commit – also a file matched by
@@ -607,7 +609,7 @@ unlinked.
 
 `mv OLD NEW` – move a linked file (`git mv`) and its link together; NEW may
 be an existing directory. As for `git mv`, the directory NEW goes into must
-exist. Both are staged. `-n` / `--dry-run` only shows
+exist, and a NEW ending in `/` must be an existing directory. Both are staged. `-n` / `--dry-run` only shows
 what would be moved.
 
 ## Advanced commands
@@ -657,8 +659,11 @@ it still applies, so adaptations stay adaptations:
   Otherwise there is a warning, and the previous sync point counts as
   unknown;
 - **another path** (`-p`): as for `add` – the version of that path at the
-  head of the branch (or the tag); differences count as adaptations. (A file
-  renamed upstream doesn't need this: [`pull`](#pull) follows renames.)
+  head of the branch (or the tag). The file itself stays as it is, so
+  differences count as adaptations; for a file that isn't adaptable they
+  are a change not allowed, which `status` reports and `pull --overwrite`
+  resolves by taking the new version. (A file renamed upstream doesn't need
+  this: [`pull`](#pull) follows renames.)
 
 ```sh
 git filesync set src/foo.c --adaptable

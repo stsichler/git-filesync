@@ -64,13 +64,14 @@ Basic commands:
                                 add), uncommitted
                                 changes refused; a file renamed upstream is
                                 followed, one deleted there is reported
-        --all                   all files with something to sync
-        --commit REV            sync to this upstream revision (one file;
-                                also backwards)
+        --all                   all files with something to sync (with
+                                --commit, -b, --tag: all files)
         -b, --branch BRANCH     sync to the head of BRANCH, once: the files
                                 keep following their own branch or tag
                                 (to switch: set -b/--tag)
         --tag TAG               sync to TAG, once (as -b)
+        --commit REV            sync to this upstream revision, once (as -b;
+                                also backwards)
         --overwrite             discard local adaptations instead of merging
         -n, --dry-run           only report what would happen (incl.
                                 merge conflicts); change nothing
@@ -136,7 +137,8 @@ Basic commands:
                                 version (uncommitted content: as restore)
         --adaptable             local adaptations allowed (default: FILE
                                 must stay an exact copy)
-        --force                 relink an already linked file
+        --force                 relink an already linked file (a new entry,
+                                as after unlink: --tag, --adaptable as given)
         -n, --dry-run           only show what would be linked
 
     rm PATH...                  remove linked files and their links, staged
@@ -169,6 +171,7 @@ Advanced commands:
         --no-tag                follow the source's branch again
         -p, --path PATH         another upstream path (one file); its
                                 current version becomes the base, as for add
+                                (the file stays as it is)
         --adaptable, --no-adaptable  allow local adaptations / not any more
         -n, --dry-run           only show what would change
 
@@ -202,7 +205,8 @@ Advanced commands:
                                 also done automatically after a fetch, at
                                 most once a day
         --older-than DAYS, --max-size SIZE  other limits (SIZE: 500M, 2G;
-                                0: no limit, as configured; all: cache clear)
+                                0: no limit, as configured; everything:
+                                cache clear)
         -n, --dry-run           only show what would be removed
     cache clear [-n]            remove all clones
     cache dir                   print its directory (e.g. for CI caching)
@@ -229,7 +233,9 @@ Advanced commands:
         --no-fetch              use the cached state, don't fetch (status,
                                 pull, diff/difftool --upstream, add, set,
                                 source set-url/set-branch; restore and diff
-                                of local changes never fetch)
+                                of local changes fetch only if the cache
+                                lacks the branch); an upstream not in the
+                                cache yet is cloned anyway
         --color[=WHEN], --no-color  always, never or auto (default)
 
 Exit codes: 0 ok, 1 unfinished (pull: conflicts; --exit-code),
@@ -1463,6 +1469,12 @@ class Repo:
         p = Path(os.path.normpath(self.base / s))
         return p.parent.resolve() / p.name if p.name else p.resolve()
 
+    @staticmethod
+    def names_dir(s):
+        """Does a path given by the user end with a separator, i.e. name a
+        directory (as for cp and git mv)?"""
+        return s.endswith("/") or os.name == "nt" and s.endswith("\\")
+
     def rel(self, path):
         """Path relative to the top-level directory (as git names it);
         outside the working tree: '../...', or absolute on another drive."""
@@ -2672,19 +2684,20 @@ def commit_target(st, rev):
     raise FsError(f"'{link.path}' does not exist at {rev}")
 
 
-def check_target_args(args, links):
+def check_target_args(args):
     """--commit / -b / --tag (pull, diff --upstream): the upstream version to sync to."""
     if args.commit and (args.branch or args.tag):
         raise FsError("--commit cannot be combined with -b or --tag")
     if args.branch and args.tag:
         raise FsError("-b and --tag cannot be combined")
-    if args.commit and len(links) != 1:
-        raise FsError("--commit requires exactly one file")
 
 
 def target_rev(ctx, link, args):
-    """-b / --tag (pull, diff --upstream): the upstream commit to sync to
-    once - the head of that branch, or the tag. The link keeps its own."""
+    """--commit / -b / --tag (pull, diff --upstream): the upstream revision
+    to sync to once - that revision, the head of that branch, or the tag.
+    The link keeps its own branch or tag."""
+    if args.commit:
+        return args.commit        # resolved in the link's upstream (commit_target)
     ref = ("tag", args.tag) if args.tag else ("branch", args.branch)
     # a tag pattern: the newest matching tag on the source's branch
     line = link.source.get("branch") if args.tag and is_tag_pattern(args.tag) else None
@@ -2696,8 +2709,9 @@ def target_rev(ctx, link, args):
 
 
 def once_text(args):
-    """The branch or tag of pull -b/--tag."""
-    return f"tag {args.tag}" if args.tag else f"branch {args.branch}"
+    """The revision, branch or tag of pull --commit/-b/--tag."""
+    return f"commit {args.commit}" if args.commit else f"tag {args.tag}" if args.tag \
+        else f"branch {args.branch}"
 
 
 def target_opts(args):
@@ -2713,8 +2727,8 @@ def pull_one(repo, reg, st, args):
     link, src = st.link, st.src
     path = st.new_path                   # differs from link.path if renamed upstream
     new, new_blob = st.new, st.new_blob
-    if args.commit or st.once:
-        new, new_blob, path = commit_target(st, args.commit or st.target)
+    if st.once:
+        new, new_blob, path = commit_target(st, st.target)
     elif st.moved and st.moved[0] == "deleted":
         rel = path_arg(repo, st.rel)
         raise FsError(f"{st.rel}: '{st.moved[1]}' was deleted in {src.label} "
@@ -2725,11 +2739,13 @@ def pull_one(repo, reg, st, args):
     discard = args.overwrite and local_mod
     if not st.adaptable and local_mod and not discard:
         rel = path_arg(repo, st.rel)
+        # uncommitted changes: pull refuses them anyway (see below)
+        ways = (f", or sync anyway with 'git filesync pull --overwrite {rel}'; or allow "
+                f"them with 'git filesync set --adaptable {rel}'" if st.worktree == "clean"
+                else f", or only the uncommitted ones with 'git restore {rel}'")
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {rel}'; discard them with "
-                      f"'git filesync restore -SW {rel}', or sync anyway with "
-                      f"'git filesync pull --overwrite {rel}'; or allow them with "
-                      f"'git filesync set --adaptable {rel}'")
+                      f"'git filesync restore -SW {rel}'{ways}")
     if new_blob == st.old_blob and path == link.path and st.worktree != "missing" \
             and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
@@ -2846,9 +2862,11 @@ def cmd_pull(ctx, repo, args):
         links = select_links(repo, reg, args.files)
     else:
         raise FsError("specify file(s) or --all")
-    check_target_args(args, links)
+    if args.all and args.files:
+        raise FsError("--all cannot be combined with paths")
+    check_target_args(args)
     rc, done, moved = EXIT_OK, 0, False
-    once = args.branch or args.tag      # sync to another branch or tag, once
+    once = args.commit or args.branch or args.tag   # another revision, branch or tag, once
     prefetch(ctx, repo, links)
     newest, synced = {}, []             # synced: (rel, source, message, conflicts)
     contents = {}                       # rel -> synced content (normalized form)
@@ -2898,7 +2916,7 @@ def cmd_pull(ctx, repo, args):
     if synced:
         write_synced(repo, contents, {rel for rel, _, _, c in synced if c})
         rc = max(rc, report_pull(repo, reg, synced))
-    if moved and not args.dry_run:
+    if moved and not args.dry_run and not args.commit:
         opt = f"--tag {args.tag}" if args.tag else f"-b {args.branch}"
         how = f"'git filesync set <file>... {opt}'"
         print(f"hint: the links still follow their own branch or tag, so a plain pull goes "
@@ -2922,7 +2940,7 @@ def diff_pairs(ctx, repo, args):
     pairs = []
     reg = Registry(repo)
     links = select_links(repo, reg, args.files)
-    check_target_args(args, links)
+    check_target_args(args)
     prefetch(ctx, repo, links)
     repo.check_plain(lk.rel for lk in links)
     states = [evaluate(ctx, repo, link) for link in links]
@@ -2949,8 +2967,8 @@ def diff_pairs(ctx, repo, args):
         if args.upstream:
             if args.commit or args.branch or args.tag:
                 try:
-                    rev = args.commit or target_rev(ctx, link, args)
-                    st.new, st.new_blob, st.new_path = commit_target(st, rev)
+                    st.new, st.new_blob, st.new_path = commit_target(
+                        st, target_rev(ctx, link, args))
                 except FsError as e:
                     error(f"{st.rel}: {e}")
                     rc = EXIT_ERROR
@@ -3218,6 +3236,8 @@ def cmd_add(ctx, repo, args):
     path = upstream_path(args.path if args.path else rel)
     patterns = args.include or args.exclude
     upstream_file = bool(path) and not patterns and bool(src.blob_at(at or head, path))
+    if repo.names_dir(args.file) and upstream_file:
+        require_dir(repo, target, rel)          # FILE/: an existing directory, like cp
     if target.is_dir() and upstream_file:       # like cp: into the directory
         target = target / Path(path).name
         rel = repo.rel(target)
@@ -3499,6 +3519,9 @@ def cmd_mv(ctx, repo, args):
     if old not in reg.files:
         raise FsError(f"'{old}' is not linked")
     dst = repo.user_path(args.dst)
+    if repo.names_dir(args.dst) and not dst.is_dir():      # NEW/: like git mv
+        raise FsError(f"destination directory does not exist, source={old}, "
+                      f"destination={repo.rel(dst)}/")
     if dst.is_dir():
         dst = dst / Path(old).name
     new = repo.rel(dst)
@@ -4271,7 +4294,7 @@ def run(argv=None):
     p = add_command(sub, "pull", parents=[common], help="sync file(s) from upstream")
     p.add_argument("files", nargs="*", metavar="PATH", help="linked files or directories")
     p.add_argument("--all", action="store_true", help="sync all files with something to sync")
-    p.add_argument("--commit", metavar="REV", help="sync to this upstream revision (exactly one file)")
+    p.add_argument("--commit", metavar="REV", help="sync to this upstream revision, once (as -b)")
     p.add_argument("-b", "--branch", help="sync to the head of this upstream branch, once (the "
                                           "files keep following their own branch or tag)")
     p.add_argument("--tag", help="sync to this upstream tag, once (as -b)")
@@ -4299,7 +4322,7 @@ def run(argv=None):
         g.add_argument("--committed", action="store_true",
                        help="only the committed adaptations (synced -> HEAD)")
         p.add_argument("--commit", metavar="REV",
-                       help="with --upstream: as for pull, synced -> REV (exactly one file)")
+                       help="with --upstream: as for pull, synced -> REV")
         p.add_argument("-b", "--branch", help="with --upstream: as for pull, synced -> BRANCH")
         p.add_argument("--tag", help="with --upstream: as for pull, synced -> TAG")
         if name == "diff":

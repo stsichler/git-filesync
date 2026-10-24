@@ -21,8 +21,10 @@ Upstream changes to sync:
 	pending:    src/foo.c  (2 commits)
 
 $ git filesync pull src/foo.c
-[main 4f1c2a9] Sync src/foo.c from owner/lib@a1b2c3d
- 2 files changed, 3 insertions(+), 3 deletions(-)
+src/foo.c: synced
+src/foo.c: synced and staged. Commit with:
+    git commit
+(it offers the proposed commit message; a copy stays in .git/FILESYNC_MSG)
 ```
 
 ## Why?
@@ -76,7 +78,7 @@ afterwards.
 
 ## Features
 
-- Links single files between repositories – one by one or all files of a
+- Links single files between repositories – one by one or all files of an
   upstream directory at once; all links of a repository live in one file,
   `.git-filesync`, at its root (git-config format, like `.gitmodules`)
 - Self-contained repositories: linked files are committed copies, so a clone is
@@ -91,8 +93,8 @@ afterwards.
   `difftool`
 - Files renamed upstream are followed, deleted ones reported
 - Commands named like Git commands behave like them (`status`, `pull`,
-  `diff`, `difftool`, `restore`, `rm`, `mv`); dry runs for `pull`, `add`,
-  `rm`, `unlink`, `mv`
+  `diff`, `difftool`, `restore`, `add`, `rm`, `mv`); dry runs for `pull`,
+  `add`, `rm`, `unlink`, `mv`, `set`
 - Optional local checkout of the upstream repository instead of fetching – works
   offline; the checkout is only read, never written to
 - Uncommitted content that `restore`, `add --overwrite` or `rm -f` discard is
@@ -187,9 +189,9 @@ Advanced commands:
 
 | Command | Purpose |
 |---|---|
-| `set PATH… OPTIONS` | change source, upstream path or adaptable of linked files |
+| `set PATH… OPTIONS` | change source, tag, upstream path or adaptable of linked files |
 | `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
-| `source [ACTION …]` | list and add sources; rename, change URL or branch |
+| `source [ACTION …]` | list sources; rename, change URL or branch |
 | `source map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
 | `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear |
 | `hooks [install\|uninstall]` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |
