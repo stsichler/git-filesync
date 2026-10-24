@@ -43,18 +43,21 @@ Basic commands:
 
     status [PATH...]            state of the linked files like `git status`:
                                 upstream changes to sync, committed
-                                adaptations, uncommitted changes
+                                adaptations, missing files, uncommitted
+                                changes
         -s, --short             short format: upstream/committed/worktree
                                 columns (upstream: P pending, O older,
                                 D diverged, R renamed, X deleted
-                                upstream, N new; E error; committed: M
-                                adapted)
+                                upstream; E error; committed: M adapted;
+                                working tree: M modified, D missing, ?
+                                not committed yet)
         -v, --verbose           also list all linked files with their sources
                                 (pinned ones with the newest tag: the first
                                 tagged commit after theirs on the source
                                 branch's first-parent line)
-        --exit-code             exit 1 if something is to sync or a file
-                                that isn't adaptable is modified
+        --exit-code             exit 1 if something is to sync, a linked
+                                file is missing, or a file that isn't
+                                adaptable is modified
 
     pull PATH... | --all        sync to the upstream version of the files and
                                 stage them, like `git merge --squash`; the
@@ -62,7 +65,8 @@ Basic commands:
                                 since the last sync per file; adaptations
                                 are merged (conflicts: resolve, then git
                                 add), uncommitted
-                                changes refused; a file renamed upstream is
+                                changes refused, a missing file too (see
+                                restore); a file renamed upstream is
                                 followed, one deleted there is reported
         --all                   all files with something to sync (with
                                 --commit, -b, --tag: all files)
@@ -97,7 +101,7 @@ Basic commands:
     restore PATH...             restore files to the synced upstream version
                                 (the base), like `git restore`; e.g. to
                                 discard changes to a file that isn't
-                                adaptable;
+                                adaptable, or bring back a missing one;
                                 uncommitted content is kept as a blob
                                 (`discarded: FILE (git show ID ...)`)
         -S, --staged            restore the index instead of the working tree
@@ -216,7 +220,8 @@ Advanced commands:
                                 hooks of other tools without our lines
     hooks install               install the hooks (or update them):
                                 reminders about pending syncs, changes
-                                not allowed, errors; pre-push also warns if a
+                                not allowed, missing files, errors;
+                                pre-push also warns if a
                                 pushed file is synced to an upstream commit
                                 that isn't on the upstream server
                                 (filesync.pushCheck = warn | error, which
@@ -2215,8 +2220,19 @@ class FileState:
     changed: bool = False     # upstream version differs from the base
     pending: bool = False     # something for pull to do
     violation: bool = False   # modified, but not adaptable
-    once: Optional[str] = None  # pull -b/--tag: the branch or tag synced to, once
-    target: Optional[str] = None    # ... and its commit
+    once: Optional[str] = None  # pull --commit/-b/--tag: what is synced to, once
+    target: Optional[str] = None    # ... and its revision
+
+    @property
+    def missing(self):
+        """The linked file is not in the working tree - never allowed, also
+        for an adaptable file: restore it, or remove the link."""
+        return self.local == "missing" and not self.error
+
+    @property
+    def attention(self):
+        """Something to report (status --exit-code, hooks)."""
+        return bool(self.error or self.pending or self.violation or self.missing)
 
 
 def commits_since(st):
@@ -2279,7 +2295,8 @@ def evaluate(ctx, repo, link):
     worktree  - working file vs. committed version
                 ('clean' | 'modified' | 'deleted' | 'added' | 'missing')
     local     - working file vs. synced upstream version ('clean' | 'modified'
-                | 'missing'); what a pull has to merge"""
+                | 'missing'); what a pull has to merge. A missing file (deleted
+                or not, committed or not) is never allowed (see missing)"""
     st = FileState(link=link, rel=link.rel, old=link.commit, old_blob=link.blob,
                    new_path=link.path, adaptable=link.adaptable)
     url, ref, path = link.url, link.ref, link.path
@@ -2373,8 +2390,7 @@ def evaluate(ctx, repo, link):
         st.warnings.append(f"last synced commit {st.old[:12] or '-'} not found in "
                            f"{src.label} (unpushed?)")
     st.changed = st.new_blob != st.old_blob
-    # a file deleted in the working tree is an uncommitted change, not a sync
-    st.pending = st.changed or bool(st.moved) or st.worktree == "missing"
+    st.pending = st.changed or bool(st.moved)
     if src.local:
         if src.note:
             st.warnings.append(src.note)
@@ -2410,8 +2426,6 @@ def upstream_state(st):
         if st.has_old and not st.diverged:
             return "pending", plural(commits_since(st), "commit")
         return "changed", "history diverged" if st.has_old else "previous sync point unknown"
-    if st.worktree == "missing":
-        return "new", "not in the working tree yet"
     return None
 
 
@@ -2432,6 +2446,8 @@ def describe(st):
         parts.append((f"{note}" if label == "older" else f"upstream {label} ({note})", "yellow"))
     if st.violation:
         parts.append((violation_text(st), "boldred"))
+    if st.missing:
+        parts.append(("MISSING (still linked)", "boldred"))
     return parts or [("up to date", "green")]
 
 
@@ -2449,10 +2465,10 @@ def short_code(st):
     if st.error:
         return "E  "
     up = upstream_state(st)
-    x = {"pending": "P", "older": "O", "changed": "D", "new": "N", "renamed": "R",
+    x = {"pending": "P", "older": "O", "changed": "D", "renamed": "R",
          "deleted": "X"}[up[0]] if up else " "
     y = "M" if st.committed == "adapted" else " "     # like git's index column
-    z = {"modified": "M", "deleted": "D", "added": "?"}.get(st.worktree, " ")
+    z = "D" if st.missing else {"modified": "M", "added": "?"}.get(st.worktree, " ")
     return x + y + z
 
 
@@ -2482,7 +2498,8 @@ def print_short(repo, sts):
             line = paint(code[0], "yellow") + paint(code[1], "cyan") + paint(code[2], "red")
             if code[0] == "E":
                 line = paint(code, "boldred")
-            print(f"{line} {shown(repo, st.rel)}" + (paint("  (not adaptable!)", "boldred") if st.violation else ""))
+            note = "  (missing!)" if st.missing else "  (not adaptable!)" if st.violation else ""
+            print(f"{line} {shown(repo, st.rel)}" + paint(note, "boldred"))
 
 
 def link_text(st):
@@ -2539,7 +2556,14 @@ def print_long(repo, sts, verbose):
              for st in adapted],
             "cyan")
 
-    labels = {"modified": "modified", "deleted": "deleted", "added": "new file"}
+    missing = [st for st in ok if st.missing]
+    section("Missing files:",
+            ['use "git filesync restore <file>..." to bring them back (the synced version)',
+             'use "git filesync unlink <file>..." to remove the links'],
+            [("missing", st.rel, "NOT ALLOWED: still linked", "boldred") for st in missing],
+            "red")
+
+    labels = {"modified": "modified", "added": "new file"}
     dirty = [st for st in ok if st.worktree in labels]
     section("Uncommitted changes:",
             ['use "git filesync diff <file>..." to see all local changes',
@@ -2558,7 +2582,7 @@ def print_long(repo, sts, verbose):
     if not up_rows and len(ok) == len(sts):
         n = len(sts)
         files = plural(n, "linked file")
-        print("nothing to sync" + ("" if adapted or dirty else
+        print("nothing to sync" + ("" if adapted or dirty or missing else
                                    f", {'all ' if n > 1 else ''}{files} unmodified"))
 
 
@@ -2577,7 +2601,7 @@ def cmd_status(ctx, repo, args):
         return EXIT_OK
     prefetch(ctx, repo, links)
     sts = [evaluate(ctx, repo, link) for link in links]
-    attention = [st for st in sts if st.error or st.pending or st.violation]
+    attention = [st for st in sts if st.attention]
     rc = EXIT_ERROR if any(st.error for st in sts) else \
         EXIT_PENDING if args.exit_code and attention else EXIT_OK
     for st in sts:
@@ -2727,6 +2751,10 @@ def pull_one(repo, reg, st, args):
     link, src = st.link, st.src
     path = st.new_path                   # differs from link.path if renamed upstream
     new, new_blob = st.new, st.new_blob
+    if st.missing:
+        rel = path_arg(repo, st.rel)
+        raise FsError(f"{st.rel}: missing - bring it back with 'git filesync restore {rel}', "
+                      f"or remove the link with 'git filesync unlink {rel}'")
     if st.once:
         new, new_blob, path = commit_target(st, st.target)
     elif st.moved and st.moved[0] == "deleted":
@@ -2746,13 +2774,12 @@ def pull_one(repo, reg, st, args):
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {rel}'; discard them with "
                       f"'git filesync restore -SW {rel}'{ways}")
-    if new_blob == st.old_blob and path == link.path and st.worktree != "missing" \
-            and not discard:
+    if new_blob == st.old_blob and path == link.path and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
               + (" (adaptations kept)" if st.committed == "adapted" else ""))
         return None
     # like `git pull`: uncommitted changes are never merged into a sync
-    if st.worktree in ("modified", "deleted", "added"):
+    if st.worktree in ("modified", "added"):
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
                       "commit or stash them first ('git stash'; "
                       f"'git restore {path_arg(repo, st.rel)}' discards them)")
@@ -3955,11 +3982,11 @@ def cmd_cache(args):
 
 def hook_reminders(ctx, repo):
     """Terse notes on stderr about linked files needing attention: something
-    to sync, a change not allowed, an error."""
+    to sync, a change not allowed, a missing file, an error."""
     links = Registry(repo).links()
     prefetch(ctx, repo, links)
     sts = [evaluate(ctx, repo, link) for link in links]
-    attention = [st for st in sts if st.error or st.pending or st.violation]
+    attention = [st for st in sts if st.attention]
     for st in attention:
         print(f"filesync: {paint(st.rel, 'yellow', 'err')}: {render(describe(st), 'err')}",
               file=sys.stderr)
@@ -3968,6 +3995,9 @@ def hook_reminders(ctx, repo):
     if any(st.violation for st in attention):
         print("filesync: see 'git filesync status' and 'git filesync diff <file>' "
               "for changes not allowed", file=sys.stderr)
+    if any(st.missing for st in attention):
+        print("filesync: run 'git filesync restore <file>' to bring a missing file back, "
+              "or 'git filesync unlink <file>' to remove its link", file=sys.stderr)
 
 
 def pushed_revs(hook_args):
@@ -4288,8 +4318,8 @@ def run(argv=None):
     p.add_argument("-v", "--verbose", action="store_true",
                    help="also list all linked files with their sources")
     p.add_argument("--exit-code", action="store_true",
-                   help="exit with 1 if something is to sync or a file that isn't adaptable is "
-                        "modified")
+                   help="exit with 1 if something is to sync, a linked file is missing, or a "
+                        "file that isn't adaptable is modified")
 
     p = add_command(sub, "pull", parents=[common], help="sync file(s) from upstream")
     p.add_argument("files", nargs="*", metavar="PATH", help="linked files or directories")

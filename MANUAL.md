@@ -137,6 +137,12 @@ adaptations by merging them with the new upstream version, and – like
 `git pull` – refuses files with uncommitted changes (see [`pull`](#pull)).
 `diff` and `difftool` show both kinds (see [`diff`](#diff)).
 
+A linked file must exist, adaptable or not: one that is **missing** in
+the working tree – deleted, the deletion committed or not – is never
+allowed, as its link is still there. Bring it back with
+[`restore`](#restore), or remove the link with [`unlink`](#unlink) (or the
+link and the file with [`rm`](#rm)).
+
 ## Commands
 
 Basic commands – what you need day to day:
@@ -208,15 +214,15 @@ the command and lists them.
 |---|---|
 | `-s`, `--short` | short format, three columns |
 | `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one also the [newer tags](#newer-tags) on the source's branch |
-| `--exit-code` | exit with 1 if something is to sync or a file that isn't adaptable is modified |
+| `--exit-code` | exit with 1 if something is to sync, a linked file is missing, or a file that isn't adaptable is modified |
 
 `status` looks at each linked file in three independent respects:
 
 | Respect | Compares | States |
 |---|---|---|
-| upstream | synced upstream version ↔ current upstream | up to date, `pending`, `older`, `changed`, `renamed`, `deleted`, `new` |
+| upstream | synced upstream version ↔ current upstream | up to date, `pending`, `older`, `changed`, `renamed`, `deleted` |
 | committed | synced upstream version ↔ committed file (`HEAD`) | `unmodified`, `adapted` |
-| working tree | committed file ↔ working file | clean, `modified`, `deleted`, `new file` |
+| working tree | committed file ↔ working file | clean, `modified`, `new file`; not there: `missing` |
 
 and reports them in sections like `git status`:
 
@@ -231,6 +237,11 @@ Locally adapted files:
   (use "git filesync restore -SW <file>..." to discard them, or "git filesync set --adaptable <file>..." to allow them)
 	adapted:    include/x.h  (NOT ALLOWED: not adaptable)
 	adapted:    src/foo.c
+
+Missing files:
+  (use "git filesync restore <file>..." to bring them back (the synced version))
+  (use "git filesync unlink <file>..." to remove the links)
+	missing:    src/old.c  (NOT ALLOWED: still linked)
 
 Uncommitted changes:
   (use "git filesync diff <file>..." to see all local changes)
@@ -250,20 +261,21 @@ something to report, with three columns:
 
 | Column | Meaning |
 |---|---|
-| 1 – upstream | `P` pending, `O` upstream branch older than last sync, `D` history diverged or previous sync point unknown, `R` renamed upstream, `X` deleted upstream, `N` not in the working tree yet, `E` error |
+| 1 – upstream | `P` pending, `O` upstream branch older than last sync, `D` history diverged or previous sync point unknown, `R` renamed upstream, `X` deleted upstream, `E` error |
 | 2 – committed | `M` adapted (committed modifications, like git's index column) |
-| 3 – working tree | `M` modified, `D` deleted, `?` not committed yet |
+| 3 – working tree | `M` modified, `D` missing (deleted; marked `(missing!)`), `?` not committed yet |
 
 ```
 P   src/a.c
 PM  src/b.c
  MM src/c.c
  M  include/x.h  (not adaptable!)
+  D src/old.c  (missing!)
 ```
 
 Like `git status`, the exit code is 0 (2 on errors); `--exit-code` makes it
-1 when something is to sync or a file that isn't adaptable is modified (for scripts and
-[CI](#ci)).
+1 when something is to sync, a linked file is missing, or a file that isn't
+adaptable is modified (for scripts and [CI](#ci)).
 
 ### `pull`
 
@@ -324,6 +336,10 @@ the merge and discards the adaptations.
 uncommitted changes (`your local changes … would be overwritten by pull`):
 commit or stash them first (`git stash`, then `git stash pop` after the
 sync), or discard them with `git restore`.
+
+**Missing files:** `pull` refuses a [missing](#local-modifications-on-top-of-the-upstream-version)
+file – bring it back with `restore` first (or remove the link with
+`unlink`); `pull --all` leaves it alone.
 
 **Revisions:** `--commit` accepts branch names (`develop` means the current
 upstream `develop`), tags and commit ids. Recorded is the commit that last
@@ -445,7 +461,7 @@ given counts.
 `restore PATH…` – like `git restore`, but from the synced upstream version
 (the base recorded in `.git-filesync`) instead of the index: the files get
 that version back, e.g. to discard the changes of a file that isn't
-adaptable.
+adaptable, or to bring back a missing file.
 `.git-filesync` stays as it is, nothing is committed – commit the result
 like any change. Unlike `pull --overwrite`, `restore` doesn't bring in a
 newer upstream version.
@@ -522,8 +538,9 @@ directory (see [below](#linking-a-directory)).
 - If FILE doesn't exist, it is fetched from upstream. Its directory must
   exist, as for `cp`: `add` doesn't create a mistyped one (`error:
   directory 'src/new' does not exist`); a FILE ending in `/` for an upstream
-  file must be an existing directory, which the file goes into. `pull` and `restore` do create
-  missing directories – the entry is there already, as for `git checkout`.
+  file must be an existing directory, which the file goes into. `restore` does create missing
+  directories, bringing back a missing file – the entry is there already,
+  as for `git checkout`.
 - Like `git add`, `add` stages FILE (as it is in the working tree) and its
   entry in `.git-filesync`, but doesn't commit – also a file matched by
   `.gitignore`: linking a file means tracking it. A plain `git commit` then
@@ -852,8 +869,8 @@ it to be there.
 ### `hooks`
 
 `hooks install` adds a `pre-push` hook (fetches) and a `post-merge` hook
-(cached state only). Both report pending syncs, errors and changes not
-allowed (files that aren't adaptable) on stderr. If a hook of another tool already exists, the lines
+(cached state only). Both report pending syncs, errors, missing files and
+changes not allowed (files that aren't adaptable) on stderr. If a hook of another tool already exists, the lines
 to add are printed instead; `hooks install --force` adds them itself, right
 after the `#!` line – before anything else, as needed for `git lfs
 pre-push` (see below) and for hooks that end with `exec` or `exit`. Hooks
@@ -1164,7 +1181,7 @@ access.)
 | Code | Meaning |
 |---|---|
 | `0` | ok |
-| `1` | unfinished: `pull` with conflicts; `status --exit-code` with something to sync (including files deleted upstream) or a change not allowed (a file that isn't adaptable); `diff -- --exit-code` with differences |
+| `1` | unfinished: `pull` with conflicts; `status --exit-code` with something to sync (including files deleted upstream) a missing file, or a change not allowed (a file that isn't adaptable); `diff -- --exit-code` with differences |
 | `2` | error |
 | `141` | the output went into a pipe that was closed early (`… \| head`, a pager quit), like Git (128 + SIGPIPE); reading commands stop there, the others finish their work first |
 

@@ -272,13 +272,21 @@ git reset -q --hard
 quiet pullc --commit "$OLD" src/lib.c
 check "revert message" "$(git log -1 --format=%B | grep -c 'Reverts upstream')" "1"
 
-# a deleted linked file is an uncommitted change; pull --all leaves it alone
+# a deleted linked file is missing - never allowed, also for an adaptable
+# file; pull refuses it, pull --all leaves it alone
 quiet pullc src/lib.c
 rm src/lib.c
-check "deleted file is an uncommitted change" "$(st)" " MD"
+check "deleted file is missing" "$(git filesync status -s src/lib.c)" " MD src/lib.c  (missing!)"
+check "missing: long format" \
+  "$(git filesync status src/lib.c | grep -cE "^${TAB}missing:[[:space:]]+src/lib\.c  \(NOT ALLOWED: still linked\)$")" "1"
+check "missing: hints" "$(git filesync status src/lib.c | grep -c 'git filesync restore <file>...')" "1"
+check "missing: exit code" "$(rc git filesync status --exit-code src/lib.c)" "1"
+check "missing: hook output" "$(git filesync hook post-merge 2>&1 | grep -c 'src/lib.c: MISSING')" "1"
+check "pull refuses a missing file" "$(git filesync pull src/lib.c 2>&1)" \
+  "error: src/lib.c: missing - bring it back with 'git filesync restore src/lib.c', or remove the link with 'git filesync unlink src/lib.c'"
 quiet pullc --all
-check "pull --all leaves locally deleted file alone" \
-  "$([ -e src/lib.c ] && echo restored || echo deleted)" "deleted"
+check "pull --all leaves a missing file alone" \
+  "$([ -e src/lib.c ] && echo restored || echo missing)" "missing"
 git restore src/lib.c
 
 # hooks: install and remove our own hook files; 'hooks' shows their state
@@ -800,7 +808,10 @@ check "add DIR: DIR itself may be new" "$(git filesync add -n "$SRC" newdir -p l
 rm -r include
 check "restore: recreates a missing directory" "$(rc git filesync restore include/renamed.h) $(cat include/renamed.h)" "0 n"
 git rm -q -r include && git commit -qm "include gone, its entry kept"
-check "pull: recreates a missing directory" "$(rc git filesync pull include/renamed.h) $(cat include/renamed.h)" "0 n"
+check "deletion committed: still missing" "$(git filesync status -s include/renamed.h)" "  D include/renamed.h  (missing!)"
+check "deletion committed: pull refuses" "$(rc git filesync pull include/renamed.h)-$([ -e include ] && echo created)" "2-"
+check "deletion committed: restore brings it back" \
+  "$(rc git filesync restore include/renamed.h) $(cat include/renamed.h) $(git filesync status -s include/renamed.h)" "0 n   ? include/renamed.h"
 git reset -q --hard HEAD~1
 
 # unlink: removes the entry, keeps the file; the last unlink removes the registry
