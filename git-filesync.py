@@ -281,7 +281,6 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path, PureWindowsPath
-from types import SimpleNamespace
 
 __version__ = "0.20.1"
 REGISTRY = ".git-filesync"
@@ -307,6 +306,9 @@ HOOKS = {
         f"{REFS_VAR}_end"]),
     "post-merge": 'git filesync hook post-merge "$@" </dev/null || true',
 }
+# after set and edit, which change only .git-filesync
+REGISTRY_STAGED = (f'{REGISTRY} staged (use "git filesync status" to see what changes, '
+                   '"git filesync pull <file>..." to sync)')
 REGISTRY_HEADER = ("# git-filesync: files of this repository that are kept in sync with\n"
                    "# files in other repositories. Maintained by 'git filesync'; [file]\n"
                    "# commit/blob record the upstream version each file is based on.\n")
@@ -673,6 +675,11 @@ def local_mappings(scope=None, cwd=None):
     return result
 
 
+def is_repository(d):
+    """Is directory d (a mapped checkout) a Git repository?"""
+    return git(["-C", d, "rev-parse", "--git-dir"], env=clean_env(), check=False).returncode == 0
+
+
 def mappings_for(url, scope=None, cwd=None):
     """local_mappings() for this URL only."""
     return [m for m in local_mappings(scope, cwd) if norm_url(m[2]) == norm_url(url)]
@@ -753,6 +760,7 @@ class Source:
         self.dir, self.ref, self.label = Path(workdir), ref, label
         self.local = local   # mapped local checkout: ref is its local branch
         self.note = note     # remark about the ref choice, shown by status
+        self.spec = None     # ('branch' | 'tag', name) it was made for (see Context.source)
         self.tag_names = None   # for a tag pattern: the matching tags ref is at
         self.lfs_server = None  # mapped: () -> repository to fetch missing LFS objects in
         self._memo = {}      # answers that don't change during a run (see prefetch)
@@ -770,12 +778,16 @@ class Source:
 
     def head_desc(self):
         """What a local checkout has checked out: branch name or detached commit."""
-        p = self.git(["symbolic-ref", "--short", "-q", "HEAD"], check=False)
-        if p.returncode == 0:
-            return out(p)
-        p = self.git(["describe", "--tags", "--exact-match", "HEAD"], check=False)
-        return f"detached at {out(p)}" if p.returncode == 0 else \
-            f"detached at {self.short('HEAD')}"
+        key = ("head_desc",)
+        if key not in self._memo:
+            p = self.git(["symbolic-ref", "--short", "-q", "HEAD"], check=False)
+            if p.returncode == 0:
+                self._memo[key] = out(p)
+            else:
+                p = self.git(["describe", "--tags", "--exact-match", "HEAD"], check=False)
+                self._memo[key] = f"detached at {out(p)}" if p.returncode == 0 else \
+                    f"detached at {self.short('HEAD')}"
+        return self._memo[key]
 
     def is_published(self, commit):
         """True if commit is on some remote-tracking branch (or there is no remote)."""
@@ -790,7 +802,10 @@ class Source:
         commits = [c for c in dict.fromkeys(commits) if ("published", c) not in self._memo]
         if not commits:
             return
-        if not out(self.git(["for-each-ref", "--count=1", "refs/remotes/"])):
+        if ("remotes",) not in self._memo:
+            self._memo[("remotes",)] = bool(out(self.git(["for-each-ref", "--count=1",
+                                                          "refs/remotes/"])))
+        if not self._memo[("remotes",)]:
             unpublished = set()
         else:
             p = self.git(["rev-list"] + commits + ["--not", "--remotes"], check=False)
@@ -827,7 +842,7 @@ class Source:
     def _resolve(self, rev):
         if rev is None:
             cands = [self.ref]
-        elif not self.local and not re.fullmatch(r"[0-9a-f]{40,64}", rev):
+        elif not self.local and not re.fullmatch(r"[0-9a-f]{40,64}|refs/.*", rev):
             # cache clone: branch names refer to the remote-tracking refs
             cands = [f"refs/remotes/origin/{rev}", rev]
         else:
@@ -837,6 +852,13 @@ class Source:
             if p.returncode == 0:
                 return out(p)
         return None
+
+    def tip(self):
+        """Commit of the branch or tag; one that doesn't exist upstream is an error."""
+        commit = self.resolve()
+        if not commit:
+            raise FsError(ref_missing(self.spec, self))
+        return commit
 
     def require(self, rev):
         """Commit id of rev; an unknown revision is an error."""
@@ -986,6 +1008,12 @@ class Source:
         one of the commits `contains`, if given): the remote-tracking
         branches, in a local checkout overridden by its local branches of the
         same name."""
+        key = ("branches",) + tuple(contains)
+        if key not in self._memo:
+            self._memo[key] = self._branch_refs(contains)
+        return self._memo[key]
+
+    def _branch_refs(self, contains):
         prefixes = ["refs/remotes/origin/"] + (["refs/heads/"] if self.local else [])
         refs = out(self.git(["for-each-ref", "--format=%(refname)"]
                             + [x for c in contains for x in ("--contains", c)] + prefixes)).split()
@@ -1201,6 +1229,7 @@ class Context:
         if key not in self._sources:
             try:
                 self._sources[key] = self._make(url, ref, name, line)
+                self._sources[key].spec = ref
                 if self._sources[key].local:     # LFS objects it lacks: via the cache clone
                     self._sources[key].lfs_server = lambda: self._cache(url)
             except FsError as e:      # e.g. a failed clone: not tried again for each file
@@ -1221,8 +1250,7 @@ class Context:
         if key not in self._local_ok:
             local = self._mappings.get(key)
             path = Path(os.path.expanduser(local)) if local else None
-            if path and git(["-C", path, "rev-parse", "--git-dir"], env=clean_env(),
-                            check=False).returncode:
+            if path and not is_repository(path):
                 warn(f"mapped local checkout {path} is not a Git repository; using {url}")
                 path = None
             self._local_ok[key] = path
@@ -1591,18 +1619,7 @@ class Repo:
             tmp_git(["update-index", "-z", "--add", "--index-info"], "checkout",
                     "".join(f"100644 {o}\t{r}\0" for o, r in zip(oids, rels)).encode())
             tmp_git(["checkout-index", "-f", "-z", "--stdin"], "checkout", names)
-            current = self.index_entries(rels)
-            if current:
-                tmp_git(["update-index", "-z", "--add", "--index-info"], "add",
-                        "".join(f"{m} {o}\t{r}\0" for r, (m, o) in current.items()).encode())
-            tmp_git(["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], "add",
-                    "".join(lit(r) + "\0" for r in rels).encode())
-            p = tmp_git(["ls-files", "-s", "-z"], "add", None)
-        found = {}
-        for entry in p.stdout.decode("utf-8", "replace").split("\0"):
-            info, _, name = entry.partition("\t")
-            if name:
-                found[name] = info.split(" ")[1]
+            found = self._add_in_index(rels, lambda args, data: tmp_git(args, "add", data))
         for (key, _, rel) in batch:
             if rel in found:
                 self._local[key] = found[rel]
@@ -1617,7 +1634,7 @@ class Repo:
 
     def read_blobs(self, oids):
         """Read these blobs of this repo with one `cat-file --batch`."""
-        for (_, oid), content in batch_read(self.git, oids, {("raw", o): 1 for o in self._raw}):
+        for (_, oid), content in batch_read(self.git, [o for o in oids if o not in self._raw], {}):
             self._raw[oid] = content
 
     def normalize(self, content, rel):
@@ -1656,9 +1673,9 @@ class Repo:
                 entries[name] = (info.split(" ")[0], info.split(" ")[1])
         return entries
 
-    def write_files(self, files, stage=True, worktree=True):
+    def write_files(self, files, stage=True):
         """Put these [(rel, content)] - content in the form stored here, LFS
-        resolved - into the index and/or the working tree, converted for it
+        resolved - into the working tree (and the index, if stage), converted for it
         as on any checkout (eol, attributes, LFS): each stored as this
         repository stores it - as it is without content-changing attributes
         (see check_plain), else converted (see as_local; LFS: the pointer) -
@@ -1670,7 +1687,7 @@ class Repo:
         rest = [(c, r) for r, c in files if r not in ids]
         self.as_local_many(rest)
         ids.update((r, self.as_local(c, r)) for c, r in rest)
-        self.put_blobs([(r, ids[r]) for r, _ in files], stage, worktree)
+        self.put_blobs([(r, ids[r]) for r, _ in files], stage)
 
     def put_blobs(self, entries, stage=True, worktree=True):
         """Put these [(rel, blob id)] - blobs as stored here (LFS pointers
@@ -1704,28 +1721,36 @@ class Repo:
 
     def worktree_blobs(self, rels):
         """{rel: blob id} of these working tree files as git would store them
-        (clean-filtered), via a temporary index - with this index's entries,
-        for git's rule on CRLF already in the index - instead of a
-        hash-object each. Writes the blobs: for reading commands (scratch)."""
+        (clean-filtered), via a temporary index (see _add_in_index) instead
+        of a hash-object each; those asked before from the cache. Writes the
+        blobs: for reading commands (scratch)."""
         # a symlink: git would take the link, not the file (see worktree_blob)
         rels = [r for r in rels if (self.top / r).is_file() and not (self.top / r).is_symlink()]
-        if not rels:
-            return {}
-        with tempfile.TemporaryDirectory(prefix="git-filesync-") as d:
-            env = dict(os.environ, GIT_INDEX_FILE=os.path.join(d, "index"))
-            current = self.index_entries(rels)
-            if current:
-                self.git(["update-index", "-z", "--add", "--index-info"], env=env,
-                         data="".join(f"{m} {o}\t{r}\0" for r, (m, o) in current.items()).encode())
-            self.git(["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"], env=env,
-                     data="".join(lit(r) + "\0" for r in rels).encode())
-            p = self.git(["ls-files", "-s", "-z"], env=env)
-        found = {}
+        todo = [r for r in rels if r not in self._wt]
+        if todo:
+            with tempfile.TemporaryDirectory(prefix="git-filesync-") as d:
+                env = dict(os.environ, GIT_INDEX_FILE=os.path.join(d, "index"))
+                self._wt.update(self._add_in_index(
+                    todo, lambda args, data: self.git(args, env=env, data=data)))
+        return {r: self._wt[r] for r in rels if r in self._wt}
+
+    def _add_in_index(self, rels, run):
+        """{rel: blob id} of these files as `git add` stores them (clean
+        filters, eol), added into an index that holds this index's entries
+        first - for git's rule on CRLF already in the index. run(args, data)
+        runs git with that index and the work tree to add from."""
+        current = self.index_entries(rels)
+        if current:
+            run(["update-index", "-z", "--add", "--index-info"],
+                "".join(f"{m} {o}\t{r}\0" for r, (m, o) in current.items()).encode())
+        run(["add", "-f", "--pathspec-from-file=-", "--pathspec-file-nul"],
+            "".join(lit(r) + "\0" for r in rels).encode())
+        p = run(["ls-files", "-s", "-z"], None)
+        wanted, found = set(rels), {}
         for entry in p.stdout.decode("utf-8", "replace").split("\0"):
             info, _, name = entry.partition("\t")
-            if name in rels:
+            if name in wanted:
                 found[name] = info.split(" ")[1]
-        self._wt.update(found)
         return found
 
     def plain_content(self, rel, data):
@@ -1902,6 +1927,15 @@ def entry_ref(source, entry):
     return ("tag", entry["tag"]) if entry.get("tag") else ("branch", source["branch"])
 
 
+def warn_tag_line(src, tag, branch):
+    """add/set --tag: a warning if the tag isn't on the branch, where newer
+    tags are looked for (a pattern is matched on it anyway)."""
+    if not src.tag_names:
+        _, problem = src.tag_info(tag, branch, newer=False)
+        if problem:
+            warn(f"{problem}; newer tags can't be found there")
+
+
 def ref_missing(ref, src):
     """Message for a branch or tag that doesn't exist upstream."""
     return f"{ref[0]} '{ref[1]}' not found in {src.label}"
@@ -2076,8 +2110,7 @@ class Registry:
         self._remove_section("file", rel)
         if src and src != keep_source and src in self.sources and \
                 not any(f.get("source") == src for f in self.files.values()):
-            self._remove_section("source", src)
-            del self.sources[src]
+            self.remove_source(src)
 
     def _remove_section(self, sect, name):
         if self.dry_run:
@@ -2228,29 +2261,29 @@ class BaseUnavailable(FsError):
     pass
 
 
-def matches_base(repo, src, link, oid, read):
+def matches_base(repo, src, rel, blob, path, oid, read):
     """Does a blob of this repo (id oid; read() returns its raw bytes) equal
-    the synced upstream version, i.e. the base recorded in .git-filesync?
-    Raises BaseUnavailable if that version can't be read."""
-    if oid == link.blob:
+    the upstream version blob of path - the base of the file rel? Raises
+    BaseUnavailable if that version can't be read."""
+    if oid == blob:
         return True
-    if not link.blob:
+    if not blob:
         return False
-    if repo.is_plain(link.rel) and src.is_plain(link.blob):
+    if repo.is_plain(rel) and src.is_plain(blob):
         # LF-only content without filters here: a checkout and checkin leave
         # it as it is, so only the very same blob matches (no git calls)
         return False
     try:
-        ptr = lfs_pointer(src.read_blob(link.blob))
+        ptr = lfs_pointer(src.read_blob(blob))
         if ptr:   # upstream stores it in LFS: compare against the pointer's hash first
             data = read()
             if (hashlib.sha256(data).hexdigest(), len(data)) == ptr or lfs_pointer(data) == ptr:
                 return True
-        return oid == repo.as_local(src.read_content(link.blob, link.path), link.rel)
+        return oid == repo.as_local(src.read_content(blob, path), rel)
     except BaseUnavailable:
         raise
     except FsError as e:
-        raise BaseUnavailable(f"synced version {link.blob[:12]} not available in "
+        raise BaseUnavailable(f"synced version {blob[:12]} not available in "
                               f"{src.label}, file counts as modified ({e})")
 
 
@@ -2298,6 +2331,12 @@ class FileState:
         return bool(self.error or self.pending or self.violation or self.missing)
 
 
+def synced_label(st):
+    """The synced version, as shown: its commit (abbreviated), or the blob
+    if the commit isn't known upstream."""
+    return st.src.short(st.old) if st.has_old else st.old_blob[:8]
+
+
 def commits_since(st):
     """Upstream commits touching the file since the sync (see evaluate)."""
     return st.src.count(*st.count_args) if st.count_args else 0
@@ -2308,11 +2347,12 @@ def commits_behind(st):
     return st.src.count(*st.behind_args) if st.behind_args else 0
 
 
-def prefetch(ctx, repo, links):
+def prefetch(ctx, repo, links, new_links=False):
     """Ask git about many links at once - one command per repository and per
     source instead of several per file, which adds up (starting a process
     is slow on Windows). Only fills caches: evaluate() asks for whatever is
-    missing, and reports the errors."""
+    missing, and reports the errors. new_links (pull): also what the first
+    sync of new links compares their files with (see first_sync)."""
     links = [lk for lk in links if not (path_problem(lk.rel) or in_the_way(repo.top, lk.rel))]
     repo.prefetch(lk.rel for lk in links)
     groups = {}
@@ -2329,16 +2369,16 @@ def prefetch(ctx, repo, links):
             src.prefetch(lks)
         except FsError:
             pass
-    # the base of each link - of a new one the version its first sync
-    # compares the file with (see first_sync)
+    # the base of each link - of a new one (new_links) the version its first
+    # sync compares the file with
     bases = {}
     for src, lks in groups.values():
-        tip = src.resolve()
+        tip = src.resolve() if new_links else None
         for lk in lks:
             bases[id(lk)] = lk.blob or (tip and src.blob_at(tip, lk.path)) or ""
     # files that differ from their base (adapted, uncommitted changes, not
     # committed yet): their blob ids, and can they be compared without git's
-    # filters? (see matches_base; a new link: by pull)
+    # filters? (see matches_base)
     differ = [lk for lk in links if bases.get(id(lk)) and (
         repo._head.get(lk.rel) not in (None, bases[id(lk)]) or repo._dirty.get(lk.rel)
         or repo._head.get(lk.rel) is None and (repo.top / lk.rel).is_file())]
@@ -2399,7 +2439,7 @@ def evaluate(ctx, repo, link):
 
     def base_matches(oid, read):
         try:
-            return matches_base(repo, src, link, oid, read)
+            return matches_base(repo, src, link.rel, link.blob, link.path, oid, read)
         except BaseUnavailable as e:
             if str(e) not in st.warnings:
                 st.warnings.append(str(e))
@@ -2435,9 +2475,10 @@ def evaluate(ctx, repo, link):
         return st
     st.violation = not st.adaptable and (st.committed == "adapted" or st.local == "modified")
     where = f"{ref[0]} '{ref[1]}'"
-    tip = src.resolve()
-    if not tip:
-        st.error = ref_missing(ref, src)
+    try:
+        tip = src.tip()
+    except FsError as e:
+        st.error = str(e)
         return st
     if ref[0] == "tag" and not src.tag_names:      # a pattern: no hints at other tags
         st.newest, problem = src.tag_info(ref[1], link.line, ctx.want_tags)
@@ -2495,12 +2536,15 @@ def evaluate(ctx, repo, link):
     return st
 
 
-def upstream_state(st):
-    """(label, note) of a pending upstream change, None if there is none."""
+def upstream_state(st, note=True):
+    """(label, note) of a pending upstream change, None if there is none;
+    without note (status -s), the git calls for the note are left out."""
     if st.unsynced:
         return "new", "not synced yet"
     if st.moved:
         kind, path, commit = st.moved
+        if not note:
+            return kind, None
         if kind == "deleted":
             return "deleted", f"upstream, by {st.src.short(commit)}"
         n = commits_since(st)
@@ -2511,7 +2555,7 @@ def upstream_state(st):
             what = "upstream branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
             return "older", f"{what} is {plural(behind, 'commit')} older than last sync"
         if st.has_old and not st.diverged:
-            return "pending", plural(commits_since(st), "commit")
+            return "pending", plural(commits_since(st), "commit") if note else None
         return "changed", "history diverged" if st.has_old else "previous sync point unknown"
     return None
 
@@ -2551,7 +2595,7 @@ def short_code(st):
     """Three columns like `git status -s`: upstream, committed, working tree."""
     if st.error:
         return "E  "
-    up = upstream_state(st)
+    up = upstream_state(st, note=False)
     x = {"pending": "P", "older": "O", "changed": "D", "new": "N", "renamed": "R",
          "deleted": "X"}[up[0]] if up else " "
     y = "M" if st.committed == "adapted" else " "     # like git's index column
@@ -2718,14 +2762,19 @@ def merge3(ours, base, theirs, labels):
         return p.returncode, Path(files[0]).read_bytes()
 
 
+def upstream_line(src, url, ref, path):
+    """'Upstream: URL (main:lib/foo.c)' in a proposed commit message; for a
+    tag pattern the tag it matched."""
+    return f"Upstream: {url} ({src.tag_names[0] if src.tag_names else ref[1]}:{path})"
+
+
 def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discarded=False):
     link = st.link
     paths = dict.fromkeys((old_path, path))       # old and (if renamed) new path
     # content goes back to the synced upstream version -> restore, not a sync
     verb = "Restore" if new_blob == st.old_blob and discarded else "Sync"
-    refname = src.tag_names[0] if src.tag_names else link.ref[1]   # a pattern: the tag
     lines = [f"{MSG_PREFIX}{verb} {st.rel} from {link.name}@{src.short(new)}", "",
-             f"Upstream: {link.url} ({refname}:{path})"]
+             upstream_line(src, link.url, link.ref, path)]
     if path != old_path:
         lines += ["", f"Renamed upstream: {old_path} -> {path}"]
     if new == st.old:
@@ -2814,10 +2863,7 @@ def target_rev(ctx, link, args):
     # a tag pattern: the newest matching tag on the source's branch
     line = link.source.get("branch") if args.tag and is_tag_pattern(args.tag) else None
     src = ctx.source(link.url, ref, link.name, line)
-    rev = src.resolve()
-    if not rev:
-        raise FsError(ref_missing(ref, src))
-    return rev
+    return src.tip()
 
 
 def once_text(args):
@@ -2887,7 +2933,7 @@ def pull_one(repo, reg, st, args):
             raise FsError(f"{st.rel}: base version {st.old_blob[:12]} unavailable; "
                           "cannot merge local modifications")
         ours = repo.read_content(st.head_blob, st.rel)   # no uncommitted changes here
-        old_label = src.short(st.old) if st.has_old else st.old_blob[:8]
+        old_label = synced_label(st)
         conflicts, content = merge3(ours, base, theirs,
                                     [f"{st.rel} (local)", f"upstream {old_label}",
                                      f"upstream {src.short(new)}"])
@@ -3028,7 +3074,7 @@ def cmd_pull(ctx, repo, args):
     check_target_args(args)
     rc, done, moved = EXIT_OK, 0, False
     once = args.commit or args.branch or args.tag   # another revision, branch or tag, once
-    prefetch(ctx, repo, links)
+    prefetch(ctx, repo, links, new_links=not once)
     newest, synced = {}, []             # synced: (rel, source, message, conflicts)
     skipped = []                        # pull --all: not synced, but to be seen to
     contents = {}                       # rel -> synced content (normalized form)
@@ -3039,10 +3085,13 @@ def cmd_pull(ctx, repo, args):
     repo.check_plain(selected)
     items = []
     ok = [st for st in states if st.src and not st.error]
+    # contents only of the files to sync (in the blobless cache, each one
+    # may have to be fetched)
+    sync = [st for st in ok if st.pending or args.overwrite]
     for src in {id(st.src): st.src for st in ok}.values():
-        src.read_blobs(b for st in ok if st.src is src for b in (st.old_blob, st.new_blob))
+        src.read_blobs(b for st in sync if st.src is src for b in (st.old_blob, st.new_blob))
         src.shorts(c for st in ok if st.src is src for c in (st.old, st.new))
-    for st in ok:
+    for st in sync:
         try:
             if st.new_blob and st.new_blob != st.old_blob:
                 items.append((st.src.read_content(st.new_blob, st.new_path), st.rel))
@@ -3064,7 +3113,7 @@ def cmd_pull(ctx, repo, args):
         done += 1
         if args.verbose:
             at = "not synced yet" if st.unsynced else \
-                f"synced at {st.src.short(st.old) if st.has_old else link.blob[:8]}"
+                f"synced at {synced_label(st)}"
             print(paint(f"{st.rel}: {link_text(st)}, {at}", "dim"))
         try:
             if once:
@@ -3074,7 +3123,7 @@ def cmd_pull(ctx, repo, args):
             if result:
                 synced.append((st.rel, link.name) + result[:2])
                 contents[st.rel] = result[2]
-            moved = moved or once and Link(reg, link.rel).commit != before
+            moved = moved or once and link.commit != before
         except FsError as e:   # report and carry on with the other files
             error(str(e) if str(e).startswith(st.rel) else f"{st.rel}: {e}")
             rc = EXIT_ERROR
@@ -3274,7 +3323,7 @@ def cmd_difftool(ctx, repo, args):
                 f.write_bytes(repo.to_worktree(repo.read_blob(oid), st.rel) if oid else b"")
                 return str(f)
             left = tmpfile("not-synced-yet" if st.unsynced else
-                           f"synced-{src.short(st.old) if st.has_old else st.old_blob[:8]}", base)
+                           f"synced-{synced_label(st)}", base)
             if args.upstream:
                 right = tmpfile(f"upstream-{src.short(st.new)}", other)
             elif args.committed:
@@ -3316,19 +3365,20 @@ def glob_regex(pattern):
                       + ("/.*" if dir_only else "(?:/.*)?") + r"\Z", re.S)
 
 
-def add_ref(ctx, reg, args):
-    """(url, branch, name) of the source for add: the [source] named by
-    args.source (-b may only repeat its branch), or for a URL the one with
-    that URL and branch - name None, found or created later."""
+def add_ref(ctx, reg, args, hint=None):
+    """(url, branch, name) of the source for add and set --source: the
+    [source] named by args.source (-b may only repeat its branch), or for a
+    URL the one with that URL and branch - name None, found or created
+    later. hint: what to do instead of another -b for a named source."""
     if args.source in reg.sources:            # name of an existing [source]
         s = reg.sources[args.source]
         if not s.get("branch"):
             raise FsError(f'[source "{args.source}"] in {REGISTRY} needs a branch')
         if args.branch and args.branch != s["branch"]:
             raise FsError(f"source '{args.source}' follows {s['branch']}, not {args.branch} - "
-                          "give the URL to link to another branch, or change the source's "
-                          f"branch with 'git filesync source set-branch {args.source} "
-                          f"{args.branch}'")
+                          + (hint or "give the URL to link to another branch, or change the "
+                             f"source's branch with 'git filesync source set-branch "
+                             f"{args.source} {args.branch}'"))
         return s.get("url", ""), s["branch"], args.source
     return args.source, args.branch or ctx.default_branch(args.source), None
 
@@ -3347,8 +3397,7 @@ def find_base(repo, src, rev, rel, path, target, overwrite=False):
     if cur is None or overwrite:
         return commit, blob, src.read_content(blob, path), False, cur is not None
     try:
-        modified = not matches_base(repo, src, SimpleNamespace(blob=blob, path=path, rel=rel),
-                                    cur, target.read_bytes)
+        modified = not matches_base(repo, src, rel, blob, path, cur, target.read_bytes)
     except BaseUnavailable:
         raise FsError(f"{rel}: upstream version {blob[:12]} not available, can't compare "
                       "the existing file with it")
@@ -3373,8 +3422,7 @@ def build_add_message(plan, src, name, url, ref, mpath, relink, adaptable, at):
         path = mpath.rstrip("/") + "/" if mpath else "/"
         what = f"Add {len(plan)} files from" if fetched else f"Link {len(plan)} files to"
         subject_ref = f"{name}@{src.short(at)}"
-    refname = src.tag_names[0] if src.tag_names else ref[1]     # a pattern: the tag
-    lines = [f"{MSG_PREFIX}{what} {subject_ref}", "", f"Upstream: {url} ({refname}:{path})"]
+    lines = [f"{MSG_PREFIX}{what} {subject_ref}", "", upstream_line(src, url, ref, path)]
     if len(plan) > 1:
         lines.append("")
         for p in plan:
@@ -3401,14 +3449,10 @@ def cmd_add(ctx, repo, args):
     ref = ("tag", args.tag) if args.tag else ("branch", branch)
     line = branch if args.tag else None
     src = ctx.source(url, ref, named or reg.source_name(url, branch), line)
-    head = src.resolve()
-    if not head:
-        raise FsError(ref_missing(ref, src))
+    head = src.tip()
     at = src.require(args.commit) if args.commit else None    # --commit: given base
-    if args.tag and not src.tag_names:
-        _, problem = src.tag_info(args.tag, branch, newer=False)
-        if problem:
-            warn(f"{problem}; newer tags can't be found there")
+    if args.tag:
+        warn_tag_line(src, args.tag, branch)
     path = upstream_path(args.path if args.path else rel)
     patterns = args.include or args.exclude
     upstream_file = bool(path) and not patterns and bool(src.blob_at(at or head, path))
@@ -3775,16 +3819,9 @@ def cmd_set(ctx, repo, args):
     changed = False
     if args.source or args.branch:
         # the source the files are to use: URL and branch (like add)
-        if args.source in reg.sources:
-            url, branch = reg.sources[args.source].get("url", ""), \
-                reg.sources[args.source].get("branch")
-            if not branch:
-                raise FsError(f'[source "{args.source}"] in {REGISTRY} needs a branch')
-            if args.branch and args.branch != branch:
-                raise FsError(f"source '{args.source}' follows {branch}, not {args.branch} - "
-                              "give the URL with -b, or -b alone for the files' upstream")
-        elif args.source:
-            url, branch = args.source, args.branch or ctx.default_branch(args.source)
+        if args.source:
+            url, branch, _ = add_ref(ctx, reg, args, "give the URL with -b, or -b alone "
+                                                     "for the files' upstream")
         groups = {}
         for lk in links:
             target = (url, branch) if args.source else (lk.url, args.branch)
@@ -3793,8 +3830,7 @@ def cmd_set(ctx, repo, args):
         for (old, url_, branch_), lks in groups.items():
             name = reg.find_source(url_, branch_)
             src = ctx.source(url_, ("branch", branch_), name or old)
-            if not src.resolve():
-                raise FsError(ref_missing(("branch", branch_), src))
+            src.tip()
             if not name and set(source_files(reg, old)) <= {lk.rel for lk in lks}:
                 # all files of the source move to a new place: the source itself
                 # changes, keeping its name (like source set-url / set-branch)
@@ -3820,12 +3856,8 @@ def cmd_set(ctx, repo, args):
             if args.tag:          # a tag (or pattern) not upstream is an error
                 ref = ("tag", args.tag)
                 src = ctx.source(lk.url, ref, lk.name, lk.source.get("branch"))
-                if not src.resolve():
-                    raise FsError(ref_missing(ref, src))
-                if not src.tag_names:
-                    _, problem = src.tag_info(args.tag, lk.source.get("branch"), newer=False)
-                    if problem:
-                        warn(f"{problem}; newer tags can't be found there")
+                src.tip()
+                warn_tag_line(src, args.tag, lk.source.get("branch"))
             lk.set("tag", args.tag or None)
             print(f"{would}{lk.rel}: " + (f"tag {args.tag}" if args.tag else
                                           f"follows branch {lk.source.get('branch')}"))
@@ -3833,9 +3865,7 @@ def cmd_set(ctx, repo, args):
     if args.path:
         lk = links[0]
         src = ctx.source(lk.url, lk.ref, lk.name, lk.line)
-        head = src.resolve()
-        if not head:
-            raise FsError(ref_missing(lk.ref, src))
+        head = src.tip()
         path = upstream_path(args.path)
         if lk.unsynced:           # no base yet: pull takes the path's version
             if not src.blob_at(head, path):
@@ -3861,8 +3891,7 @@ def cmd_set(ctx, repo, args):
         print("nothing to change")
     elif not args.dry_run:
         reg.finish()
-        print(f'{REGISTRY} staged (use "git filesync status" to see what changes, '
-              '"git filesync pull <file>..." to sync)')
+        print(REGISTRY_STAGED)
     return EXIT_OK
 
 
@@ -3933,8 +3962,7 @@ def cmd_edit(ctx, repo, args):
     for problem in registry_problems(reg):
         warn(f"{REGISTRY}: {problem}")
     reg.finish()
-    print(f'{REGISTRY} staged (use "git filesync status" to see what changes, '
-          '"git filesync pull <file>..." to sync)')
+    print(REGISTRY_STAGED)
     return EXIT_OK
 
 
@@ -3981,8 +4009,7 @@ def cmd_source(ctx, repo, args):
                           f"move the files to it with 'git filesync set FILE... --source {other}'")
         if url and branch:        # as for set: the branch must exist upstream
             src = ctx.source(url, ("branch", branch), args.name)
-            if not src.resolve():
-                raise FsError(ref_missing(("branch", branch), src))
+            src.tip()
             if key == "url" and norm_url(url) != norm_url(s.get("url", "")):
                 for rel in source_files(reg, args.name):
                     keep_base(src, Link(reg, rel))
@@ -4072,7 +4099,7 @@ def cmd_map(args, repo):
         return EXIT_OK
     base = repo.base if repo else Path.cwd()
     d = (base / os.path.expanduser(args.dir)).resolve()
-    if git(["-C", d, "rev-parse", "--git-dir"], env=clean_env(), check=False).returncode:
+    if not is_repository(d):
         raise FsError(f"{d} is not a Git repository")
     for k in matching:
         git(["config", scope, "--unset-all", k], cwd=top)
@@ -4178,10 +4205,23 @@ def pushed_revs(hook_args):
     return revs, remote
 
 
-def registry_entries(repo, rev):
-    """[(url, synced commit, rel)] of the links in .git-filesync at rev
-    (none if it has no readable one, or rev isn't here)."""
-    p = repo.git(["config", "--blob", f"{rev}:{REGISTRY}", "--list", "-z"], check=False)
+def registry_blobs(repo, revs):
+    """The distinct versions (blob ids) of .git-filesync at these revisions,
+    asked with one command - usually a few for many branches; revisions
+    without one (or not here) are left out."""
+    revs = list(dict.fromkeys(revs))
+    if not revs:
+        return []
+    p = repo.git(["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                 data="".join(f"{r}:{REGISTRY}\n" for r in revs).encode(), check=False)
+    return list(dict.fromkeys(line.split()[0] for line in out(p).splitlines()
+                              if line.endswith(" blob")))
+
+
+def registry_entries(repo, blob):
+    """[(url, synced commit, rel)] of the links in a version (blob id) of
+    .git-filesync (none if it isn't readable)."""
+    p = repo.git(["config", "--blob", blob, "--list", "-z"], check=False)
     if p.returncode:
         return []
     sources, files = parse_registry(p.stdout)
@@ -4205,11 +4245,11 @@ def push_check(ctx, repo, hook_args):
     if hook_args:
         remote += out(repo.git(["for-each-ref", "--format=%(objectname)",
                                 f"refs/remotes/{hook_args[0]}/"], check=False)).split()
-    known = {(norm_url(url), commit) for rev in dict.fromkeys(remote)
-             for url, commit, _ in registry_entries(repo, rev)}
+    known = {(norm_url(url), commit) for blob in registry_blobs(repo, remote)
+             for url, commit, _ in registry_entries(repo, blob)}
     found = {}       # (url, commit) -> [rels]
-    for rev in revs:
-        for url, commit, rel in registry_entries(repo, rev):
+    for blob in registry_blobs(repo, revs):
+        for url, commit, rel in registry_entries(repo, blob):
             if (norm_url(url), commit) in known:
                 continue
             rels = found.setdefault((url, commit), [])
@@ -4282,6 +4322,12 @@ def is_our_hook_line(line):
     return REFS_VAR in s or s.startswith((f"# {HOOK_MARKER}:", "git filesync hook "))
 
 
+def only_ours(rest):
+    """Are these the lines of a hook file without our lines, one that we
+    wrote (nothing else in it)?"""
+    return all(ln.strip() in ("", "#!/bin/sh", "exit 0") for ln in rest)
+
+
 def cmd_hooks(repo, args):
     """hooks without an action: the state of each of our hooks."""
     hookdir = hook_dir(repo)
@@ -4329,7 +4375,7 @@ def cmd_install_hooks(repo, args):
                       "(or run 'git filesync hooks install --force' to add them)")
                 continue
             rest = [ln for ln in lines if not is_our_hook_line(ln)]
-            if all(ln.strip() in ("", "#!/bin/sh", "exit 0") for ln in rest):
+            if only_ours(rest):
                 new = "#!/bin/sh\n" + snippet     # one we wrote: without the old exit 0
             else:                                 # replace our lines, in the same place
                 new = "".join(rest[:at] + [snippet] + rest[at:])
@@ -4360,7 +4406,7 @@ def cmd_uninstall_hooks(repo, args):
         if len(rest) == len(lines):
             print(f"{name}: {paint('not installed', 'dim')} (existing hook left unchanged)")
             continue
-        if all(ln.strip() in ("", "#!/bin/sh", "exit 0") for ln in rest):
+        if only_ours(rest):
             f.unlink()
             print(f"{name}: {paint('removed', 'green')}")
         else:
