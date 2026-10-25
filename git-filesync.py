@@ -1095,7 +1095,12 @@ class Source:
         version at rev comes from (same blob, by git's history simplification).
         Recorded as a link's commit, so one file version always gives the same
         entry, whatever else happened on the branch."""
-        return out(self.git(["rev-list", "-1", rev, "--", lit(path)])) or rev
+        key = ("last", rev, path)
+        if key not in self._memo:
+            commit = out(self.git(["rev-list", "-1", rev, "--", lit(path)])) or rev
+            # up to that commit, it is the last change too (e.g. pull's first sync)
+            self._memo[key] = self._memo[("last", commit, path)] = commit
+        return self._memo[key]
 
     def count(self, old, new, *paths):
         key = ("count", old, new, paths)
@@ -1387,6 +1392,7 @@ class Repo:
         self._plain = {}          # rel -> no content-changing attributes
         self._raw = {}            # blob id -> content (read_blob)
         self._local = {}          # (rel, content hash, size) -> blob id (as_local)
+        self._wt = {}             # rel -> blob id of the working file (worktree_blobs)
 
     def git(self, args, **kw):
         return git(args, cwd=self.top, **kw)
@@ -1501,6 +1507,8 @@ class Repo:
         For a file tracked in LFS here, this is the id of its LFS pointer."""
         if not path.is_file():
             return None
+        if self.rel(path) in self._wt:          # asked at once before (stored then)
+            return self._wt[self.rel(path)]
         args = ["hash-object"] + (["-w"] if write else []) + \
             [f"--path={self.rel(path)}", str(path)]
         return out(self.git(args))
@@ -1675,6 +1683,7 @@ class Repo:
             blocked = [f"{r}: {p}" for r in rels for p in [in_the_way(self.top, r)] if p]
             if blocked:
                 raise FsError("not written - " + "; ".join(blocked))
+            self._wt.clear()
         # an executable file stays one; a symlink or submodule there becomes a file
         modes = {r: e[0] for r, e in self.index_entries(rels).items()
                  if e[0] in ("100644", "100755")}
@@ -1698,7 +1707,8 @@ class Repo:
         (clean-filtered), via a temporary index - with this index's entries,
         for git's rule on CRLF already in the index - instead of a
         hash-object each. Writes the blobs: for reading commands (scratch)."""
-        rels = [r for r in rels if (self.top / r).is_file()]
+        # a symlink: git would take the link, not the file (see worktree_blob)
+        rels = [r for r in rels if (self.top / r).is_file() and not (self.top / r).is_symlink()]
         if not rels:
             return {}
         with tempfile.TemporaryDirectory(prefix="git-filesync-") as d:
@@ -1715,6 +1725,7 @@ class Repo:
             info, _, name = entry.partition("\t")
             if name in rels:
                 found[name] = info.split(" ")[1]
+        self._wt.update(found)
         return found
 
     def plain_content(self, rel, data):
@@ -2302,7 +2313,7 @@ def prefetch(ctx, repo, links):
     source instead of several per file, which adds up (starting a process
     is slow on Windows). Only fills caches: evaluate() asks for whatever is
     missing, and reports the errors."""
-    links = [lk for lk in links if not path_problem(lk.rel)]
+    links = [lk for lk in links if not (path_problem(lk.rel) or in_the_way(repo.top, lk.rel))]
     repo.prefetch(lk.rel for lk in links)
     groups = {}
     for lk in links:
@@ -2318,21 +2329,35 @@ def prefetch(ctx, repo, links):
             src.prefetch(lks)
         except FsError:
             pass
-    # files that differ from their base (adapted, uncommitted changes): can
-    # they be compared without git's filters? (see matches_base)
-    differ = [lk for lk in links if lk.blob and (repo._head.get(lk.rel) not in (None, lk.blob)
-                                                 or repo._dirty.get(lk.rel))]
+    # the base of each link - of a new one the version its first sync
+    # compares the file with (see first_sync)
+    bases = {}
+    for src, lks in groups.values():
+        tip = src.resolve()
+        for lk in lks:
+            bases[id(lk)] = lk.blob or (tip and src.blob_at(tip, lk.path)) or ""
+    # files that differ from their base (adapted, uncommitted changes, not
+    # committed yet): their blob ids, and can they be compared without git's
+    # filters? (see matches_base; a new link: by pull)
+    differ = [lk for lk in links if bases.get(id(lk)) and (
+        repo._head.get(lk.rel) not in (None, bases[id(lk)]) or repo._dirty.get(lk.rel)
+        or repo._head.get(lk.rel) is None and (repo.top / lk.rel).is_file())]
     if differ:
+        try:
+            repo.worktree_blobs([lk.rel for lk in differ if repo._head.get(lk.rel) is None
+                                 or repo._dirty.get(lk.rel)])
+        except FsError:
+            pass
         repo.check_plain(lk.rel for lk in differ)
         ids = {id(lk) for lk in differ}
         items = []
         for src, lks in groups.values():
+            mine = [lk for lk in lks if id(lk) in ids]
             try:
-                src.check_plain(lk.blob for lk in lks if id(lk) in ids)
+                src.check_plain(bases[id(lk)] for lk in mine)
                 # those not comparable without git's filters: converted at once
-                items += [(src.read_content(lk.blob, lk.path), lk.rel) for lk in lks
-                          if id(lk) in ids and not (repo.is_plain(lk.rel)
-                                                   and src.is_plain(lk.blob))]
+                items += [(src.read_content(bases[id(lk)], lk.path), lk.rel) for lk in mine
+                          if not (repo.is_plain(lk.rel) and src.is_plain(bases[id(lk)]))]
             except FsError:
                 pass
         repo.as_local_many(items)
@@ -2386,7 +2411,7 @@ def evaluate(ctx, repo, link):
     try:
         exists = link.target.is_file()
         head = st.head_blob = repo.head_blob(link.rel)
-        if head and not st.unsynced:      # no base: nothing to compare with
+        if head and not st.unsynced:      # a new link: no base to compare with
             st.committed = "unmodified" if base_matches(
                 head, lambda: repo.read_blob(head)) else "adapted"
         if not exists:
@@ -2398,7 +2423,7 @@ def evaluate(ctx, repo, link):
         if not exists:
             st.local = "missing"
         elif st.unsynced:
-            pass                          # compared with upstream by pull, as by add
+            pass                          # compared with upstream by its first sync
         elif st.worktree == "clean":
             st.local = "clean" if st.committed == "unmodified" else "modified"
         elif base_matches(repo.worktree_blob(link.target), link.target.read_bytes):
@@ -2827,7 +2852,7 @@ def pull_one(repo, reg, st, args):
                       f"'git filesync unlink {rel}', or delete it too with "
                       f"'git filesync rm {rel}'")
     if st.unsynced:
-        return first_sync(repo, st, args, new, new_blob, path)
+        return first_sync(repo, st, args, new, path)
     local_mod = st.local == "modified"
     discard = args.overwrite and local_mod
     if not st.adaptable and local_mod and not discard:
@@ -2900,25 +2925,17 @@ def pull_one(repo, reg, st, args):
                          discard), conflicts, content
 
 
-def first_sync(repo, st, args, new, new_blob, path):
+def first_sync(repo, st, args, new, path):
     """pull of a new link (no base yet, see Link.unsynced) does what add
-    would do: the version pulled becomes the base; a missing file is
-    fetched, an existing one must be that version - else refused as by
-    add: --overwrite takes the upstream version, an adaptable file keeps
-    its differences as adaptations. Returns as pull_one; content None: the
+    would do: the version pulled becomes the base (see find_base); an
+    existing file must be that version - else refused as by add:
+    --overwrite takes the upstream version, an adaptable file keeps its
+    differences as adaptations. Returns as pull_one; content None: the
     existing file is staged as it is."""
     link, src = st.link, st.src
-    target = link.target
-    fetch, modified = not target.is_file(), False
-    if not fetch:
-        try:
-            modified = not matches_base(
-                repo, src, SimpleNamespace(blob=new_blob, path=path, rel=st.rel),
-                repo.worktree_blob(target), target.read_bytes)
-        except BaseUnavailable:
-            raise FsError(f"{st.rel}: upstream version {new_blob[:12]} not available")
-    replace = modified and args.overwrite
-    if modified and not (replace or st.adaptable):
+    commit, blob, content, modified, replace = find_base(
+        repo, src, new, st.rel, path, link.target, args.overwrite)
+    if modified and not st.adaptable:
         rel = path_arg(repo, st.rel)
         raise FsError(f"{st.rel}: not synced yet, and differs from upstream {src.short(new)} - "
                       f"use 'git filesync pull --overwrite {rel}' to take the upstream "
@@ -2926,23 +2943,23 @@ def first_sync(repo, st, args, new, new_blob, path):
                       "differences become local adaptations)")
     for w in st.warnings:
         warn(f"{st.rel}: {w}")
-    note = "fetched" if fetch else "existing file replaced" if replace else \
+    note = "existing file replaced" if replace else "fetched" if content is not None else \
         "existing file, with local adaptations" if modified else "existing file"
     if args.dry_run:
         once = f"; {st.once} once" if st.once else ""
-        print(f"{st.rel}: would sync to {link.name}@{src.short(new)} "
+        print(f"{st.rel}: would sync to {link.name}@{src.short(commit)} "
               f"(not synced yet; {note}{once})")
         return None
-    content = repo.normalize(src.read_content(new_blob, path), st.rel) \
-        if fetch or replace else None
+    if content is not None:
+        content = repo.normalize(content, st.rel)
     if replace:
         save_discarded(repo, [st.rel])
-    link.set("commit", new)
-    link.set("blob", new_blob)
+    link.set("commit", commit)
+    link.set("blob", blob)
     print(f"{st.rel}: {paint('synced', 'green')} (first sync; {note})")
-    plan = [Planned(st.rel, path, new, new_blob, content, modified and not replace, replace)]
+    plan = [Planned(st.rel, path, commit, blob, content, modified, replace)]
     return build_add_message(plan, src, link.name, link.url, link.ref, path, False,
-                             st.adaptable, new), 0, content
+                             st.adaptable, commit), 0, content
 
 
 def pull_message(parts, names):
@@ -2964,11 +2981,13 @@ def newest_hint(rels, tag, line, newest):
             f"{newest[0][0][0]} <file>...' and pull to switch)")
 
 
-def write_synced(repo, contents, conflicted):
-    """Write the synced files ({rel: content in this repository's stored
-    form}) to the working tree and stage them - those with merge conflicts
-    only written (see Repo.write_files); content None: an existing file
-    synced for the first time, staged as it is (see first_sync)."""
+def write_synced(repo, contents, conflicted=()):
+    """Write the synced or linked files ({rel: content in this repository's
+    stored form}) to the working tree and stage them, all at once - those
+    with merge conflicts only written (see Repo.write_files); content None:
+    an existing file linked (add) or synced for the first time, staged as
+    it is - also if ignored, as written ones are: linking a file means
+    tracking it."""
     repo.write_files([(r, c) for r, c in contents.items()
                       if c is not None and r not in conflicted])
     repo.write_files([(r, c) for r, c in contents.items() if r in conflicted], stage=False)
@@ -3080,7 +3099,7 @@ def cmd_pull(ctx, repo, args):
 
 def diff_pairs(ctx, repo, args):
     """(st, name, base, other) blob ids for every linked file with a difference.
-    base = last synced upstream version (None: not synced yet, --upstream);
+    base = last synced upstream version (None: a new link, --upstream);
     other = local file (None if missing),
     or with --upstream the upstream version pull would sync to (with the same
     --commit / -b / --tag). All as actual content in this repo's normalized
@@ -3331,7 +3350,8 @@ def find_base(repo, src, rev, rel, path, target, overwrite=False):
         modified = not matches_base(repo, src, SimpleNamespace(blob=blob, path=path, rel=rel),
                                     cur, target.read_bytes)
     except BaseUnavailable:
-        modified = False
+        raise FsError(f"{rel}: upstream version {blob[:12]} not available, can't compare "
+                      "the existing file with it")
     return commit, blob, None, modified, False
 
 
@@ -3441,7 +3461,7 @@ def cmd_add(ctx, repo, args):
     repo.check_plain(rels)
     repo.normalize_many([(p.content, p.rel) for p in plan if p.content is not None])
     save_discarded(repo, [p.rel for p in plan if p.replaced])
-    fetched = []          # (rel, content in this repository's form) to write
+    contents = {}         # rel -> content in this repository's form; None: kept
     for p in plan:
         if p.rel in reg.files:
             reg.remove_file(p.rel, keep_source=named)
@@ -3453,15 +3473,8 @@ def cmd_add(ctx, repo, args):
             link.set("tag", args.tag)
         if args.adaptable:
             link.set("adaptable", "true")
-        if p.content is not None:
-            fetched.append((p.rel, repo.normalize(p.content, p.rel)))
-    # fetched files written and staged at once; existing ones staged as
-    # they are in the working tree - also if ignored, as fetched ones are:
-    # linking a file means tracking it
-    repo.write_files(fetched)
-    done = {r for r, _ in fetched}
-    if any(r not in done for r in rels):
-        repo.git(["add", "-f", "--"] + [lit(r) for r in rels if r not in done])
+        contents[p.rel] = None if p.content is None else repo.normalize(p.content, p.rel)
+    write_synced(repo, contents)
     reg.finish()
     for p in plan:                # said once it is done
         print(f"{paint('linked', 'green')} {p.rel} -> {name}:{p.path} ({shown_ref})")
@@ -3567,7 +3580,7 @@ def cmd_restore(ctx, repo, args):
         try:
             srcs[link.rel] = ctx.source(link.url, link.ref, link.name, link.line)
         except FsError as e:
-            error(str(e))
+            error(str(e) if str(e).startswith(link.rel) else f"{link.rel}: {e}")
             rc = EXIT_ERROR
     for src in {id(s): s for s in srcs.values()}.values():
         src.read_blobs(lk.blob for lk in links if srcs.get(lk.rel) is src)

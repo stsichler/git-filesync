@@ -94,9 +94,12 @@ file. Git-config format:
   file is kept, its differences count as adaptations). That way many files
   can be linked at once: write their entries with [`edit`](#edit) – only
   `source` and `path` (and `tag`, `adaptable` as needed), e.g. by copy and
-  paste – then `pull --all`. Such a link has nothing to
-  [`restore`](#restore) or `diff` against yet (`diff --upstream` shows the
-  whole file).
+  paste – then `pull --all`. The first sync is `add`: the file is staged
+  as it is in the working tree, uncommitted changes included
+  (`--overwrite`: replaced, the content kept as a blob). Until then, such a
+  link has nothing to [`restore`](#restore) or `diff` against (`diff
+  --upstream` shows the whole file); `pull -n` tells whether its first sync
+  would be refused.
 - Everything else may be edited by hand – with [`edit`](#edit), or e.g.
   `git config -f .git-filesync file.src/foo.c.path lib/new_name.c` (a file
   renamed upstream is [followed by `pull`](#files-renamed-or-deleted-upstream)
@@ -484,7 +487,8 @@ given counts.
 `restore PATH…` – like `git restore`, but from the synced upstream version
 (the base recorded in `.git-filesync`) instead of the index: the files get
 that version back, e.g. to discard the changes of a file that isn't
-adaptable, or to bring back a missing file.
+adaptable, or to bring back a missing file. A [new
+link](#the-git-filesync-file), not synced yet, has nothing to restore.
 `.git-filesync` stays as it is, nothing is committed – commit the result
 like any change. Unlike `pull --overwrite`, `restore` doesn't bring in a
 newer upstream version.

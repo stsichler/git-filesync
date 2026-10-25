@@ -1971,6 +1971,42 @@ else
   M1=$(calls rm src/f1.c); git reset -q --hard
   M60=$(calls rm src); git reset -q --hard
   check "rm: no git calls per file ($M1 / $M60)" "$([ "$M60" -le "$((M1 + 2))" ] && echo yes)" "yes"
+  # new links written by hand (see section 24): status costs no git calls
+  # per file, their first syncs compare the existing files at once
+  new_repo "$T/s21n"
+  git filesync source map file:///nowhere/m21.git "$T/m21" >/dev/null
+  printf '[source "m21"]\n\turl = file:///nowhere/m21.git\n\tbranch = main\n' > .git-filesync
+  mkdir src
+  for i in $(seq 1 30); do printf '[file "src/f%s.c"]\n\tsource = m21\n\tpath = lib/f%s.c\n\tadaptable\n' $i $i >> .git-filesync; done
+  for i in $(seq 1 30); do git -C ../m21 show HEAD:lib/f$i.c > src/f$i.c; done
+  for i in 1 2 3 4 5; do echo local >> src/f$i.c; done
+  mkdir away && mv src/f1[1-9].c src/f2*.c src/f30.c away
+  N10=$(calls status)
+  mv away/* src && rmdir away
+  N30=$(calls status)
+  check "status: existing files of new links cost no git calls each ($N10 / $N30)" \
+    "$([ "$N30" -le "$((N10 + 2))" ] && echo yes)" "yes"
+  check "status: all new, not committed yet" "$(git filesync status -s | grep -c '^N ?')" "30"
+  NP=$(calls pull --all)
+  check "pull: first syncs, one git call per file ($NP for 30)" "$([ "$NP" -le $((30 + 35)) ] && echo yes)" "yes"
+  check "pull: first syncs staged" "$(git diff --cached --name-only | lines)" "31"
+  # a new link with uncommitted changes doesn't cost the adapted files of its
+  # source their comparison at once (here converted: ident)
+  new_repo "$T/s21b"
+  git filesync source map file:///nowhere/m21.git "$T/m21" >/dev/null
+  printf '*.c ident\n' > .gitattributes && git add .gitattributes && git commit -qm attrs
+  addc --adaptable file:///nowhere/m21.git src -p lib --include 'f[1-9].c'
+  for i in 1 2 3 4 5 6 7 8 9; do echo local >> src/f$i.c; done
+  git commit -qam "adapt 9"
+  BA=$(calls status)
+  printf '[file "new.c"]\n\tsource = %s\n\tpath = lib/f10.c\n' \
+    "$(git config -f .git-filesync file.src/f1.c.source)" >> .git-filesync
+  git -C ../m21 show HEAD:lib/f10.c > new.c && git add new.c .git-filesync && git commit -qm new
+  echo mine >> new.c
+  BN=$(calls status)
+  check "status: a new link with uncommitted changes costs no git call per file ($BA / $BN)" \
+    "$([ "$BN" -le "$((BA + 8))" ] && echo yes)" "yes"
+  check "status: the adapted files still found" "$(git filesync status -s | grep -c '^ M ')" "9"
 fi
 
 
@@ -2166,6 +2202,7 @@ check "edit: only one of commit and blob is a gap" \
   "$(GIT_EDITOR="printf '\\tcommit = 1234\\n' >>" git filesync edit 2>&1 | grep -c '^warning: .*\[file "e.c"\] has only one of commit and blob')" "1"
 git config -f .git-filesync --unset file.e.c.commit
 git commit -qam "new links by hand" && git add c.c d.c e.c && git commit -qm "files"
+# a new link has no base yet: nothing compared until its first sync
 check "new link: status -s" "$(git filesync status -s | oneline)" "N   c.c N   d.c N   e.c N   sub/b.c "
 check "new link: long format" "$(git filesync status | grep -cE "^${TAB}new:[[:space:]]+sub/b\.c  \(not synced yet\)$")" "1"
 check "new link: missing file is no error" "$(git filesync status | grep -c 'Missing files')" "0"
@@ -2195,6 +2232,12 @@ check "new link: pull -n --commit names it once" \
   "$(printf '[file "f.c"]\n\tsource = %s\n\tpath = lib/b.c\n' "$SRC24" >> .git-filesync
      git filesync pull -n --commit "$(git -C ../m24 rev-parse HEAD)" f.c | grep -c '(not synced yet; fetched; commit [0-9a-f]* once)$')" "1"
 git checkout -q -- .git-filesync
+# the first sync is add: uncommitted changes of the file are staged with it
+printf '[file "g.c"]\n\tsource = %s\n\tpath = lib/b.c\n\tadaptable\n' "$SRC24" >> .git-filesync
+echo b > g.c && git add g.c .git-filesync && git commit -qm "g.c" && echo mine >> g.c
+check "new link: first sync stages uncommitted changes, as add does" \
+  "$(rc git filesync pull g.c)-$(git show :g.c | oneline)-$(git status --porcelain g.c)" "0-b mine -M  g.c"
+git reset -q --hard
 
 
 # =============================================================================
@@ -2279,6 +2322,29 @@ printf '[file "d.c"]\n\tsource = %s\n\tpath = d.c\n' "$SRC25" >> .git-filesync
 check "new link: first sync warns too" \
   "$(git filesync pull d.c 2>&1 | grep -c "^warning: d.c: 'd.c' in .* comes from commit .*, which is not pushed$")" "1"
 git reset -q --hard && git filesync source map "$TURL/m25" --unset >/dev/null
+
+# pull --commit REV with the same version of the file: REV's commit is
+# recorded (here: the file went back to its earlier content)
+cd "$T"
+git init -q m25c && (cd m25c && echo a > f.c && git add f.c && git commit -qm c1 \
+  && echo b > f.c && git commit -qam c2 && echo a > f.c && git commit -qam c3)
+new_repo s25c
+addc --commit "$(git -C ../m25c rev-parse HEAD~2)" "$TURL/m25c" f.c
+check "pull --commit, same file version: that commit recorded" \
+  "$(rc pullc --commit "$(git -C ../m25c rev-parse HEAD)" f.c)-$(git config -f .git-filesync file.f.c.commit)" \
+  "0-$(git -C ../m25c rev-parse HEAD)"
+
+# add: an existing file that can't be compared with the upstream version
+# (blobless cache, server gone) is an error, not taken for unmodified
+cd "$T"
+git clone -q --bare m25c srv25.git && git -C srv25.git config uploadpack.allowFilter true
+new_repo s25d
+addc --commit "$(git -C ../m25c rev-parse HEAD~1)" "$TURL/srv25.git" g.c -p f.c   # another version
+mv ../srv25.git ../srv25.gone && echo own > f.c
+check "add: upstream version unreadable, existing file: refused" \
+  "$(git filesync add "$TURL/srv25.git" f.c 2>&1 | grep -c "^error: f.c: upstream version [0-9a-f]* not available, can't compare the existing file with it$")-$(git config -f .git-filesync file.f.c.blob)" "1-"
+mv ../srv25.gone ../srv25.git
+cd "$T/s25"
 
 # keys on a section's header line: written by git config, not as a second section
 sedi 's/^\[file "a.c"\]$/[file "a.c"] adaptable = false/' .git-filesync
