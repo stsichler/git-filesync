@@ -49,14 +49,16 @@ Basic commands:
                                 changes
         -s, --short             short format: upstream/committed/worktree
                                 columns (upstream: P pending, O older,
-                                D diverged, R renamed, X deleted
+                                D diverged or previous sync point
+                                unknown, R renamed, X deleted
                                 upstream, N new link; E error;
                                 committed: M adapted; working tree: M
                                 modified, D missing, ? not committed yet)
         -v, --verbose           also list all linked files with their sources
-                                (pinned ones with the newest tag: the first
-                                tagged commit after theirs on the source
-                                branch's first-parent line)
+                                (pinned ones with the newest tag: on the
+                                first tagged commit from the head of the
+                                source's branch back along its first-parent
+                                line)
         --exit-code             exit 1 if something is to sync, a linked
                                 file is missing, or a file that isn't
                                 adaptable is modified
@@ -72,7 +74,9 @@ Basic commands:
                                 time as by add; a file renamed upstream is
                                 followed, one deleted there is reported
         --all                   all files with something to sync (with
-                                --commit, -b, --tag: all files)
+                                --commit, -b, --tag: all files); names
+                                those left alone that need attention
+                                (missing; modified, but not adaptable)
         -b, --branch BRANCH     sync to the head of BRANCH, once: the files
                                 keep following their own branch or tag
                                 (to switch: set -b/--tag)
@@ -1062,8 +1066,9 @@ class Source:
     def newer_tags(self, tag, branch):
         """Tags newer than tag on branch, by their position in the commit
         graph - tag names are opaque, and tags have no reliable date: the
-        newest tag after tag is on the first tagged commit of the branch's
-        first-parent line (a tag on a merged side branch doesn't count).
+        newest one is on the first tagged commit from the branch head back
+        along its first-parent line (a tag on a merged side branch doesn't
+        count).
         Returns [(tags of that commit, [branch])], empty if there are none."""
         key = ("newer", tag, branch)
         if key in self._memo:
@@ -1666,6 +1671,10 @@ class Repo:
         if not entries:
             return
         rels, oids = [r for r, _ in entries], [o for _, o in entries]
+        if worktree:     # the last line of defense: git would delete what is in the way
+            blocked = [f"{r}: {p}" for r in rels for p in [in_the_way(self.top, r)] if p]
+            if blocked:
+                raise FsError("not written - " + "; ".join(blocked))
         # an executable file stays one; a symlink or submodule there becomes a file
         modes = {r: e[0] for r, e in self.index_entries(rels).items()
                  if e[0] in ("100644", "100755")}
@@ -1804,6 +1813,8 @@ def edit_registry(data, pending, drop=(), renames=None):
             headers[name], sect = i, name
             continue
         if re.match(r"\s*\[", line):
+            if not re.fullmatch(r"\s*\[[^\]]*\]\s*(?:[#;].*)?", line):
+                return None              # keys on the header line (or not understood)
             headers[(None, i)] = i
             sect = None
             continue
@@ -1921,6 +1932,34 @@ def path_problem(rel):
     if rel == REGISTRY:
         return f"{REGISTRY} itself"
     return None
+
+
+def in_the_way(top, rel):
+    """Why the working tree can't have a file at rel now, None if it can:
+    something other than a file there, or a parent that is a file or a
+    symbolic link. git would delete what is in the way when writing the
+    file (also a directory, with all in it), or write it elsewhere."""
+    parts = rel.split("/")
+    for i in range(1, len(parts)):
+        p = top.joinpath(*parts[:i])
+        if p.is_symlink():
+            return f"beyond a symbolic link '{'/'.join(parts[:i])}'"
+        if not p.exists():
+            return None
+        if not p.is_dir():
+            return f"'{'/'.join(parts[:i])}' is a file, not a directory"
+    p = top / rel
+    if p.is_dir():
+        return "is a directory, not a file"
+    if p.exists() and not p.is_file():
+        return "is not a regular file"
+    return None
+
+
+def blocked_text(repo, rel, blocked):
+    """The error for a linked file that something is in the way of (see in_the_way)."""
+    return (f"{blocked} - move it away, or remove the link with "
+            f"'git filesync unlink {path_arg(repo, rel)}'")
 
 
 def registry_path(repo):
@@ -2102,6 +2141,9 @@ class Link:
         problem = path_problem(self.rel)
         if problem:
             raise FsError(f"'{self.rel}' in {REGISTRY}: {problem}")
+        blocked = in_the_way(self.reg.repo.top, self.rel)
+        if blocked:
+            raise FsError(f"{self.rel}: {blocked_text(self.reg.repo, self.rel, blocked)}")
         return self.reg.repo.top / self.rel
 
     @property
@@ -2278,8 +2320,8 @@ def prefetch(ctx, repo, links):
             pass
     # files that differ from their base (adapted, uncommitted changes): can
     # they be compared without git's filters? (see matches_base)
-    differ = [lk for lk in links if lk.blob and repo._head.get(lk.rel) not in (None, lk.blob)
-              or repo._dirty.get(lk.rel)]
+    differ = [lk for lk in links if lk.blob and (repo._head.get(lk.rel) not in (None, lk.blob)
+                                                 or repo._dirty.get(lk.rel))]
     if differ:
         repo.check_plain(lk.rel for lk in differ)
         ids = {id(lk) for lk in differ}
@@ -2337,6 +2379,10 @@ def evaluate(ctx, repo, link):
             if str(e) not in st.warnings:
                 st.warnings.append(str(e))
             return False
+    blocked = in_the_way(repo.top, link.rel)
+    if blocked:          # not 'missing': restore and pull would delete what is there
+        st.error = blocked_text(repo, link.rel, blocked)
+        return st
     try:
         exists = link.target.is_file()
         head = st.head_blob = repo.head_blob(link.rel)
@@ -2402,7 +2448,9 @@ def evaluate(ctx, repo, link):
         st.warnings.append(f"last synced commit {st.old[:12] or '-'} not found in "
                            f"{src.label} (unpushed?)")
     st.changed = st.new_blob != st.old_blob
-    st.pending = st.changed or bool(st.moved)
+    # synced commit unknown upstream (history rewritten): pull records the
+    # current one, also if the file is the same
+    st.pending = st.changed or bool(st.moved) or not st.has_old
     if src.local:
         if src.note:
             st.warnings.append(src.note)
@@ -2432,7 +2480,7 @@ def upstream_state(st):
             return "deleted", f"upstream, by {st.src.short(commit)}"
         n = commits_since(st)
         return "renamed", f"{st.link.path} -> {path}" + (f", {plural(n, 'commit')}" if n else "")
-    if st.changed:
+    if st.changed or not st.has_old:
         behind = commits_behind(st)
         if behind:
             what = "upstream branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
@@ -2607,7 +2655,7 @@ def print_long(repo, sts, verbose):
 
 def cmd_status(ctx, repo, args):
     """Like `git status`: exit code 0 unless --exit-code (1 = something to
-    sync or a change not allowed) or an error (2)."""
+    sync, a missing file or a change not allowed) or an error (2)."""
     reg = Registry(repo)
     links = select_links(repo, reg, args.paths)
     if not links:
@@ -2791,7 +2839,7 @@ def pull_one(repo, reg, st, args):
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {rel}'; discard them with "
                       f"'git filesync restore -SW {rel}'{ways}")
-    if new_blob == st.old_blob and path == link.path and not discard:
+    if new_blob == st.old_blob and path == link.path and new == st.old and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
               + (" (adaptations kept)" if st.committed == "adapted" else ""))
         return None
@@ -2876,10 +2924,14 @@ def first_sync(repo, st, args, new, new_blob, path):
                       f"use 'git filesync pull --overwrite {rel}' to take the upstream "
                       f"version, or 'git filesync set --adaptable {rel}' to keep it (the "
                       "differences become local adaptations)")
+    for w in st.warnings:
+        warn(f"{st.rel}: {w}")
     note = "fetched" if fetch else "existing file replaced" if replace else \
         "existing file, with local adaptations" if modified else "existing file"
     if args.dry_run:
-        print(f"{st.rel}: would sync to {link.name}@{src.short(new)} (not synced yet; {note})")
+        once = f"; {st.once} once" if st.once else ""
+        print(f"{st.rel}: would sync to {link.name}@{src.short(new)} "
+              f"(not synced yet; {note}{once})")
         return None
     content = repo.normalize(src.read_content(new_blob, path), st.rel) \
         if fetch or replace else None
@@ -2959,6 +3011,7 @@ def cmd_pull(ctx, repo, args):
     once = args.commit or args.branch or args.tag   # another revision, branch or tag, once
     prefetch(ctx, repo, links)
     newest, synced = {}, []             # synced: (rel, source, message, conflicts)
+    skipped = []                        # pull --all: not synced, but to be seen to
     contents = {}                       # rel -> synced content (normalized form)
     selected = [lk.rel for lk in links]
     states = [evaluate(ctx, repo, link) for link in links]
@@ -2986,6 +3039,8 @@ def cmd_pull(ctx, repo, args):
             newest.setdefault((link.name, link.tag), (link.tag, link.line, st.newest, []))[3] \
                 .append(link.rel)
         if args.all and not st.pending and not once:
+            if st.attention:          # missing, or modified but not adaptable
+                skipped.append(st.rel)
             continue
         done += 1
         if args.verbose:
@@ -3012,7 +3067,11 @@ def cmd_pull(ctx, repo, args):
         how = f"'git filesync set <file>... {opt}'"
         print(f"hint: the links still follow their own branch or tag, so a plain pull goes "
               f"back; to stay on {once_text(args)}, use {how}")
-    if args.all and not done and rc == EXIT_OK:
+    if skipped:
+        what = skipped[0] if len(skipped) == 1 else plural(len(skipped), "linked file")
+        print(paint(f"{what}: not synced, but {'needs' if len(skipped) == 1 else 'need'} "
+                    "attention (see 'git filesync status')", "yellow"))
+    elif args.all and not done and rc == EXIT_OK:
         print(paint("everything up to date", "green"))
     for _, (tag, line, new, rels) in sorted(newest.items()):
         print(newest_hint(rels, tag, line, new))
@@ -3591,6 +3650,8 @@ def cmd_rm(ctx, repo, args):
     adaptation is no reason to refuse. A file that is gone already is fine."""
     reg = Registry(repo)
     links = select_links(repo, reg, args.files)
+    for link in links:
+        link.target               # refused (for all) if something is in the way
     repo.prefetch([lk.rel for lk in links])
     if not args.force:
         dirty = [lk.rel for lk in links if lk.target.exists() and
@@ -3627,7 +3688,7 @@ def cmd_mv(ctx, repo, args):
     if dst.is_dir():
         dst = dst / Path(old).name
     new = repo.rel(dst)
-    problem = path_problem(new)
+    problem = path_problem(new) or in_the_way(repo.top, new)
     if problem:
         raise FsError(f"cannot move to '{new}': {problem}")
     if new in reg.files or dst.exists():
@@ -3639,7 +3700,7 @@ def cmd_mv(ctx, repo, args):
         return EXIT_OK
     if repo.git(["ls-files", "--error-unmatch", "--", lit(old)], check=False).returncode == 0:
         repo.git(["mv", "--", old, new])
-    elif (repo.top / old).exists():
+    elif Link(reg, old).target.exists():
         (repo.top / old).rename(dst)
     reg.rename_file(old, new)
     reg.finish()

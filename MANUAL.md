@@ -82,7 +82,10 @@ file. Git-config format:
   version of the upstream file, `commit` the upstream commit that last changed
   it (not the branch tip at sync time). One file version thus always gives
   the same entry, and commits that don't touch the file – unpushed, rebased
-  or not – don't matter.
+  or not – don't matter. If the recorded commit isn't found upstream any
+  more (history rewritten there), `status` shows the file as `changed
+  (previous sync point unknown)`, and `pull` records the current commit –
+  also if the file itself is the same.
 - An entry **without** `commit` and `blob` is a **new link**, not synced
   yet: `status` shows it as `new`, and `pull` syncs it the first time,
   exactly as [`add`](#add) would – a missing file is fetched, an existing
@@ -103,7 +106,13 @@ file. Git-config format:
 - File paths must lie inside the working tree. Entries pointing outside it
   (`..`, absolute paths) or into a `.git` directory are reported as errors
   and never written – a cloned repository's `.git-filesync` can't make
-  `pull` touch other files.
+  `pull` touch other files. The same goes for a path that something is in
+  the way of: a directory (or anything else but a file) where the file
+  belongs, a parent directory that is a file, or one that is a symbolic
+  link. Writing the file, git would delete what is there (a directory with
+  all in it), or write elsewhere; so no command writes, deletes or reads
+  there, and `status` reports an error – move it away, or remove the link
+  with `unlink`.
 
 ### Exact copies and adaptable files
 
@@ -111,7 +120,8 @@ By default a linked file must stay an **exact copy** of its upstream
 version. Any change of it, committed or not, is reported as a violation:
 `status` marks it `NOT ALLOWED: not adaptable` (`-s`: `(not adaptable!)`,
 `--exit-code`: 1), the hooks report it, and `pull` refuses to sync it
-(other files of `pull --all` are still synced). Inspect with `diff`, then go
+(other files of `pull --all` are still synced; if there is nothing to
+sync, `pull --all` leaves it alone and says it needs attention). Inspect with `diff`, then go
 back to the synced upstream version with [`restore -SW`](#restore) (or,
 for committed changes, sync and discard in one step with `pull
 --overwrite`), discard only uncommitted changes with `git restore` – or
@@ -150,7 +160,8 @@ adaptations by merging them with the new upstream version, and – like
 
 A linked file must exist once it is synced, adaptable or not: one that
 is **missing** in the working tree – deleted, the deletion committed or not – is never
-allowed, as its link is still there. Bring it back with
+allowed, as its link is still there. (A directory there is no missing
+file, but an [error](#the-git-filesync-file): `restore` would delete it.) Bring it back with
 [`restore`](#restore), or remove the link with [`unlink`](#unlink) (or the
 link and the file with [`rm`](#rm)).
 
@@ -327,7 +338,7 @@ In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 
 | Option | Effect |
 |---|---|
-| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths |
+| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths. Files it leaves alone that need attention – missing, or modified but not adaptable – are named instead of `everything up to date`: `2 linked files: not synced, but need attention (see 'git filesync status')` |
 | `--commit REV` | sync to this upstream revision, once (as `-b`) – branch, tag or commit id, also backwards. The link keeps its branch or tag |
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH, once: the files keep following their own branch or tag (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG, once (as `-b`) |
@@ -350,7 +361,7 @@ sync), or discard them with `git restore`.
 
 **Missing files:** `pull` refuses a [missing](#local-modifications-on-top-of-the-upstream-version)
 file – bring it back with `restore` first (or remove the link with
-`unlink`); `pull --all` leaves it alone. A [new link](#the-git-filesync-file)
+`unlink`); `pull --all` leaves it alone, and says it needs attention. A [new link](#the-git-filesync-file)
 (no `commit` and `blob` yet) is no missing file: `pull` fetches it.
 
 **Revisions:** `--commit` accepts branch names (`develop` means the current
@@ -1011,7 +1022,7 @@ git filesync pull cfg/
 
 `set FILE… --no-tag` goes back to following the branch. `pull --tag v1.3.0`
 [tries a tag once](#another-branch-or-tag-once) without switching;
-`pull --commit` syncs a single file to any revision.
+`pull --commit` syncs once to any revision.
 
 #### Tag patterns
 
@@ -1043,9 +1054,9 @@ Tag names are taken as opaque – `v1.10` and `v1.9`, `release-7` or
 `tool-20261016` are just names – and tags carry no reliable date
 (lightweight tags have none of their own, and a tag may be set on an old
 commit later). So "newer" is defined by the commit graph alone, on the
-source's branch: the newest tag after the pinned one is on the first tagged
-commit after it along the branch's first-parent line, i.e. the commits the
-branch itself went through. Tags on side branches merged into it don't
+source's branch: the newest tag is on the first tagged commit from the
+branch head back along its first-parent line (one that contains the pinned
+tag), i.e. among the commits the branch itself went through. Tags on side branches merged into it don't
 count. So there is at most one newest tag (several names if several tags are
 on that commit: `v1.4.0 = release-7`):
 
@@ -1194,7 +1205,7 @@ access.)
 | Code | Meaning |
 |---|---|
 | `0` | ok |
-| `1` | unfinished: `pull` with conflicts; `status --exit-code` with something to sync (including files deleted upstream) a missing file, or a change not allowed (a file that isn't adaptable); `diff -- --exit-code` with differences |
+| `1` | unfinished: `pull` with conflicts; `status --exit-code` with something to sync (including files deleted upstream), a missing file, or a change not allowed (a file that isn't adaptable); `diff -- --exit-code` with differences |
 | `2` | error |
 | `141` | the output went into a pipe that was closed early (`… \| head`, a pager quit), like Git (128 + SIGPIPE); reading commands stop there, the others finish their work first |
 

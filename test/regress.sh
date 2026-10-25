@@ -49,6 +49,8 @@
 #   21. Performance: git processes don't grow with the number of files
 #   22. Closed output pipe; discarded content kept
 #   23. A cache that lacks a branch; symlinks in this repository; parallel clones
+#   24. New links written by hand: pull does the first sync, as add would
+#   25. Something in the way of a linked file; rewritten upstream history
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -2189,6 +2191,102 @@ check "new link: --overwrite takes the upstream version" "$(rc git filesync pull
 git commit -q --no-edit
 check "new links synced" "$(git filesync status -s | oneline)" " M  c.c "
 check "new links synced: exit code" "$(rc git filesync status --exit-code)" "0"
+check "new link: pull -n --commit names it once" \
+  "$(printf '[file "f.c"]\n\tsource = %s\n\tpath = lib/b.c\n' "$SRC24" >> .git-filesync
+     git filesync pull -n --commit "$(git -C ../m24 rev-parse HEAD)" f.c | grep -c '(not synced yet; fetched; commit [0-9a-f]* once)$')" "1"
+git checkout -q -- .git-filesync
+
+
+# =============================================================================
+section "25. Something in the way of a linked file; rewritten upstream history"
+# =============================================================================
+cd "$T"
+export FILESYNC_CACHE=$T/cache-25     # of its own: removed below
+
+git init -q m25 && (cd m25 && for f in a b c; do echo $f > $f.c; done && git add . && git commit -qm init)
+new_repo s25
+for f in a b; do addc "$TURL/m25" $f.c; done
+SRC25=$(git config -f .git-filesync file.a.c.source)
+# a directory where a linked file belongs is not 'missing' (restore and
+# pull would delete it, with all in it): an error, and nothing is touched
+rm a.c && mkdir a.c && echo precious > a.c/keep
+check "directory in the way: status error" "$(st a.c)" "E"
+check "directory in the way: says so" \
+  "$(git filesync status a.c 2>&1 | grep -c "a.c: is a directory, not a file - move it away, or remove the link with 'git filesync unlink a.c'")" "1"
+check "directory in the way: restore refuses, keeps it" "$(rc git filesync restore a.c)-$(cat a.c/keep)" "2-precious"
+check "directory in the way: restore -SW too" "$(rc git filesync restore -SW a.c)-$(cat a.c/keep)" "2-precious"
+check "directory in the way: pull refuses, keeps it" "$(rc git filesync pull --overwrite a.c)-$(cat a.c/keep)" "2-precious"
+check "directory in the way: rm refuses, keeps it" "$(rc git filesync rm -f a.c)-$(cat a.c/keep)" "2-precious"
+# ... also for a new link (no commit and blob yet), as for add
+printf '[file "c.c"]\n\tsource = %s\n\tpath = c.c\n' "$SRC25" >> .git-filesync
+mkdir c.c && echo precious > c.c/keep
+check "new link, directory in the way: pull --all refuses, keeps it" \
+  "$(rc git filesync pull --all)-$(cat c.c/keep)" "2-precious"
+rm -rf a.c c.c && git checkout -q -- a.c .git-filesync
+# a parent that is a file: git would delete it to make the directory
+printf '[file "b.c/x.c"]\n\tsource = %s\n\tpath = c.c\n\tcommit = %s\n\tblob = %s\n' \
+  "$SRC25" "$(git -C ../m25 rev-parse HEAD)" "$(git -C ../m25 rev-parse HEAD:c.c)" >> .git-filesync
+check "parent is a file: status error" "$(st b.c/x.c)" "E"
+check "parent is a file: restore refuses, keeps it" "$(rc git filesync restore b.c/x.c)-$(cat b.c)" "2-b"
+git checkout -q -- .git-filesync
+if ln -s x "$T/lncheck25" 2>/dev/null && [ -L "$T/lncheck25" ]; then
+  # a path through a symbolic link: refused, nothing read or written there
+  mkdir "$T/outside25" && echo far > "$T/outside25/x.c"
+  ln -s "$T/outside25" ext && git add ext && git commit -qm "symlink ext"
+  printf '[file "ext/x.c"]\n\tsource = %s\n\tpath = c.c\n\tcommit = %s\n\tblob = %s\n' \
+    "$SRC25" "$(git -C ../m25 rev-parse HEAD)" "$(git -C ../m25 rev-parse HEAD:c.c)" >> .git-filesync
+  # (the entry itself: on the command line, ext/x.c is a path outside)
+  check "beyond a symlink: status error" \
+    "$(git filesync status 2>&1 | grep -c "ext/x.c: beyond a symbolic link 'ext'")" "1"
+  check "beyond a symlink: rm refuses (for all), keeps it" \
+    "$(rc git filesync rm -f .)-$(cat "$T/outside25/x.c")-$(cat a.c)" "2-far-a"
+  check "beyond a symlink: restore refuses, keeps it" \
+    "$(rc git filesync restore .)-$(cat "$T/outside25/x.c")" "2-far"
+  check "beyond a symlink: add refused" "$(rc git filesync add "$TURL/m25" ext/y.c -p c.c)-$(ls "$T/outside25")" "2-x.c"
+  git checkout -q -- .git-filesync
+else
+  echo "skipped: no symlinks here"
+fi
+
+# pull --all: files it leaves alone, but that need attention (missing; not
+# adaptable, but modified) are no 'everything up to date'
+rm a.c
+check "pull --all with a missing file: not 'everything up to date'" \
+  "$(git filesync pull --all 2>&1 | oneline)" "a.c: not synced, but needs attention (see 'git filesync status') "
+echo local >> b.c && git commit -qm "b local" b.c
+check "pull --all, two need attention" "$(git filesync pull --all 2>&1 | oneline)" \
+  "2 linked files: not synced, but need attention (see 'git filesync status') "
+git checkout -q -- a.c && git reset -q --hard HEAD~1
+
+# upstream history rewritten, the file the same: the recorded commit is
+# unknown upstream - status says so, and pull records the current one
+(cd ../m25 && git commit -q --amend -m "init again" && git reflog expire --expire=now --all \
+  && git gc -q --prune=now)
+rm -rf "$T/cache-25"
+check "rewritten upstream: status" "$(st a.c)" "D"
+check "rewritten upstream: long format" \
+  "$(git filesync status | grep -c 'a.c  (previous sync point unknown)')" "1"
+check "rewritten upstream: pull --all" "$(rc pullc --all)-$(git config -f .git-filesync file.a.c.commit)" \
+  "0-$(git -C ../m25 rev-parse HEAD)"
+check "rewritten upstream: then up to date" "$(git filesync status -s)-$(git status --porcelain)" "-"
+
+# the first sync of a new link warns as any pull (here: from an unpushed
+# commit of a mapped checkout)
+git clone -q ../m25 "$T/co25"
+git filesync source map "$TURL/m25" "$T/co25" >/dev/null
+(cd "$T/co25" && echo d > d.c && git add d.c && git commit -qm "d unpushed")
+printf '[file "d.c"]\n\tsource = %s\n\tpath = d.c\n' "$SRC25" >> .git-filesync
+check "new link: first sync warns too" \
+  "$(git filesync pull d.c 2>&1 | grep -c "^warning: d.c: 'd.c' in .* comes from commit .*, which is not pushed$")" "1"
+git reset -q --hard && git filesync source map "$TURL/m25" --unset >/dev/null
+
+# keys on a section's header line: written by git config, not as a second section
+sedi 's/^\[file "a.c"\]$/[file "a.c"] adaptable = false/' .git-filesync
+quiet git filesync set a.c --adaptable
+check "keys on the header line: one section, one value" \
+  "$(grep -c '^\[file "a.c"\]' .git-filesync) $(git config -f .git-filesync --get-all file.a.c.adaptable)" "1 true"
+git reset -q --hard
+export FILESYNC_CACHE=$T/cache
 
 
 # =============================================================================
