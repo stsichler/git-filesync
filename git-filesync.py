@@ -3056,7 +3056,7 @@ def report_pull(repo, reg, synced):
         print(f"{paint('merge conflicts', 'boldred')} - resolve them, then run:\n"
               f"    git add {add}\n    git commit\n{commit_hint(repo, msg)}")
         return EXIT_PENDING
-    report_staged(repo, name, msg, paint("synced and staged", "green"))
+    report_staged(repo, name, msg, paint("staged", "green"))
     return EXIT_OK
 
 

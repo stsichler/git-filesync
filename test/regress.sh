@@ -900,6 +900,9 @@ check "add --overwrite: message" \
 # pull never commits, so never starts an editor
 (cd ../m4 && sedi 's/^D-up$/D-up2/' lib/foo.c && git commit -qam "foo up2")
 check "pull: no editor, exit 0" "$(GIT_EDITOR=false rc git filesync pull src/foo.c)" "0"
+git reset -q --hard "$BASE"
+check "pull: each file synced, then once staged (like add)" \
+  "$(git filesync pull src/foo.c | grep '^src/foo.c: ' | oneline)" "src/foo.c: synced src/foo.c: staged. Commit with: "
 check "pull: staged" "$(git status --porcelain | oneline)" "M  .git-filesync M  src/foo.c "
 git reset -q --hard "$BASE"
 

@@ -22,7 +22,7 @@ Upstream changes to sync:
 
 $ git filesync pull src/foo.c
 src/foo.c: synced
-src/foo.c: synced and staged. Commit with:
+src/foo.c: staged. Commit with:
     git commit
 (it offers the proposed commit message; a copy stays in .git/FILESYNC_MSG)
 ```
@@ -97,7 +97,7 @@ afterwards.
   `add`, `rm`, `unlink`, `mv`, `set`
 - Optional local checkout of the upstream repository instead of fetching – works
   offline; the checkout is only read, never written to
-- Uncommitted content that `restore`, `add --overwrite` or `rm -f` discard is
+- Uncommitted content that `restore`, `rm -f` or an `--overwrite` discards is
   kept as a blob, with a hint how to get it back
 - Git LFS upstream, downstream, both or neither
 - Correct with differing line-ending conventions (`core.autocrlf`, `text=auto`)
@@ -144,7 +144,7 @@ cd my-repo
 
 # 1. Link a file (once): staged like git add, then committed - git commit
 #    offers the proposed message. Without -b the upstream default branch is
-#    used, without -p the same path as here.
+#    used, without -p the same path as here. The directory (src) must exist.
 git filesync add https://github.com/owner/lib.git src/foo.c -p lib/foo.c
 git commit
 
@@ -193,7 +193,7 @@ Advanced commands:
 | `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
 | `source [ACTION …]` | list sources; rename, change URL or branch |
 | `source map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
-| `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear |
+| `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear, print its directory |
 | `hooks [install\|uninstall]` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |
 
 `git filesync <command> -h` describes a command and lists its options. The
@@ -206,7 +206,8 @@ local checkouts, Git LFS, line endings and CI.
 The whole tool is the single file `git-filesync.py`. Tests:
 
 ```sh
-test/regress.sh            # Linux/macOS (bash); needs git, python3, git-lfs for the LFS part
+test/regress.sh                        # Linux/macOS (bash); needs git, python3, git-lfs for the LFS part
+PYTHON=python test/regress.sh          # Windows, in Git Bash
 ```
 
 The script builds throwaway upstream/downstream repositories in a temp directory

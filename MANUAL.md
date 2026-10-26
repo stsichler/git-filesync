@@ -192,7 +192,7 @@ Basic commands – what you need day to day:
 | [`edit`](#edit) | edit `.git-filesync` in the editor |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL or branch |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
-| [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear |
+| [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear, print its directory |
 | [`hooks [ACTION]`](#hooks) | the hooks: show, install, remove; reminders, push check |
 
 Commands named like a Git command behave like it (`status`, `pull`, `diff`,
