@@ -215,7 +215,7 @@ Advanced commands:
                                 filesync.cacheMaxSize SIZE; 0/off: none) -
                                 also done automatically after a fetch, at
                                 most once a day
-        --older-than DAYS, --max-size SIZE  other limits (SIZE: 500M, 2G;
+        --max-age DAYS, --max-size SIZE  other limits (SIZE: 500M, 2G;
                                 0: no limit, as configured; everything:
                                 cache clear)
         -n, --dry-run           only show what would be removed
@@ -243,11 +243,11 @@ Advanced commands:
 
     Common options:
         --no-fetch              use the cached state, don't fetch (status,
-                                pull, diff/difftool --upstream, add, set,
+                                pull, diff/difftool, restore, add, set,
                                 source set-url/set-branch; restore and diff
-                                of local changes fetch only if the cache
-                                lacks the branch); an upstream not in the
-                                cache yet is cloned anyway
+                                of local changes fetch anyway only if the
+                                cache lacks the branch); an upstream not in
+                                the cache yet is cloned anyway
         --color[=WHEN], --no-color  always, never or auto (default)
 
 Exit codes: 0 ok, 1 unfinished (pull: conflicts; --exit-code),
@@ -4139,13 +4139,13 @@ def cmd_cache(args):
         else:
             max_age, max_size = cache_limits()
             # 0: no limit, as in the configuration (everything: cache clear)
-            if args.older_than is not None:
-                max_age = args.older_than or None
+            if args.max_age is not None:
+                max_age = args.max_age or None
             if args.max_size is not None:
                 max_size = parse_size(args.max_size) or None
             if max_age is None and max_size is None:
                 print("no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize, "
-                      "--older-than, --max-size) - nothing to do")
+                      "--max-age, --max-size) - nothing to do")
                 return EXIT_OK
             removed = prune_cache(max_age, max_size, args.dry_run)
         verb = "would remove" if args.dry_run else "removed"
@@ -4426,6 +4426,23 @@ def add_command(sub, name, **kw):
     return sub.add_parser(name, **kw)
 
 
+class Parser(argparse.ArgumentParser):
+    """A command's parser: argparse shows an optional value as '--color
+    [WHEN]', but it is taken only as --color=WHEN, like git (see run) -
+    the usage and the help say so."""
+    def format_usage(self):
+        return equals_value(super().format_usage())
+
+    def format_help(self):
+        return equals_value(super().format_help())
+
+
+def equals_value(text):
+    """'--color [WHEN]' -> '--color[=WHEN]', also with argparse's colors."""
+    esc = r"((?:\x1b\[[0-9;]*m)*)"
+    return re.sub(rf"--color{esc} {esc}\[{esc}WHEN{esc}\]", r"--color\1\2[=\3WHEN\4]", text)
+
+
 BASIC_COMMANDS = ("status", "pull", "diff", "difftool", "restore", "add", "rm", "unlink", "mv")
 
 
@@ -4494,8 +4511,9 @@ def run(argv=None):
             reconfigure(errors="replace", newline="\n")
 
     colorp = argparse.ArgumentParser(add_help=False)
-    colorp.add_argument("--color", nargs="?", const="always", default="auto",
-                        choices=["always", "never", "auto"], help="colored output (default: auto)")
+    colorp.add_argument("--color", nargs="?", const="always", default="auto", metavar="WHEN",
+                        choices=["always", "never", "auto"],
+                        help="colored output: always, never or auto (default)")
     colorp.add_argument("--no-color", dest="color", action="store_const", const="never",
                         help="same as --color=never")
     common = argparse.ArgumentParser(add_help=False, parents=[colorp])
@@ -4515,7 +4533,7 @@ def run(argv=None):
                     description="Keep single files in sync between Git repositories.", **color)
     ap.add_argument("--version", action="version", version=f"git-filesync {__version__}")
     sub = ap.sub = ap.add_subparsers(dest="cmd", metavar="<command>", prog="git filesync",
-                                     parser_class=argparse.ArgumentParser)
+                                     parser_class=Parser)
 
     p = add_command(sub, "status", parents=[common], help="show sync state of linked files")
     p.add_argument("paths", nargs="*", metavar="PATH", help="linked files or directories (default: all)")
@@ -4622,7 +4640,7 @@ def run(argv=None):
     add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then check "
                                                   "and stage it")
 
-    p = add_command(sub, "restore", parents=[colorp],
+    p = add_command(sub, "restore", parents=[common],
                     help="restore files to the synced upstream version, like 'git restore'")
     p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
     p.add_argument("-S", "--staged", action="store_true",
@@ -4682,7 +4700,7 @@ def run(argv=None):
     a = add_command(actions, "prune", parents=[colorp],
                            help="remove clones not used for a while (default: the configured "
                                 "limits, filesync.cacheMaxAge / cacheMaxSize)")
-    a.add_argument("--older-than", type=int, metavar="DAYS",
+    a.add_argument("--max-age", type=int, metavar="DAYS",
                    help="clones not used for DAYS days")
     a.add_argument("--max-size", metavar="SIZE",
                    help="then the least recently used, down to SIZE (e.g. 500M, 2G)")

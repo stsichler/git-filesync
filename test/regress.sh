@@ -914,6 +914,7 @@ check "no color when piped" "$(git filesync status | grep -c "$ESC")" "0"
 check "--color=always" "$(git filesync status --color=always | grep -q "$ESC" && echo yes)" "yes"
 check "--color alone: always, like git" "$(git filesync status --color | grep -q "$ESC" && echo yes)" "yes"
 check "--color takes no path as its value" "$(rc git filesync status --color src/foo.c)" "0"
+check "-h: --color[=WHEN], as it is taken" "$(git filesync status -h | grep -c -- '--color\[=WHEN\]')" "2"
 check "color.ui=always via git -c" "$(git -c color.ui=always filesync status | grep -q "$ESC" && echo yes)" "yes"
 check "color.filesync=never beats color.ui" \
   "$(git -c color.ui=always -c color.filesync=never filesync status | grep -c "$ESC")" "0"
@@ -1891,9 +1892,9 @@ age_clones
 check "cache prune -n" "$(git filesync cache prune -n | grep -c '^would remove .* 2020-01-01 ')" "$N"
 check "cache prune -n: nothing removed" "$(nclones)" "$N"
 check "cache prune --max-size: least recently used" \
-  "$(git filesync cache prune --older-than 100000 --max-size 1 -n | grep -c '^would remove .* 2020-01-01 ')" "$N"
+  "$(git filesync cache prune --max-age 100000 --max-size 1 -n | grep -c '^would remove .* 2020-01-01 ')" "$N"
 check "cache prune: 0 is no limit, as configured" \
-  "$(git filesync cache prune --older-than 0 -n | grep -c '^would remove .* 2020-01-01 ')-$(git filesync cache prune --older-than 100000 --max-size 0 -n | grep -c '^would remove .* 2020-01-01 ')" "0-0"
+  "$(git filesync cache prune --max-age 0 -n | grep -c '^would remove .* 2020-01-01 ')-$(git filesync cache prune --max-age 100000 --max-size 0 -n | grep -c '^would remove .* 2020-01-01 ')" "0-0"
 
 # automatic clean-up after a fetch, at most once a day: here everything
 # but the clone just used is old
@@ -1907,7 +1908,7 @@ quiet git filesync status
 check "... at most once a day" "$(nclones)" "1"
 git config --global filesync.cacheMaxAge off
 check "cacheMaxAge off: no limits" "$(git filesync cache prune)" \
-  "no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize, --older-than, --max-size) - nothing to do"
+  "no limits set (filesync.cacheMaxAge, filesync.cacheMaxSize, --max-age, --max-size) - nothing to do"
 git config --global --unset filesync.cacheMaxAge
 check "cache clear -n" "$(git filesync cache clear -n | tail -1 | cut -d' ' -f1-4)" "would remove 1 clone"
 quiet git filesync cache clear
@@ -2082,6 +2083,7 @@ addc "$TURL/m23.git" a.c
 (FILESYNC_CACHE=$T/cache-23 addc -b dev "$TURL/m23.git" b.c)
 echo local >> b.c
 check "diff: a branch the cache lacks is fetched" "$(git filesync diff b.c 2>&1 | grep -c '^+local$')" "1"
+check "restore --no-fetch" "$(git filesync restore --no-fetch b.c 2>&1 | grep -c '^b.c: restored ')-$(cat b.c)" "1-b"
 git reset -q --hard
 
 # own comments in .git-filesync: a removed entry takes the comments between

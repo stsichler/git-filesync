@@ -228,7 +228,7 @@ the command and lists them.
 
 | Option | Commands | Effect |
 |---|---|---|
-| `--no-fetch` | `status`, `pull`, `diff`/`difftool --upstream`, `add`, `set`, `source set-url`/`set-branch` | don't fetch, use the cached state (offline); an upstream repository not in the [cache](#cache) yet is cloned anyway. `restore` and `diff` of local changes fetch only if the cache lacks the branch – the synced versions don't change |
+| `--no-fetch` | `status`, `pull`, `diff`/`difftool`, `restore`, `add`, `set`, `source set-url`/`set-branch` | don't fetch, use the cached state (offline); an upstream repository not in the [cache](#cache) yet is cloned anyway. `restore` and `diff` of local changes fetch even without it only if the cache lacks the branch – the synced versions don't change |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
 ### `status`
@@ -345,7 +345,7 @@ In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 | `--commit REV` | sync to this upstream revision, once (as `-b`) – branch, tag or commit id, also backwards. The link keeps its branch or tag |
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH, once: the files keep following their own branch or tag (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG, once (as `-b`) |
-| `--overwrite` | discard local adaptations and take the upstream version as is (also when the file is up to date) |
+| `--overwrite` | discard local adaptations and take the upstream version as is (also when the file is up to date); uncommitted changes are still refused – except at the first sync of a [new link](#the-git-filesync-file), which works like `add --overwrite`: the file is replaced, its content kept as a blob |
 | `-n`, `--dry-run` | change nothing, only report per file what would happen: the version it would sync to, whether adaptations merge cleanly or how many conflicts there would be, a rename upstream, and every refusal |
 | `-v`, `--verbose` | before each file, a line on where it comes from (as in `status -v`) and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` |
 
@@ -856,7 +856,7 @@ it is cleaned up.
 ### `cache`
 
 ```
-git filesync cache [list | prune [--older-than DAYS] [--max-size SIZE] [-n] | clear [-n] | dir]
+git filesync cache [list | prune [--max-age DAYS] [--max-size SIZE] [-n] | clear [-n] | dir]
 ```
 
 The cache of upstream clones (one blobless clone per URL, see
@@ -877,7 +877,7 @@ $ git filesync cache list
 |---|---|
 | (none) | where the cache is, how big, and its limits |
 | `list` | the clones, most recently used first: size, last used, URL |
-| `prune` | remove clones not used for `filesync.cacheMaxAge` days, then the least recently used beyond `filesync.cacheMaxSize`; `--older-than DAYS` and `--max-size SIZE` (e.g. `500M`, `2G`) set other limits for this run – `0` means no limit, as in the settings below (to remove everything: `clear`); `-n` only shows what would be removed |
+| `prune` | remove clones not used for `filesync.cacheMaxAge` days, then the least recently used beyond `filesync.cacheMaxSize`; `--max-age DAYS` and `--max-size SIZE` (e.g. `500M`, `2G`) set other limits for this run – `0` means no limit, as in the settings below (to remove everything: `clear`); `-n` only shows what would be removed |
 | `clear` | remove all clones (`-n`: only show them) |
 | `dir` | print the cache's directory, e.g. to keep it between CI runs |
 
