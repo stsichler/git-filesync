@@ -13,6 +13,11 @@ carry a copy of it and pull updates manually, one file at a time – with a
 commit message listing every upstream commit that changed the file since the
 last sync.
 
+> **Vibe-coded:** git-filesync is entirely vibe-coded – all of its code, tests
+> and documentation were written by [Claude](https://claude.ai) (Anthropic),
+> directed by its author. The regression tests run on Linux, macOS and
+> Windows on every push.
+
 ```console
 $ git filesync status
 Upstream changes to sync:
