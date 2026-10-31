@@ -32,83 +32,67 @@ src/foo.c: staged. Commit with:
 (it offers the proposed commit message; a copy stays in .git/FILESYNC_MSG)
 ```
 
-## Why?
+## Motivation
 
 Helper modules, build scripts or configuration files often live in several
-repositories at once. Copying them by hand works – until nobody knows which
-copy is current and the history of the changes is lost. git-filesync links
-**single files**, tells you when a copy is behind, and syncs it with a
-meaningful commit message.
+repositories. Copied by hand, soon nobody knows which copy is current, and
+the history of the changes is lost. git-filesync links **single files**,
+tells you when a copy is behind, and syncs it with a meaningful commit
+message.
 
-Because each linked file is a real copy committed in your repository, the
-repository stays **self-contained**: after a plain clone or checkout every
-file is there – unlike with Git submodules, nothing has to be fetched from
-other repositories, and neither git-filesync nor access to the upstream repository is
-needed to build.
+Each linked file is a real copy committed in your repository, so the
+repository stays **self-contained**: a plain clone is complete, and neither
+git-filesync nor access to the upstream repository is needed to build.
 
 For files another project publishes as **release assets** – a tool binary,
-a firmware image, a generated header – there is its sibling
-[git-assetsync](https://github.com/stsichler/git-assetsync), built the same
-way.
+a firmware image, a generated header – there is the sibling tool
+[git-assetsync](https://github.com/stsichler/git-assetsync).
 
 ### Compared to Git submodules
 
 | | Git submodules | git-filesync |
 |---|---|---|
-| Unit | a whole repository, in its own directory | single files, each at any path in your repository |
-| What your repository contains | a pointer to a commit in the other repository | a real copy of the file, committed like any other file |
-| Local changes | made and committed in the other repository | a linked file stays an exact copy by default; per file allowed as committed adaptations (`adaptable`), kept on every sync by a 3-way merge |
-| Cloning and building | needs `--recurse-submodules` and access to every submodule repository | a plain clone is complete and works on its own, even if an upstream repository is no longer reachable |
-| Updating | moves the pointer; your log shows only the new commit id | `pull` per file; the commit contains the actual change, its proposed message lists the upstream commits it brings |
+| Unit | a whole repository, in its own directory | single files, each at any path |
+| Your repository contains | a pointer to a commit elsewhere | a real copy of the file |
+| Local changes | made in the other repository | exact copy by default; per file allowed (`adaptable`) and kept on every sync by a 3-way merge |
+| Cloning and building | needs `--recurse-submodules` and access to every submodule | a plain clone is complete, even if upstream is gone |
+| Updating | moves the pointer; your log shows a commit id | `pull` per file; the commit contains the change and lists the upstream commits |
 | For everyone else | `git submodule update` after clones, pulls and branch switches | nothing – only whoever syncs needs git-filesync |
 
-Submodules remain the better choice when you want a whole repository
-unchanged and work on it directly; git-filesync fits when a few files are
-shared, may differ slightly per repository, and your repository should stay
+Submodules remain the better choice to use a whole repository unchanged and
+work on it directly; git-filesync fits when a few files are shared, may
+differ slightly per repository, and your repository should stay
 self-contained.
 
 ### Compared to vendoring tools
 
 `git subtree` and tools like
-[git-vendor](https://github.com/thejoshwolfe/git-vendor) also copy content
-into your repository, but always a whole directory (git-vendor: filtered).
-git-vendor manages that directory exclusively – files of your own in it are
-removed – and discards local changes on update (keeping them as a patch is
-experimental there). git-filesync links single files at any path – next to
-your own files, under another name if you like – keeps your committed
-adaptations by merging, and lists the upstream commits in every sync commit.
-To take a whole directory, `add` links all its files (with `--include` /
-`--exclude` patterns) in one go; each of them is an ordinary link
-afterwards.
+[git-vendor](https://github.com/thejoshwolfe/git-vendor) copy a whole
+directory into your repository; git-vendor manages it exclusively and
+discards local changes on update. git-filesync links single files at any
+path, next to your own, keeps committed adaptations by merging, and lists
+the upstream commits in every sync. A whole directory works too: `add`
+links all its files at once.
 
 ## Features
 
-- Links single files between repositories – one by one or all files of an
-  upstream directory at once; all links of a repository live in one file,
-  `.git-filesync`, at its root (git-config format, like `.gitmodules`)
-- Self-contained repositories: linked files are committed copies, so a clone is
-  complete without fetching anything from other repositories
-- Follows an upstream branch, or is pinned to a tag per file (e.g. a release) –
-  with a hint at newer tags – or follows the newest tag matching a pattern
-  (`v1.*`); `pull --tag` tries another tag once
-- Proposed commit message lists all upstream commits touching the file since
-  the last sync
-- Linked files stay exact copies by default; files marked `adaptable` may
-  carry local adaptations, kept via 3-way merge, shown with `diff` /
-  `difftool`
-- Files renamed upstream are followed, deleted ones reported
-- Commands named like Git commands behave like them (`status`, `pull`,
-  `diff`, `difftool`, `restore`, `add`, `rm`, `mv`); dry runs for `pull`,
-  `add`, `rm`, `unlink`, `mv`, `set`
-- Optional local checkout of the upstream repository instead of fetching – works
-  offline; the checkout is only read, never written to
-- Uncommitted content that `restore`, `rm -f` or an `--overwrite` discards is
-  kept as a blob, with a hint how to get it back
-- Git LFS upstream, downstream, both or neither
-- Correct with differing line-ending conventions (`core.autocrlf`, `text=auto`)
-- Colored output, CI-friendly exit codes, hooks: reminders, and a warning
-  when a push refers to upstream commits that aren't pushed yet
-- One self-contained Python script, standard library only
+- Single files, one by one or all files of an upstream directory; all links
+  in one file, `.git-filesync`, in git-config format like `.gitmodules`
+- Follows an upstream branch, or per file a tag (with a hint at newer tags)
+  or the newest tag matching a pattern (`v1.*`)
+- Proposed commit message listing the upstream commits since the last sync
+- Exact copies by default; `adaptable` files keep local adaptations through
+  a 3-way merge
+- Follows files renamed upstream, reports deleted ones
+- Commands named like Git commands behave like them; no command commits;
+  dry runs
+- A local checkout of upstream instead of fetching – works offline, and is
+  only read
+- Discarded uncommitted content is kept, with a hint how to get it back
+- Works with Git LFS on either side and with differing line-ending conventions
+- Colored output, exit codes for CI, hooks with reminders and a check that
+  synced upstream commits are pushed
+- One Python script, standard library only
 
 ## Installation
 
@@ -131,16 +115,11 @@ git config --global alias.filesync "!py C:/tools/git-filesync.py"
 ```
 
 Alternatively (Linux/macOS) put an executable copy named `git-filesync` on
-your `PATH`. Either way the tool is invoked as `git filesync …`; check with
-`git filesync --version`. To update, download the script again; the
-[releases](https://github.com/stsichler/git-filesync/releases) list the
-changes of each version.
-
-You can also clone the repository and point the alias at the script in
-it: `main` is the current development state, a tag like `v0.21.1` a
-release. Or let git-filesync keep a copy of itself in your project, so
-everyone has the same version – see
-[Shipping git-filesync with your repository](MANUAL.md#shipping-git-filesync-with-your-repository).
+your `PATH`. Check with `git filesync --version`; to update, download the
+script again (the [releases](https://github.com/stsichler/git-filesync/releases)
+list the changes). You can also point the alias at a clone of this
+repository (`main`, or a tag like `v0.21.1`), or [ship git-filesync with
+your repository](MANUAL.md#shipping-git-filesync-with-your-repository).
 
 ## Quick start
 
@@ -173,10 +152,6 @@ Upstream changes since 3f2a9c1 (2026-09-12):
 - Add support for chunked transfer (a1b2c3d, 2026-10-28)
 ```
 
-A `pull` stages all files it syncs, with their entries in `.git-filesync`,
-like `git merge --squash`, and proposes one commit message for them; no
-git-filesync command commits.
-
 ## Commands
 
 Basic commands – what you need day to day:
@@ -201,10 +176,8 @@ Advanced commands:
 | `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear, print its directory |
 | `hooks [install\|uninstall]` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |
 
-`git filesync <command> -h` describes a command and lists its options. The
-**[manual](MANUAL.md)** describes all commands and options in detail,
-along with the `.git-filesync` file, exact copies and adaptable files,
-local checkouts, Git LFS, line endings and CI.
+`git filesync <command> -h` lists a command's options; the
+**[manual](MANUAL.md)** describes everything in detail.
 
 ## Development
 
@@ -215,16 +188,10 @@ test/regress.sh                        # Linux/macOS (bash); needs git, python3,
 PYTHON=python test/regress.sh          # Windows, in Git Bash
 ```
 
-The script builds throwaway upstream/downstream repositories in a temp directory
-and checks linking, status, pull, merge, conflicts, diff / difftool, exact
-copies and adaptable files, `.git-filesync` handling (sources, unlink, mv, commit consistency),
-unsafe registry entries, wildcard characters in file names, local checkout
-mappings, offline operation, eol handling (autocrlf /
-text=auto / plain), Git LFS in all combinations, colors, hooks, tags,
-sources, files renamed or deleted upstream, dry runs and directories – and
-after every command that nothing outside the repository was written to (the
-upstream repositories are read-only for git-filesync). It runs on every push
-via GitHub Actions.
+The tests build throwaway upstream and downstream repositories and check
+every command, also with Git LFS, line-ending conversions, mapped checkouts
+and offline – and that nothing outside the repository is ever written. They
+run on every push via GitHub Actions.
 
 Issues and pull requests are welcome. Please add a test to `test/regress.sh`
 for any change in behavior.
@@ -233,8 +200,3 @@ for any change in behavior.
 
 [MIT No Attribution (MIT-0)](LICENSE) – free to use, also in commercial and
 closed-source projects; no attribution required.
-
-## Acknowledgements
-
-This project – design, code, tests and documentation – was developed together
-with [Claude](https://claude.ai) by Anthropic.
