@@ -159,9 +159,9 @@ git commit
 Proposed commit message:
 
 ```
-[filesync] Sync src/foo.c from owner/lib@a1b2c3d
+[filesync] Sync src/foo.c from owner/lib@a1b2c3d (2026-10-28)
 
-Upstream: https://github.com/owner/lib.git (main:lib/foo.c, 2026-10-28)
+Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
 
 Upstream changes since 3f2a9c1 (2026-09-12):
 - Fix off-by-one in buffer handling (9e8d7c6, 2026-10-27)
@@ -183,7 +183,7 @@ Basic commands – what you need day to day:
 | `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced upstream version |
 | `restore PATH…` | files back to the synced upstream version, like `git restore` |
 | `add URL\|SOURCE FILE\|DIR` | link a file (or all files of an upstream directory) to upstream |
-| `rm PATH…`, `unlink PATH…`, `mv OLD NEW` | remove links with their files (like `git rm`) or without, move them |
+| `rm PATH…`, `unlink PATH…`, `mv OLD… NEW` | remove links with their files (like `git rm`) or without, move them |
 
 Advanced commands:
 

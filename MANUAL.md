@@ -182,7 +182,7 @@ Basic commands – what you need day to day:
 | [`add URL\|SOURCE FILE\|DIR`](#add) | link a file – or all files of a directory – to the upstream repository |
 | [`rm PATH…`](#rm) | remove linked files and their links, like `git rm` |
 | [`unlink PATH…`](#unlink) | remove links, keep the files |
-| [`mv OLD NEW`](#mv) | move a linked file and its link |
+| [`mv OLD… NEW`](#mv) | move linked files and their links |
 
 [Advanced commands](#advanced-commands) – to change links and sources, and for setup:
 
@@ -323,9 +323,9 @@ then opens the editor with the proposed commit message (`git commit
 --no-edit` takes it as it is):
 
 ```
-[filesync] Sync src/foo.c from owner/lib@a1b2c3d
+[filesync] Sync src/foo.c from owner/lib@a1b2c3d (2026-10-28)
 
-Upstream: https://github.com/owner/lib.git (main:lib/foo.c, 2026-10-28)
+Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
 
 Upstream changes since 3f2a9c1 (2026-09-12):
 - Fix off-by-one in buffer handling (9e8d7c6, 2026-10-27)
@@ -577,9 +577,9 @@ directory (see [below](#linking-a-directory)).
   messages](#proposed-commit-messages)):
 
   ```
-  [filesync] Add src/foo.c from owner/lib@a1b2c3d
+  [filesync] Add src/foo.c from owner/lib@a1b2c3d (2026-10-28)
 
-  Upstream: https://github.com/owner/lib.git (main:lib/foo.c, 2026-10-28)
+  Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
   ```
 
   For an existing FILE the subject is `Link FILE to …` (`Relink …` with
@@ -608,9 +608,9 @@ upstream has them. Each file gets its own ordinary `[file]` entry – after
 are staged together, with one proposed message:
 
 ```
-[filesync] Add 2 files from owner/backend@a1b2c3d
+[filesync] Add 2 files from owner/backend@a1b2c3d (2026-10-28)
 
-Upstream: https://github.com/owner/backend.git (main:api/, 2026-10-28)
+Upstream: https://github.com/owner/backend.git (main:api/)
 
 - proto/a.proto
 - proto/v1/b.proto
@@ -656,6 +656,9 @@ unlinked.
 be an existing directory. As for `git mv`, the directory NEW goes into must
 exist, and a NEW ending in `/` must be an existing directory. Both are staged. `-n` / `--dry-run` only shows
 what would be moved.
+
+`mv OLD… DIR` moves several linked files into the existing directory DIR,
+like `git mv`. All are checked first: if one can't be moved, none is.
 
 ## Advanced commands
 
@@ -1090,10 +1093,10 @@ whatever its message, and on `git reset`.
 Every proposed message starts with `[filesync] `, so commits made with
 git-filesync are easy to find later (`git log --grep='^\[filesync\]'`).
 
-In the text, every upstream commit comes with its date (the committer
-date): `Upstream changes since 3f2a9c1 (2026-09-12):`, `- Fix … (9e8d7c6,
-2026-10-27)`, and the synced version's in the `Upstream:` line. The subject
-has the commit id only.
+Every upstream commit id comes with the commit's date (the committer
+date), in the subject too: `… from owner/lib@a1b2c3d (2026-10-28)`,
+`Upstream changes since 3f2a9c1 (2026-09-12):`, `- Fix … (9e8d7c6,
+2026-10-27)`.
 
 - Several commands in a row (e.g. `add` for some files and `pull` for
   others, then one commit for all of them) collect their messages there.

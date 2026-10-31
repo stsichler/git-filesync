@@ -162,6 +162,7 @@ Basic commands:
     unlink PATH...              remove links (the files are kept)
     mv OLD NEW                  move a linked file (git mv), keeping its link;
                                 the directory of NEW must exist
+    mv OLD... DIR               move several into the existing directory DIR
         -n, --dry-run           (both) only show what would be done
 
 Advanced commands:
@@ -999,16 +1000,12 @@ class Source:
             return
         self._memo.update((("short", r), x) for r, x in zip(revs, lines))
 
-    def date(self, rev):
-        """Commit date (YYYY-MM-DD), '' if unknown (asked at once for many:
-        dates)."""
+    def dated(self, rev):
+        """'a1b2c3d (2026-10-28)' in a proposed commit message: abbreviated
+        id and commit date (asked at once for many: dates)."""
         if ("date", rev) not in self._memo:
             self.dates([rev])
-        return self._memo[("date", rev)]
-
-    def dated(self, rev):
-        """'a1b2c3d (2026-10-28)' in the text of a proposed commit message."""
-        date = self.date(rev)
+        date = self._memo[("date", rev)]
         return f"{self.short(rev)} ({date})" if date else self.short(rev)
 
     def dates(self, revs):
@@ -2795,13 +2792,10 @@ def merge3(ours, base, theirs, labels):
         return p.returncode, Path(files[0]).read_bytes()
 
 
-def upstream_line(src, url, ref, path, commit):
-    """'Upstream: URL (main:lib/foo.c, 2026-10-28)' in a proposed commit
-    message, with the date of the synced commit; for a tag pattern the tag
-    it matched."""
-    date = src.date(commit)
-    return (f"Upstream: {url} ({src.tag_names[0] if src.tag_names else ref[1]}:{path}"
-            + (f", {date})" if date else ")"))
+def upstream_line(src, url, ref, path):
+    """'Upstream: URL (main:lib/foo.c)' in a proposed commit message; for a
+    tag pattern the tag it matched."""
+    return f"Upstream: {url} ({src.tag_names[0] if src.tag_names else ref[1]}:{path})"
 
 
 def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discarded=False):
@@ -2809,8 +2803,8 @@ def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, dis
     paths = dict.fromkeys((old_path, path))       # old and (if renamed) new path
     # content goes back to the synced upstream version -> restore, not a sync
     verb = "Restore" if new_blob == st.old_blob and discarded else "Sync"
-    lines = [f"{MSG_PREFIX}{verb} {st.rel} from {link.name}@{src.short(new)}", "",
-             upstream_line(src, link.url, link.ref, path, new)]
+    lines = [f"{MSG_PREFIX}{verb} {st.rel} from {link.name}@{src.dated(new)}", "",
+             upstream_line(src, link.url, link.ref, path)]
     if path != old_path:
         lines += ["", f"Renamed upstream: {old_path} -> {path}"]
     if new == st.old:
@@ -3451,16 +3445,15 @@ def build_add_message(plan, src, name, url, ref, mpath, relink, adaptable, at):
     """Commit message for add; plan: [Planned]; at: the upstream revision a
     directory was linked at."""
     fetched = all(p.content is not None and not p.replaced for p in plan)
-    subject_ref = f"{name}@{src.short(plan[0].commit)}"
+    subject_ref = f"{name}@{src.dated(plan[0].commit)}"
     if len(plan) == 1:
         rel, path = plan[0].rel, plan[0].path
         what = f"Add {rel} from" if fetched else f"{'Relink' if relink else 'Link'} {rel} to"
     else:
         path = mpath.rstrip("/") + "/" if mpath else "/"
         what = f"Add {len(plan)} files from" if fetched else f"Link {len(plan)} files to"
-        subject_ref = f"{name}@{src.short(at)}"
-    lines = [f"{MSG_PREFIX}{what} {subject_ref}", "",
-             upstream_line(src, url, ref, path, plan[0].commit if len(plan) == 1 else at)]
+        subject_ref = f"{name}@{src.dated(at)}"
+    lines = [f"{MSG_PREFIX}{what} {subject_ref}", "", upstream_line(src, url, ref, path)]
     if len(plan) > 1:
         lines.append("")
         for p in plan:
@@ -3772,34 +3765,47 @@ def cmd_rm(ctx, repo, args):
 
 
 def cmd_mv(ctx, repo, args):
+    """mv OLD NEW, or like git mv several linked files into an existing
+    directory: mv OLD... DIR - all checked first, then all moved."""
     reg = Registry(repo)
-    old = repo.rel(repo.user_path(args.src))
-    if old not in reg.files:
-        raise FsError(f"'{old}' is not linked")
-    dst = repo.user_path(args.dst)
-    if repo.names_dir(args.dst) and not dst.is_dir():      # NEW/: like git mv
-        raise FsError(f"destination directory does not exist, source={old}, "
-                      f"destination={repo.rel(dst)}/")
-    if dst.is_dir():
-        dst = dst / Path(old).name
-    new = repo.rel(dst)
-    problem = path_problem(new) or in_the_way(repo.top, new)
-    if problem:
-        raise FsError(f"cannot move to '{new}': {problem}")
-    if new in reg.files or dst.exists():
-        raise FsError(f"'{new}' already exists")
-    if not dst.parent.is_dir():                  # like git mv
-        raise FsError(f"destination directory does not exist, source={old}, destination={new}")
+    target = repo.user_path(args.dst)
+    if len(args.src) > 1 and not target.is_dir():          # like git mv
+        raise FsError(f"destination '{repo.rel(target)}' is not a directory")
+    moves = {}                    # old -> (new, its path)
+    for arg in args.src:
+        old = repo.rel(repo.user_path(arg))
+        if old not in reg.files:
+            raise FsError(f"'{old}' is not linked")
+        dst = target
+        if repo.names_dir(args.dst) and not dst.is_dir():      # NEW/: like git mv
+            raise FsError(f"destination directory does not exist, source={old}, "
+                          f"destination={repo.rel(dst)}/")
+        if dst.is_dir():
+            dst = dst / Path(old).name
+        new = repo.rel(dst)
+        problem = path_problem(new) or in_the_way(repo.top, new)
+        if problem:
+            raise FsError(f"cannot move to '{new}': {problem}")
+        if any(new == n for n, _ in moves.values()):              # like git mv
+            raise FsError(f"multiple sources for the same target, source={old}, destination={new}")
+        if new in reg.files or dst.exists():
+            raise FsError(f"'{new}' already exists")
+        if not dst.parent.is_dir():                  # like git mv
+            raise FsError(f"destination directory does not exist, source={old}, destination={new}")
+        moves[old] = (new, dst)
     if args.dry_run:
-        print(f"would move {old} -> {new}")
+        for old, (new, _) in moves.items():
+            print(f"would move {old} -> {new}")
         return EXIT_OK
-    if repo.git(["ls-files", "--error-unmatch", "--", lit(old)], check=False).returncode == 0:
-        repo.git(["mv", "--", old, new])
-    elif Link(reg, old).target.exists():
-        (repo.top / old).rename(dst)
-    reg.rename_file(old, new)
+    for old, (new, dst) in moves.items():
+        if repo.git(["ls-files", "--error-unmatch", "--", lit(old)], check=False).returncode == 0:
+            repo.git(["mv", "--", old, new])
+        elif Link(reg, old).target.exists():
+            (repo.top / old).rename(dst)
+        reg.rename_file(old, new)
     reg.finish()
-    print(f"{paint('moved', 'green')} {old} -> {new} (link kept)")
+    for old, (new, _) in moves.items():
+        print(f"{paint('moved', 'green')} {old} -> {new} (link kept)")
     return EXIT_OK
 
 
@@ -4699,9 +4705,10 @@ def run(argv=None):
     p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be unlinked")
 
-    p = add_command(sub, "mv", parents=[colorp], help="move a linked file, keeping its link")
-    p.add_argument("src", metavar="OLD", help="linked file")
-    p.add_argument("dst", metavar="NEW", help="new path or existing directory")
+    p = add_command(sub, "mv", parents=[colorp], help="move linked files, keeping their links")
+    p.add_argument("src", metavar="OLD", nargs="+", help="linked file(s)")
+    p.add_argument("dst", metavar="NEW", help="new path or existing directory (for several "
+                   "files: an existing directory)")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be moved")
 
     p = add_command(sub, "source", parents=[colorp], help="list or change the [source]s "
