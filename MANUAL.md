@@ -939,7 +939,7 @@ jobs:
 ```
 
 To pin a version, download
-`https://github.com/stsichler/git-filesync/releases/download/v0.21.1/git-filesync.py`
+`https://github.com/stsichler/git-filesync/releases/download/v0.21.2/git-filesync.py`
 instead. Private upstream repositories need a token with read access.
 
 ### Exit codes
@@ -984,7 +984,7 @@ the same version:
 
 ```sh
 git filesync add https://github.com/stsichler/git-filesync.git tools/git-filesync.py \
-    -p git-filesync.py --tag v0.21.1
+    -p git-filesync.py --tag v0.21.2
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
 ```
 
