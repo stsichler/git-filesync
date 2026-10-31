@@ -2091,6 +2091,21 @@ echo own > x
 check "add --overwrite: replaced untracked file reported" \
   "$(git filesync add --overwrite file:///nowhere/m22.git x -p f1 | grep -c '^discarded: x ')" "1"
 git reset -q --hard
+# a staged version that is overwritten too - staged, then changed again
+echo B >> d/f3 && git add d/f3 && echo C >> d/f3
+OUT=$(git filesync rm -f d/f3)
+check "rm -f: the staged version is kept too" \
+  "$(echo "$OUT" | grep -c '^discarded: d/f3\(, as staged\)\? (git show [0-9a-f]\{12\} to get it back)$')" "2"
+check "rm -f: the staged version can be got back" \
+  "$(git show "$(echo "$OUT" | sed -n 's/.*as staged (git show \([0-9a-f]*\).*/\1/p')" | tail -1)" "B"
+git reset -q --hard
+echo B >> d/f2 && git add d/f2 && echo C >> d/f2
+check "restore -S: the staged version is kept" "$(git filesync restore -S d/f2 | grep -c '^discarded: d/f2, as staged ')" "1"
+git reset -q --hard
+echo B >> d/f2 && git add d/f2
+check "restore -S: a staged version also in the working tree stays there" \
+  "$(git filesync restore -S d/f2 | grep -c discarded)-$(tail -1 d/f2)" "0-B"
+git reset -q --hard
 
 
 # =============================================================================

@@ -200,14 +200,16 @@ them as below).
 
 <a id="discarded-content"></a>**Discarded content can be got back.**
 Before `restore`, `rm -f` or `--overwrite` replace or delete content that
-is neither committed nor staged, they keep it as a Git object and say so:
+isn't committed, they keep it as a Git object and say so:
 
 ```text
 discarded: src/lib.c (git show 3f2a9c1d07be to get it back)
 ```
 
-`git show 3f2a9c1d07be > src/lib.c` writes it back exactly. `git gc`
-removes such objects after a while (normally two weeks).
+`git show 3f2a9c1d07be > src/lib.c` writes it back exactly. Where the
+index goes too (`rm -f`, `--overwrite`, `restore -S`), a staged version is
+kept as well (`discarded: src/lib.c, as staged …`). `git gc` removes such
+objects after a while (normally two weeks).
 
 ### Common options
 
@@ -917,8 +919,10 @@ has colors from Python 3.14 on, only on a terminal.
 
 ### CI
 
-A scheduled job in the downstream repository fails when a sync is pending
-(`status --exit-code`), so e.g. GitHub notifies you:
+To learn when upstream has changed, let a scheduled CI job in the
+downstream repository run `status --exit-code`: it fails when a sync is
+pending, and GitHub (or your CI) notifies you of the failed run. It only
+reports – syncing stays with you.
 
 ```yaml
 name: filesync

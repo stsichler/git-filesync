@@ -3046,7 +3046,7 @@ def first_sync(repo, st, args, new, path):
     if content is not None:
         content = repo.normalize(content, st.rel)
     if replace:
-        save_discarded(repo, [st.rel])
+        save_discarded(repo, [st.rel], [st.rel])
     link.set("commit", commit)
     link.set("blob", blob)
     print(f"{st.rel}: {paint('synced', 'green')} (first sync; {note})")
@@ -3557,7 +3557,8 @@ def cmd_add(ctx, repo, args):
 
     repo.check_plain(rels)
     repo.normalize_many([(p.content, p.rel) for p in plan if p.content is not None])
-    save_discarded(repo, [p.rel for p in plan if p.replaced])
+    replaced = [p.rel for p in plan if p.replaced]
+    save_discarded(repo, replaced, replaced)
     contents = {}         # rel -> content in this repository's form; None: kept
     for p in plan:
         if p.rel in reg.files:
@@ -3636,22 +3637,29 @@ def plan_dir(repo, reg, src, args, at, rel, path, target):
     return plan, any(r in reg.files for r, _ in todo)
 
 
-def save_discarded(repo, rels, keep_index=False):
-    """Before restore, add --overwrite or rm -f overwrite or delete these
-    working tree files: the content of those with uncommitted changes - in
-    neither HEAD nor, if it stays, the index - is kept as a blob exactly as
-    it is, and the command tells how to get it back (`git show ID > FILE`).
-    Like with `git restore`, the files are discarded anyway."""
-    rels = [r for r in rels if (repo.top / r).is_file()]
-    if not rels:
+def save_discarded(repo, worktree, index=()):
+    """Before restore, rm -f or --overwrite replace or delete files - in the
+    working tree (paths worktree) and/or the index (paths index): content
+    that would be lost - not in HEAD, nor where the index or the working
+    tree stays - is kept as a blob (a staged version already is one), and
+    the command tells how to get it back (`git show ID > FILE`). Like with
+    `git restore`, the files are discarded anyway."""
+    worktree, index = list(dict.fromkeys(worktree)), set(index)
+    paths = list(dict.fromkeys(worktree + sorted(index)))
+    if not paths:
         return
-    repo.prefetch(rels)
-    index = repo.index_entries(rels) if keep_index else {}
-    current = repo.worktree_blobs(rels)
-    lost = [r for r in rels if current.get(r) not in
-            (repo.head_blob(r), index.get(r, (None, None))[1])]
-    for rel, oid in zip(lost, repo.store_many([(repo.top / r).read_bytes() for r in lost])):
-        print(f"{paint('discarded:', 'yellow')} {rel} (git show {oid[:12]} to get it back)")
+    repo.prefetch(paths)
+    staged = {r: e[1] for r, e in repo.index_entries(paths).items()}
+    current = repo.worktree_blobs([r for r in paths if (repo.top / r).is_file()])
+    lost = [r for r in worktree if r in current and current[r] not in
+            (repo.head_blob(r), None if r in index else staged.get(r))]
+    # a staged version still in the working tree stays there or is kept with it
+    gone = [r for r in paths if r in index and staged.get(r)
+            and staged[r] not in (repo.head_blob(r), current.get(r))]
+    ids = repo.store_many([(repo.top / r).read_bytes() for r in lost])
+    for rel, how, oid in sorted([(r, "", oid) for r, oid in zip(lost, ids)]
+                                + [(r, ", as staged", staged[r]) for r in gone]):
+        print(f"{paint('discarded:', 'yellow')} {rel}{how} (git show {oid[:12]} to get it back)")
 
 
 def cmd_restore(ctx, repo, args):
@@ -3738,7 +3746,7 @@ def cmd_restore(ctx, repo, args):
             error(str(e))
             rc = EXIT_ERROR
     save_discarded(repo, [lk.rel for lk, _, fix_tree, _ in fixes if fix_tree],
-                   keep_index=not args.staged)
+                   [lk.rel for lk, _, _, fix_index in fixes if fix_index])
     for tree, index in ((True, True), (True, False), (False, True)):
         repo.put_blobs([(lk.rel, base) for lk, base, fix_tree, fix_index in fixes
                         if (fix_tree, fix_index) == (tree, index)], stage=index, worktree=tree)
@@ -3781,7 +3789,7 @@ def cmd_rm(ctx, repo, args):
         for link in links:
             print(f"would remove {link.rel}")
         return EXIT_OK
-    save_discarded(repo, [lk.rel for lk in links])
+    save_discarded(repo, [lk.rel for lk in links], [lk.rel for lk in links])
     for part in chunks(lk.rel for lk in links):
         repo.git(["rm", "-q", "-f", "--ignore-unmatch", "--"] + [lit(r) for r in part])
     for link in links:
