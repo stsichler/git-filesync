@@ -577,7 +577,8 @@ stay adaptations:
 - **another tag or branch** of the same upstream: kept;
 - **another upstream**: kept if it has that version (the recorded commit,
   or else the newest commit on its branch with the same file); otherwise a
-  warning, and the previous sync point counts as unknown;
+  warning: the previous sync point counts as unknown, and `pull FILE`
+  syncs the file;
 - **another path**: as for `add`, the version at the head of the branch (or
   the tag). The file stays as it is, so differences count as adaptations –
   or, if it isn't adaptable, as a change not allowed, which `pull

@@ -2106,6 +2106,11 @@ echo B >> d/f2 && git add d/f2
 check "restore -S: a staged version also in the working tree stays there" \
   "$(git filesync restore -S d/f2 | grep -c discarded)-$(tail -1 d/f2)" "0-B"
 git reset -q --hard
+# --overwrite replaces the index entry even if the file is the upstream version
+echo own > y && git add y && git show HEAD:d/f1 > y
+check "add --overwrite: a staged version is kept, also of an unchanged file" \
+  "$(git filesync add --overwrite file:///nowhere/m22.git y -p f1 | grep -c '^discarded: y, as staged ')" "1"
+git reset -q --hard && rm -f y
 # ... kept as the working tree file was: git show gives it back exactly
 echo 'd/f3 text eol=crlf' > .git/info/attributes
 git rm -q --cached d/f3 && git add d/f3 && git commit -qm crlf
@@ -2378,7 +2383,10 @@ check "sync point unknown: status" "$(st a.c)" "D"
 check "sync point unknown: long format" \
   "$(git filesync status | grep -c 'a.c  (previous sync point unknown)')" "1"
 check "sync point unknown: the hint names both causes" \
-  "$(git filesync status 2>&1 | grep -c "a.c: previous sync point [0-9a-f]* not found in .*: if that is behind, fetch; if upstream history was rewritten, 'git filesync pull a.c' syncs to its current version")" "1"
+  "$(git filesync status 2>&1 | grep -c "a.c: previous sync point [0-9a-f]* not found in .* - not on the server (history rewritten there, synced from an unpushed commit or another upstream): 'git filesync pull a.c' syncs to its current version")" "1"
+OUT=$(git filesync hook post-merge 2>&1)
+check "sync point unknown: the hooks don't say pull" \
+  "$(echo "$OUT" | grep -c "run 'git filesync pull")-$(echo "$OUT" | grep -c 'previous sync point not found')" "0-1"
 check "sync point unknown: pull --all leaves it alone, says so" \
   "$(git filesync pull --all 2>&1 | grep -v '^warning' | oneline)-$(git status --porcelain)" \
   "2 linked files: not synced, but need attention (see 'git filesync status') -"
@@ -2395,7 +2403,7 @@ git config -f .git-filesync file.a.c.blob "$(git -C ../m25 rev-parse HEAD:a.c)"
 echo a2 > a.c && git commit -qam "synced later"
 git filesync source map "$TURL/m25" "$T/co25b" >/dev/null
 check "checkout behind: the hint" \
-  "$(git filesync status 2>&1 | grep -c "a.c: previous sync point .* not found in local checkout .*: if that is behind, update the checkout (or use --remote);")" "1"
+  "$(git filesync status 2>&1 | grep -c "a.c: previous sync point .* not found in local checkout .* - if the checkout is behind, update it (or use --remote); otherwise 'git filesync pull a.c' syncs")" "1"
 check "checkout behind: pull --all doesn't go back" \
   "$(git filesync pull --all >/dev/null 2>&1; cat a.c)-$(git status --porcelain)" "a2-"
 check "checkout behind: --remote finds it" "$(git filesync status --remote -s 2>&1)" ""

@@ -989,11 +989,12 @@ class Source:
         return self._memo[("short", oid)]
 
     def shorts(self, revs):
-        """Abbreviated ids of these revisions with one `rev-parse --short`."""
+        """Abbreviated ids of these revisions with one `git show` (`rev-parse
+        --short` takes one revision only)."""
         revs = [r for r in dict.fromkeys(revs) if r and ("short", r) not in self._memo]
         if not revs:
             return
-        p = self.git(["rev-parse", "--short"] + revs, check=False)
+        p = self.git(["show", "-s", "--no-show-signature", "--format=%h"] + revs, check=False)
         lines = out(p).splitlines()
         if p.returncode or len(lines) != len(revs):
             for r in revs:      # one by one, so that a bad one fails on its own
@@ -2339,6 +2340,7 @@ class FileState:
                               # went back - counted only when shown (see count)
     has_old: bool = False     # synced commit exists upstream
     lost_old: bool = False    # it doesn't: behind, or history rewritten? (no guess)
+    discards: tuple = ((), ())  # a first sync: (working tree, index) paths it overwrites
     diverged: bool = False
     moved: Optional[tuple] = None   # ('renamed' | 'deleted', path, commit)
     newest: Optional[list] = None   # newer tags of a pinned source
@@ -2547,11 +2549,13 @@ def evaluate(ctx, repo, link):
         # the source may be behind, or upstream history was rewritten: not
         # guessed - pull --all leaves the file alone, pull FILE syncs it
         st.lost_old = True
-        update = "update the checkout (or use --remote)" if src.local else "fetch"
+        pull = f"'git filesync pull {path_arg(repo, link.rel)}' syncs to its current version"
+        # a cache clone asks the server for a commit it lacks: not there
+        why = ("if the checkout is behind, update it (or use --remote); otherwise "
+               if src.local else "not on the server (history rewritten there, synced from "
+               "an unpushed commit or another upstream): ")
         st.warnings.append(f"previous sync point {st.old[:12] or '-'} not found in "
-                           f"{src.label}: if that is behind, {update}; if upstream history "
-                           f"was rewritten, 'git filesync pull {path_arg(repo, link.rel)}' "
-                           "syncs to its current version")
+                           f"{src.label} - {why}{pull}")
     st.changed = st.new_blob != st.old_blob
     st.pending = st.changed or bool(st.moved) or st.lost_old
     if src.local:
@@ -2968,7 +2972,9 @@ def pull_one(repo, reg, st, args):
             base = repo.normalize(src.read_content(st.old_blob, link.path), st.rel)
         except FsError:
             raise FsError(f"{st.rel}: base version {st.old_blob[:12]} unavailable; "
-                          "cannot merge local modifications")
+                          "cannot merge local modifications - 'git filesync pull --overwrite "
+                          f"{path_arg(repo, st.rel)}' takes the upstream version, discarding "
+                          "them")
         ours = repo.read_content(st.head_blob, st.rel)   # no uncommitted changes here
         old_label = synced_label(st)
         conflicts, content = merge3(ours, base, theirs,
@@ -3035,8 +3041,8 @@ def first_sync(repo, st, args, new, path):
         return None
     if content is not None:
         content = repo.normalize(content, st.rel)
-    if replace:
-        save_discarded(repo, [st.rel], [st.rel])
+    # kept by the caller, for all files at once (see save_discarded)
+    st.discards = ([st.rel] if replace else [], [st.rel] if args.overwrite else [])
     link.set("commit", commit)
     link.set("blob", blob)
     print(f"{st.rel}: {paint('synced', 'green')} (first sync; {note})")
@@ -3124,7 +3130,8 @@ def cmd_pull(ctx, repo, args):
     ok = [st for st in states if st.src and not st.error]
     # contents only of the files to sync (in the blobless cache, each one
     # may have to be fetched)
-    sync = [st for st in ok if st.pending or args.overwrite]
+    sync = [st for st in ok if (st.pending or args.overwrite)
+            and not (args.all and not once and st.lost_old)]
     for src in {id(st.src): st.src for st in ok}.values():
         src.read_blobs(b for st in sync if st.src is src for b in (st.old_blob, st.new_blob))
         src.shorts(c for st in ok if st.src is src for c in (st.old, st.new))
@@ -3169,6 +3176,8 @@ def cmd_pull(ctx, repo, args):
             error(str(e) if str(e).startswith(st.rel) else f"{st.rel}: {e}")
             rc = EXIT_ERROR
     if synced:
+        save_discarded(repo, [r for st in states for r in st.discards[0]],
+                       [r for st in states for r in st.discards[1]])
         write_synced(repo, contents, {rel for rel, _, _, c in synced if c})
         rc = max(rc, report_pull(repo, reg, synced))
     if moved and not args.dry_run and not args.commit:
@@ -3549,8 +3558,8 @@ def cmd_add(ctx, repo, args):
 
     repo.check_plain(rels)
     repo.normalize_many([(p.content, p.rel) for p in plan if p.content is not None])
-    replaced = [p.rel for p in plan if p.replaced]
-    save_discarded(repo, replaced, replaced)
+    save_discarded(repo, [p.rel for p in plan if p.replaced],
+                   rels if args.overwrite else [])
     contents = {}         # rel -> content in this repository's form; None: kept
     for p in plan:
         if p.rel in reg.files:
@@ -3843,9 +3852,9 @@ def cmd_mv(ctx, repo, args):
             if old not in tracked and (repo.top / old).exists():
                 (repo.top / old).rename(dst)
                 renamed.append((old, dst))
-        if tracked:              # one git mv: into DIR, or OLD to NEW
-            repo.git(["mv", "--"] + tracked + [repo.rel(target) if len(args.src) > 1
-                                               else moves[tracked[0]][0]])
+        for part in chunks(tracked):    # git mv into DIR, or OLD to NEW
+            repo.git(["mv", "--"] + part + [repo.rel(target) if len(args.src) > 1
+                                            else moves[part[0]][0]])
     except (OSError, FsError) as e:
         for old, dst in reversed(renamed):
             dst.rename(repo.top / old)
@@ -3881,7 +3890,8 @@ def keep_base(src, link):
     commit = commit_in(src, link)
     if not commit:
         warn(f"{link.rel}: synced version {link.blob[:12]} not found in "
-             f"{src.label}; its previous sync point counts as unknown")
+             f"{src.label}; its previous sync point counts as unknown - sync it with "
+             f"'git filesync pull {path_arg(link.reg.repo, link.rel)}'")
     elif commit != link.commit:
         link.set("commit", commit)
 
@@ -4270,8 +4280,11 @@ def hook_reminders(ctx, repo):
     for st in attention:
         print(f"filesync: {paint(st.rel, 'yellow', 'err')}: {render(describe(st), 'err')}",
               file=sys.stderr)
-    if any(st.pending for st in attention):
+    if any(st.pending and not st.lost_old for st in attention):
         print("filesync: run 'git filesync pull <file>' to sync", file=sys.stderr)
+    if any(st.lost_old for st in attention):
+        print("filesync: see 'git filesync status' for a previous sync point not found "
+              "(pull --all leaves such files alone)", file=sys.stderr)
     if any(st.violation for st in attention):
         print("filesync: see 'git filesync status' and 'git filesync diff <file>' "
               "for changes not allowed", file=sys.stderr)
