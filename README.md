@@ -161,11 +161,11 @@ Proposed commit message:
 ```
 [filesync] Sync src/foo.c from owner/lib@a1b2c3d
 
-Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
+Upstream: https://github.com/owner/lib.git (main:lib/foo.c, 2026-10-28)
 
-Upstream changes since 3f2a9c1:
-- Fix off-by-one in buffer handling (9e8d7c6)
-- Add support for chunked transfer (a1b2c3d)
+Upstream changes since 3f2a9c1 (2026-09-12):
+- Fix off-by-one in buffer handling (9e8d7c6, 2026-10-27)
+- Add support for chunked transfer (a1b2c3d, 2026-10-28)
 ```
 
 A `pull` stages all files it syncs, with their entries in `.git-filesync`,

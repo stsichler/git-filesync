@@ -248,6 +248,9 @@ Advanced commands:
                                 of local changes fetch anyway only if the
                                 cache lacks the branch); an upstream not in
                                 the cache yet is cloned anyway
+        --remote                ignore mappings (source map) this once, use
+                                the upstream URL (same commands; with
+                                --no-fetch: the cached state)
         --color[=WHEN], --no-color  always, never or auto (default)
 
 Exit codes: 0 ok, 1 unfinished (pull: conflicts; --exit-code),
@@ -996,6 +999,33 @@ class Source:
             return
         self._memo.update((("short", r), x) for r, x in zip(revs, lines))
 
+    def date(self, rev):
+        """Commit date (YYYY-MM-DD), '' if unknown (asked at once for many:
+        dates)."""
+        if ("date", rev) not in self._memo:
+            self.dates([rev])
+        return self._memo[("date", rev)]
+
+    def dated(self, rev):
+        """'a1b2c3d (2026-10-28)' in the text of a proposed commit message."""
+        date = self.date(rev)
+        return f"{self.short(rev)} ({date})" if date else self.short(rev)
+
+    def dates(self, revs):
+        """Commit dates (YYYY-MM-DD) of these revisions with one `git show`;
+        '' for one that isn't there."""
+        revs = [r for r in dict.fromkeys(revs) if r and ("date", r) not in self._memo]
+        if not revs:
+            return
+        p = self.git(["show", "-s", "--format=%cs"] + revs, check=False)
+        lines = out(p).splitlines()
+        if p.returncode or len(lines) != len(revs):
+            for r in revs:      # one by one, so that a bad one fails on its own
+                self._memo[("date", r)] = out(self.git(["show", "-s", "--format=%cs", r],
+                                                       check=False)).strip()
+            return
+        self._memo.update((("date", r), x) for r, x in zip(revs, lines))
+
     def is_ancestor(self, a, b):
         key = ("ancestor", a, b)
         if key not in self._memo:
@@ -1138,7 +1168,7 @@ class Source:
         return self._memo[key]
 
     def log(self, rng, *paths):
-        return out(self.git(["log", "--reverse", "--format=- %s (%h)", rng, "--"]
+        return out(self.git(["log", "--reverse", "--format=- %s (%h, %cs)", rng, "--"]
                             + [lit(p) for p in paths]))
 
     def follow(self, old, tip, path):
@@ -1211,6 +1241,7 @@ class Context:
         offline = args.cmd == "restore" or \
             args.cmd in ("diff", "difftool") and not args.upstream
         no_fetch = getattr(args, "no_fetch", False)
+        self.remote = getattr(args, "remote", False)     # mappings ignored this once
         self.fetch, self.lazy = not (no_fetch or offline), offline and not no_fetch
         # fetch even for a tag already cached, to learn about newer tags
         self.want_tags = getattr(args, "verbose", False) or args.cmd == "pull"
@@ -1241,6 +1272,8 @@ class Context:
 
     def local_path(self, url):
         """Mapped local checkout for url (validated), or None."""
+        if self.remote:
+            return None
         if self._mappings is None:
             # repo-local mapping overrides a global one (later entries win)
             self._mappings = {norm_url(u): d for _, _, u, d in
@@ -2762,10 +2795,13 @@ def merge3(ours, base, theirs, labels):
         return p.returncode, Path(files[0]).read_bytes()
 
 
-def upstream_line(src, url, ref, path):
-    """'Upstream: URL (main:lib/foo.c)' in a proposed commit message; for a
-    tag pattern the tag it matched."""
-    return f"Upstream: {url} ({src.tag_names[0] if src.tag_names else ref[1]}:{path})"
+def upstream_line(src, url, ref, path, commit):
+    """'Upstream: URL (main:lib/foo.c, 2026-10-28)' in a proposed commit
+    message, with the date of the synced commit; for a tag pattern the tag
+    it matched."""
+    date = src.date(commit)
+    return (f"Upstream: {url} ({src.tag_names[0] if src.tag_names else ref[1]}:{path}"
+            + (f", {date})" if date else ")"))
 
 
 def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discarded=False):
@@ -2774,7 +2810,7 @@ def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, dis
     # content goes back to the synced upstream version -> restore, not a sync
     verb = "Restore" if new_blob == st.old_blob and discarded else "Sync"
     lines = [f"{MSG_PREFIX}{verb} {st.rel} from {link.name}@{src.short(new)}", "",
-             upstream_line(src, link.url, link.ref, path)]
+             upstream_line(src, link.url, link.ref, path, new)]
     if path != old_path:
         lines += ["", f"Renamed upstream: {old_path} -> {path}"]
     if new == st.old:
@@ -2784,14 +2820,14 @@ def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, dis
         if src.is_ancestor(new, old) and new != old:
             log = src.log(f"{new}..{old}", *paths)
             if log:
-                lines += ["", f"Reverts upstream changes after {src.short(new)}:", log]
+                lines += ["", f"Reverts upstream changes after {src.dated(new)}:", log]
         else:
             if not src.is_ancestor(old, new):
-                lines += ["", f"Note: {src.short(new)} is not a descendant of the "
-                          f"previous sync point {src.short(old)}."]
+                lines += ["", f"Note: {src.dated(new)} is not a descendant of the "
+                          f"previous sync point {src.dated(old)}."]
             log = src.log(f"{old}..{new}", *paths)
             if log:
-                lines += ["", f"Upstream changes since {src.short(old)}:", log]
+                lines += ["", f"Upstream changes since {src.dated(old)}:", log]
     else:
         lines += ["", "Previous sync point unknown; change list not available."]
     if merged:
@@ -3091,6 +3127,7 @@ def cmd_pull(ctx, repo, args):
     for src in {id(st.src): st.src for st in ok}.values():
         src.read_blobs(b for st in sync if st.src is src for b in (st.old_blob, st.new_blob))
         src.shorts(c for st in ok if st.src is src for c in (st.old, st.new))
+        src.dates(c for st in sync if st.src is src for c in (st.old, st.new))
     for st in sync:
         try:
             if st.new_blob and st.new_blob != st.old_blob:
@@ -3422,7 +3459,8 @@ def build_add_message(plan, src, name, url, ref, mpath, relink, adaptable, at):
         path = mpath.rstrip("/") + "/" if mpath else "/"
         what = f"Add {len(plan)} files from" if fetched else f"Link {len(plan)} files to"
         subject_ref = f"{name}@{src.short(at)}"
-    lines = [f"{MSG_PREFIX}{what} {subject_ref}", "", upstream_line(src, url, ref, path)]
+    lines = [f"{MSG_PREFIX}{what} {subject_ref}", "",
+             upstream_line(src, url, ref, path, plan[0].commit if len(plan) == 1 else at)]
     if len(plan) > 1:
         lines.append("")
         for p in plan:
@@ -4519,6 +4557,8 @@ def run(argv=None):
     common = argparse.ArgumentParser(add_help=False, parents=[colorp])
     common.add_argument("--no-fetch", action="store_true",
                         help="do not fetch upstream repositories, use cached state")
+    common.add_argument("--remote", action="store_true",
+                        help="ignore mappings (source map) this once, use the upstream URL")
 
     argv = list(sys.argv[1:] if argv is None else argv)
     # like git: --color takes a value only as --color=WHEN; alone it is

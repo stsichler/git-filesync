@@ -213,8 +213,9 @@ check "add: copy of the proposed message" "$(cat .git/FILESYNC_MSG)" "$(cat .git
 git commit -q --no-edit
 check "add + commit: status clean" "$(st)" ""
 check "add + commit: file and entry" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync src/lib.c "
-check "add: proposed commit message" "$(git log -1 --format=%B | sed '/^$/d' | sed 's/@[0-9a-f]*$/@X/' | oneline)" \
-  "[filesync] Add src/lib.c from $(basename "$T")/upstream@X Upstream: $URL (main:lib.c) "
+check "add: proposed commit message, the date in the text" \
+  "$(git log -1 --format=%B | sed '/^$/d' | sed 's/@[0-9a-f]*$/@X/' | oneline)" \
+  "[filesync] Add src/lib.c from $(basename "$T")/upstream@X Upstream: $URL (main:lib.c, $(git -C "$T/upstream" log -1 --format=%cs)) "
 
 # the blobless cache fetches missing file contents lazily, which needs
 # protocol v2 - git-filesync asks for it even if v0 is configured
@@ -264,8 +265,11 @@ check "... but the copy stays" "$(head -1 .git/FILESYNC_MSG | cut -d' ' -f1-3)" 
 git filesync source map "$URL" "$T/upstream" >/dev/null
 (cd "$T/upstream" && sedi 's/^f$/F/' lib.c && git commit -qam "unpushed F")
 check "local checkout warns unpushed" "$(git filesync status 2>/dev/null | grep -c 'not pushed')" "1"
+check "--remote: the server, this once" "$(git filesync status --remote 2>/dev/null | grep -c 'not pushed')" "0"
+check "--remote --no-fetch: the cache" "$(git filesync status --remote --no-fetch -s 2>&1 | grep -c 'not pushed')" "0"
+check "--remote: the mapping stays" "$(git filesync status 2>/dev/null | grep -c 'not pushed')" "1"
 git filesync source map "$URL" --unset >/dev/null
-check "--remote / unmapped ignores unpushed" "$(git filesync status 2>/dev/null | grep -c 'not pushed')" "0"
+check "unmapped ignores unpushed" "$(git filesync status 2>/dev/null | grep -c 'not pushed')" "0"
 (cd "$T/upstream" && git push -q origin main)
 
 # --commit with an older upstream commit syncs backwards (revert)
@@ -1142,7 +1146,9 @@ check "pull: commit that changed the file" "$(rec)" "$(git -C ../co7 rev-parse H
 check "pull message: names that commit" \
   "$(git log -1 --format=%s | grep -c "@$(git -C ../co7 rev-parse --short HEAD~1)$")" "1"
 check "pull message: only commits changing the file" \
-  "$(git log -1 --format=%B | grep '^- ' | tr '\n' '|')" "- f v2 ($(git -C ../co7 rev-parse --short HEAD~1))|"
+  "$(git log -1 --format=%B | grep '^- ' | tr '\n' '|')" "- f v2 ($(git -C ../co7 log -1 --format='%h, %cs' HEAD~1))|"
+check "pull message: dates in the text, not in the subject" \
+  "$(git log -1 --format=%B | grep -cE '^Upstream: .*, [0-9]{4}-[0-9]{2}-[0-9]{2}\)$|^Upstream changes since [0-9a-f]+ \([0-9]{4}-[0-9]{2}-[0-9]{2}\):$')-$(git log -1 --format=%s | grep -c '[0-9]\{4\}-')" "2-0"
 
 # mapped: unpushed commits matter only if they change the file
 git filesync source map "$URL7" "$T/co7" >/dev/null
@@ -1293,7 +1299,7 @@ addc --tag v1 "$URL9" t.c
 SRC9=$(git config -f .git-filesync --get-regexp '^source\..*\.url' | sed 's/^source\.\(.*\)\.url .*/\1/')
 check "add --tag: the source has the branch, the file the tag" \
   "$(git config -f .git-filesync --get-regexp '^source\.' | cut -d' ' -f1 | sed 's/.*\.//' | sort | oneline)$(git config -f .git-filesync file.t.c.tag)" "branch url v1"
-check "add --tag: message names the tag" "$(git log -1 --format=%B | grep -c "^Upstream: $URL9 (v1:t.c)$")" "1"
+check "add --tag: message names the tag" "$(git log -1 --format=%B | grep -c "^Upstream: $URL9 (v1:t.c, [0-9-]*)$")" "1"
 check "status -v shows the tag" "$(git filesync status -v | grep -c '(tag v1 on main)')" "1"
 
 # a newer commit on the branch doesn't concern the pinned file
@@ -1480,7 +1486,7 @@ quiet pullc r.c
 check "pull follows rename: path updated" "$(git config -f .git-filesync file.r.c.path)" "lib/renamed.c"
 check "pull follows rename: merged" "$(oneline < r.c)" "a B c d e-local f g h I "
 check "pull follows rename: message" \
-  "$(git log -1 --format=%B | grep -cE '^(Upstream: .*\(main:lib/renamed.c\)|Renamed upstream: lib/r.c -> lib/renamed.c|- rename r .*|- change I .*)$')" "4"
+  "$(git log -1 --format=%B | grep -cE '^(Upstream: .*\(main:lib/renamed.c, [0-9-]+\)|Renamed upstream: lib/r.c -> lib/renamed.c|- rename r .*|- change I .*)$')" "4"
 check "after rename: only adapted" "$(st r.c)" " M"
 
 # pull refuses a deleted file and says how to proceed
@@ -1547,8 +1553,8 @@ check "add DIR: files linked" \
 check "add DIR: content" "$(cat proto/v1/b.proto)" "api/v1/b.proto"
 check "add DIR: one commit" "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" \
   ".git-filesync proto/a.proto proto/v1/b.proto "
-check "add DIR: message" "$(git log -1 --format=%B | sed '/^$/d; s/@[0-9a-f]*$/@X/' | oneline)" \
-  "[filesync] Add 2 files from nowhere/m11@X Upstream: file:///nowhere/m11.git (main:api/) - proto/a.proto - proto/v1/b.proto "
+check "add DIR: message" "$(git log -1 --format=%B | sed '/^$/d; s/@[0-9a-f]*$/@X/; s/, [0-9-]*)$/, D)/' | oneline)" \
+  "[filesync] Add 2 files from nowhere/m11@X Upstream: file:///nowhere/m11.git (main:api/, D) - proto/a.proto - proto/v1/b.proto "
 check "add DIR: status clean" "$(st)" ""
 
 # a new upstream file: the same add links only that one
@@ -1746,7 +1752,7 @@ check "pattern: no hint at other tags" "$(git filesync pull --all 2>&1 | grep -c
 check "pattern: a new matching tag is pending" "$(st)" "P"
 quiet pullc a.c
 check "pattern: pull follows it" "$(oneline < a.c)" "1 2 3-up 4 5-rc "
-check "pattern: message names the tag" "$(git log -1 --format=%B | grep -c "^Upstream: $URL12 (v1.3:a.c)$")" "1"
+check "pattern: message names the tag" "$(git log -1 --format=%B | grep -c "^Upstream: $URL12 (v1.3:a.c, [0-9-]*)$")" "1"
 check "pattern: registry unchanged" "$(git status --porcelain) $(git config -f .git-filesync file.a.c.tag)" " v1.*"
 check "pull --tag with a pattern, once" \
   "$(git filesync pull --dry-run --tag 'v1.0*' a.c | grep -c "would sync to $SRCP@$(git -C ../co12 rev-parse --short v1.0) (tag v1.0\* once")" "1"

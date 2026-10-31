@@ -229,6 +229,7 @@ the command and lists them.
 | Option | Commands | Effect |
 |---|---|---|
 | `--no-fetch` | `status`, `pull`, `diff`/`difftool`, `restore`, `add`, `set`, `source set-url`/`set-branch` | don't fetch, use the cached state (offline); an upstream repository not in the [cache](#cache) yet is cloned anyway. `restore` and `diff` of local changes fetch even without it only if the cache lacks the branch – the synced versions don't change |
+| `--remote` | as `--no-fetch` | ignore [mappings](#source-map) this once: work against the upstream URL (its clone in the cache), the mapping stays. With `--no-fetch`: the cached state |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
 ### `status`
@@ -324,11 +325,11 @@ then opens the editor with the proposed commit message (`git commit
 ```
 [filesync] Sync src/foo.c from owner/lib@a1b2c3d
 
-Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
+Upstream: https://github.com/owner/lib.git (main:lib/foo.c, 2026-10-28)
 
-Upstream changes since 3f2a9c1:
-- Fix off-by-one in buffer handling (9e8d7c6)
-- Add support for chunked transfer (a1b2c3d)
+Upstream changes since 3f2a9c1 (2026-09-12):
+- Fix off-by-one in buffer handling (9e8d7c6, 2026-10-27)
+- Add support for chunked transfer (a1b2c3d, 2026-10-28)
 ```
 
 A `pull` proposes **one commit** for all files it syncs. For several files
@@ -578,7 +579,7 @@ directory (see [below](#linking-a-directory)).
   ```
   [filesync] Add src/foo.c from owner/lib@a1b2c3d
 
-  Upstream: https://github.com/owner/lib.git (main:lib/foo.c)
+  Upstream: https://github.com/owner/lib.git (main:lib/foo.c, 2026-10-28)
   ```
 
   For an existing FILE the subject is `Link FILE to …` (`Relink …` with
@@ -609,7 +610,7 @@ are staged together, with one proposed message:
 ```
 [filesync] Add 2 files from owner/backend@a1b2c3d
 
-Upstream: https://github.com/owner/backend.git (main:api/)
+Upstream: https://github.com/owner/backend.git (main:api/, 2026-10-28)
 
 - proto/a.proto
 - proto/v1/b.proto
@@ -838,8 +839,9 @@ read-only checkout, e.g. on a network share, works too. Only if the
 checkout is itself a partial clone (`--filter`), Git fetches objects
 missing there into it as usual.
 
-To work against the server again, remove the mapping (`source map URL
---unset`).
+To work against the server once, e.g. to compare with what is pushed, add
+`--remote` to the command (`git filesync status --remote`); to do so for
+good, remove the mapping (`source map URL --unset`).
 
 Without a mapping, `status` and `pull` work against the upstream repository on
 the server. It is cached as a blobless partial clone in `~/.cache/git-filesync`
@@ -1087,6 +1089,11 @@ whatever its message, and on `git reset`.
 
 Every proposed message starts with `[filesync] `, so commits made with
 git-filesync are easy to find later (`git log --grep='^\[filesync\]'`).
+
+In the text, every upstream commit comes with its date (the committer
+date): `Upstream changes since 3f2a9c1 (2026-09-12):`, `- Fix … (9e8d7c6,
+2026-10-27)`, and the synced version's in the `Upstream:` line. The subject
+has the commit id only.
 
 - Several commands in a row (e.g. `add` for some files and `pull` for
   others, then one commit for all of them) collect their messages there.
