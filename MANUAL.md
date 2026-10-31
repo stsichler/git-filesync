@@ -76,13 +76,12 @@ committed like any other file, in git-config format:
   version of the upstream file, `commit` the upstream commit that last
   changed it (not the branch tip at sync time). So commits that don't touch
   the file don't matter, pushed or not.
-- If the recorded commit no longer exists upstream (history rewritten
-  there), `status` shows the file as `changed (previous sync point
-  unknown)`, and `pull` records the current commit, even if the file is the
-  same. Where the commit may just not be there yet – a [mapped
-  checkout](#source-map) that is behind, or no fetch (`--no-fetch`, a failed
-  fetch) – `status` only warns, and `pull` leaves the entry alone unless
-  the file changed.
+- If the source doesn't have the recorded commit, either it is behind (a
+  [mapped checkout](#source-map) not updated, or not fetched) or upstream
+  history was rewritten. git-filesync doesn't guess: `status` shows the
+  file as `changed (previous sync point unknown)` and names both ways on,
+  `pull --all` leaves it alone, and `pull FILE` syncs it to the source's
+  current version.
 - An entry **without** `commit` and `blob` is a **new link**: `status`
   shows it as `new`, and `pull` does its first sync exactly as
   [`add`](#add) would. This links many files at once: write their entries
@@ -319,7 +318,7 @@ synced. In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 
 | Option | Effect |
 |---|---|
-| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths. Files left alone that need attention – missing, or changed but not adaptable – are named: `2 linked files: not synced, but need attention (see 'git filesync status')` |
+| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths. Files left alone that need attention – missing, changed but not adaptable, or with an unknown previous sync point – are named: `2 linked files: not synced, but need attention (see 'git filesync status')` |
 | `--commit REV` | sync to this revision once – a branch, tag or commit id, also backwards (the message then lists what is reverted); the file keeps its branch or tag |
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH once (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG once |

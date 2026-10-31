@@ -76,7 +76,8 @@ Basic commands:
         --all                   all files with something to sync (with
                                 --commit, -b, --tag: all files); names
                                 those left alone that need attention
-                                (missing; modified, but not adaptable)
+                                (missing; modified, but not adaptable;
+                                previous sync point unknown: pull FILE)
         -b, --branch BRANCH     sync to the head of BRANCH, once: the files
                                 keep following their own branch or tag
                                 (to switch: set -b/--tag)
@@ -1246,7 +1247,6 @@ class Context:
         self._sources = {}
         self._ready = set()
         self._fetch_failed = set()
-        self._fetched = set()       # cache clones cloned or fetched in this run
         self._mappings = None
 
     def source(self, url, ref, name=None, line=None):
@@ -1383,7 +1383,6 @@ class Context:
                 except OSError as e:      # a parallel run may have cloned it meanwhile
                     if not d.is_dir():
                         raise FsError(f"cannot create the cache clone {d}: {e}")
-                self._fetched.add(d)
             finally:
                 if tmp.exists():
                     shutil.rmtree(tmp, ignore_errors=True)
@@ -1400,19 +1399,11 @@ class Context:
             if p.returncode:
                 warn(f"fetching {url} failed, using cached state")
                 self._fetch_failed.add(d)
-            else:
-                self._fetched.add(d)
         touch_used(d)
         if self.fetch or self.lazy:
             auto_prune()
         self._ready.add(d)
         return d
-
-    def up_to_date(self, src):
-        """Does src show the upstream server's state - a cache clone fetched
-        in this run? A mapped checkout, or a clone not fetched (--no-fetch,
-        failed), may be behind it."""
-        return not src.local and src.dir in self._fetched
 
     def on_server(self, url, commit):
         """Is commit on url's server - reachable from a branch or tag there,
@@ -2347,7 +2338,7 @@ class FileState:
     behind_args: tuple = ()   # the file since the sync, or by how many the branch
                               # went back - counted only when shown (see count)
     has_old: bool = False     # synced commit exists upstream
-    stale_old: bool = False   # it doesn't, but the source may just be behind
+    lost_old: bool = False    # it doesn't: behind, or history rewritten? (no guess)
     diverged: bool = False
     moved: Optional[tuple] = None   # ('renamed' | 'deleted', path, commit)
     newest: Optional[list] = None   # newer tags of a pinned source
@@ -2553,16 +2544,16 @@ def evaluate(ctx, repo, link):
             st.count_args = (st.old, st.new, *dict.fromkeys((link.path, path)))
             st.diverged = not src.is_ancestor(st.old, st.new)
     elif not st.unsynced:
-        st.stale_old = not ctx.up_to_date(src)
-        why = ("is the checkout behind? update it, or use --remote" if src.local else
-               "not fetched in this run" if st.stale_old else "unpushed?")
-        st.warnings.append(f"last synced commit {st.old[:12] or '-'} not found in "
-                           f"{src.label} ({why})")
+        # the source may be behind, or upstream history was rewritten: not
+        # guessed - pull --all leaves the file alone, pull FILE syncs it
+        st.lost_old = True
+        update = "update the checkout (or use --remote)" if src.local else "fetch"
+        st.warnings.append(f"previous sync point {st.old[:12] or '-'} not found in "
+                           f"{src.label}: if that is behind, {update}; if upstream history "
+                           f"was rewritten, 'git filesync pull {path_arg(repo, link.rel)}' "
+                           "syncs to its current version")
     st.changed = st.new_blob != st.old_blob
-    # synced commit unknown on the server (history rewritten): pull records
-    # the current one, also if the file is the same - not if the source may
-    # just be behind (a mapped checkout, the cache not fetched)
-    st.pending = st.changed or bool(st.moved) or not (st.has_old or st.stale_old)
+    st.pending = st.changed or bool(st.moved) or st.lost_old
     if src.local:
         if src.note:
             st.warnings.append(src.note)
@@ -2595,7 +2586,7 @@ def upstream_state(st, note=True):
             return "deleted", f"upstream, by {st.src.short(commit)}"
         n = commits_since(st)
         return "renamed", f"{st.link.path} -> {path}" + (f", {plural(n, 'commit')}" if n else "")
-    if st.changed or not (st.has_old or st.stale_old):
+    if st.changed or not st.has_old:
         behind = commits_behind(st)
         if behind:
             what = "upstream branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
@@ -2956,8 +2947,7 @@ def pull_one(repo, reg, st, args):
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {rel}'; discard them with "
                       f"'git filesync restore -SW {rel}'{ways}")
-    if new_blob == st.old_blob and path == link.path and (new == st.old or st.stale_old) \
-            and not discard:
+    if new_blob == st.old_blob and path == link.path and new == st.old and not discard:
         print(f"{st.rel}: {paint('up to date', 'green')}"
               + (" (adaptations kept)" if st.committed == "adapted" else ""))
         return None
@@ -3155,8 +3145,10 @@ def cmd_pull(ctx, repo, args):
         if st.newest and not once:
             newest.setdefault((link.name, link.tag), (link.tag, link.line, st.newest, []))[3] \
                 .append(link.rel)
-        if args.all and not st.pending and not once:
-            if st.attention:          # missing, or modified but not adaptable
+        # missing, modified but not adaptable, or the previous sync point
+        # unknown: only by name (or once to a given revision)
+        if args.all and not once and (not st.pending or st.lost_old):
+            if st.attention:
                 skipped.append(st.rel)
             continue
         done += 1
@@ -3437,7 +3429,7 @@ def find_base(repo, src, rev, rel, path, target, overwrite=False):
     head, or --commit). Returns (commit, blob, content to write or None,
     modified, replaced): a missing file gets that version, an existing one
     keeps its content - its differences count as adaptations - unless
-    overwrite."""
+    overwrite and it differs (or can't be compared): then it is replaced."""
     blob = src.blob_at(rev, path)
     if not blob:
         raise FsError(f"no file '{path}' in {src.label} at {src.short(rev)}")
@@ -3656,9 +3648,18 @@ def save_discarded(repo, worktree, index=()):
     # a staged version still in the working tree stays there or is kept with it
     gone = [r for r in paths if r in index and staged.get(r)
             and staged[r] not in (repo.head_blob(r), current.get(r))]
-    ids = repo.store_many([(repo.top / r).read_bytes() for r in lost])
-    for rel, how, oid in sorted([(r, "", oid) for r, oid in zip(lost, ids)]
-                                + [(r, ", as staged", staged[r]) for r in gone]):
+    # kept as the working tree file would be (eol, LFS), so `git show ID >
+    # FILE` gives it back exactly; as stored if git can't convert it
+    content = {r: (repo.top / r).read_bytes() for r in lost}
+    for r in gone:
+        p = repo.git(["cat-file", "--filters", f"--path={r}", staged[r]], check=False)
+        if p.returncode == 0:
+            content[(r, "staged")] = p.stdout
+    keys = list(content)
+    ids = dict(zip(keys, repo.store_many([content[k] for k in keys])))
+    for rel, how, oid in sorted([(r, "", ids[r]) for r in lost]
+                                + [(r, ", as staged", ids.get((r, "staged"), staged[r]))
+                                   for r in gone]):
         print(f"{paint('discarded:', 'yellow')} {rel}{how} (git show {oid[:12]} to get it back)")
 
 
@@ -3836,12 +3837,20 @@ def cmd_mv(ctx, repo, args):
             print(f"would move {old} -> {new}")
         return EXIT_OK
     tracked = [old for old in repo.index_entries(list(moves)) if old in moves]
-    if tracked:                  # one git mv: into DIR, or OLD to NEW
-        repo.git(["mv", "--"] + tracked + [repo.rel(target) if len(args.src) > 1
-                                           else moves[tracked[0]][0]])
-    for old, (new, dst) in moves.items():
-        if old not in tracked and (repo.top / old).exists():
-            (repo.top / old).rename(dst)
+    renamed = []                 # untracked files moved - back if anything fails
+    try:
+        for old, (new, dst) in moves.items():
+            if old not in tracked and (repo.top / old).exists():
+                (repo.top / old).rename(dst)
+                renamed.append((old, dst))
+        if tracked:              # one git mv: into DIR, or OLD to NEW
+            repo.git(["mv", "--"] + tracked + [repo.rel(target) if len(args.src) > 1
+                                               else moves[tracked[0]][0]])
+    except (OSError, FsError) as e:
+        for old, dst in reversed(renamed):
+            dst.rename(repo.top / old)
+        raise FsError(f"nothing moved: {e}")
+    for old, (new, _) in moves.items():
         reg.rename_file(old, new)
     reg.finish()
     for old, (new, _) in moves.items():

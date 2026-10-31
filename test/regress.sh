@@ -2106,6 +2106,14 @@ echo B >> d/f2 && git add d/f2
 check "restore -S: a staged version also in the working tree stays there" \
   "$(git filesync restore -S d/f2 | grep -c discarded)-$(tail -1 d/f2)" "0-B"
 git reset -q --hard
+# ... kept as the working tree file was: git show gives it back exactly
+echo 'd/f3 text eol=crlf' > .git/info/attributes
+git rm -q --cached d/f3 && git add d/f3 && git commit -qm crlf
+echo B >> d/f3 && git add d/f3 && echo C >> d/f3
+ID=$(git filesync rm -f d/f3 | sed -n 's/.*as staged (git show \([0-9a-f]*\).*/\1/p')
+check "rm -f: the staged version in working tree form (CRLF)" \
+  "$(git show "$ID" | tail -1 | od -An -c | tr -d ' ')" 'B\r\n'
+rm .git/info/attributes && git reset -q --hard HEAD~1
 
 
 # =============================================================================
@@ -2360,41 +2368,38 @@ check "pull --all, two need attention" "$(git filesync pull --all 2>&1 | oneline
   "2 linked files: not synced, but need attention (see 'git filesync status') "
 git checkout -q -- a.c && git reset -q --hard HEAD~1
 
-# upstream history rewritten, the file the same: the recorded commit is
-# unknown upstream - status says so, and pull records the current one
+# the recorded commit not in the source: it may be behind (a colleague
+# synced later), or upstream history was rewritten - not guessed: status
+# says so, pull --all leaves the file alone, pull FILE syncs it
 (cd ../m25 && git commit -q --amend -m "init again" && git reflog expire --expire=now --all \
   && git gc -q --prune=now)
 rm -rf "$T/cache-25"
-check "rewritten upstream: status" "$(st a.c)" "D"
-check "rewritten upstream: long format" \
+check "sync point unknown: status" "$(st a.c)" "D"
+check "sync point unknown: long format" \
   "$(git filesync status | grep -c 'a.c  (previous sync point unknown)')" "1"
-check "rewritten upstream: pull --all" "$(rc pullc --all)-$(git config -f .git-filesync file.a.c.commit)" \
+check "sync point unknown: the hint names both causes" \
+  "$(git filesync status 2>&1 | grep -c "a.c: previous sync point [0-9a-f]* not found in .*: if that is behind, fetch; if upstream history was rewritten, 'git filesync pull a.c' syncs to its current version")" "1"
+check "sync point unknown: pull --all leaves it alone, says so" \
+  "$(git filesync pull --all 2>&1 | grep -v '^warning' | oneline)-$(git status --porcelain)" \
+  "2 linked files: not synced, but need attention (see 'git filesync status') -"
+check "sync point unknown: pull FILE syncs it" "$(rc pullc a.c)-$(git config -f .git-filesync file.a.c.commit)" \
   "0-$(git -C ../m25 rev-parse HEAD)"
-check "rewritten upstream: then up to date" "$(git filesync status -s)-$(git status --porcelain)" "-"
-
-# the recorded commit unknown only because the source is behind the server
-# (a colleague synced later; a mapped checkout or the cache not fetched):
-# a warning, not something to sync - pull mustn't record an older commit
+check "sync point unknown: then up to date" "$(st a.c)-$(git status --porcelain)" "-"
+quiet pullc b.c
+# a mapped checkout behind (someone synced later, also to another version
+# of the file): the same - pull --all doesn't go back
 git clone -q ../m25 "$T/co25b"
-(cd ../m25 && echo c2 > c.c && git commit -qam "c only")
-git config -f .git-filesync file.a.c.commit "$(git -C ../m25 rev-parse HEAD)" && git commit -qam "synced later"
+(cd ../m25 && echo a2 > a.c && git commit -qam "a2")
+git config -f .git-filesync file.a.c.commit "$(git -C ../m25 rev-parse HEAD)"
+git config -f .git-filesync file.a.c.blob "$(git -C ../m25 rev-parse HEAD:a.c)"
+echo a2 > a.c && git commit -qam "synced later"
 git filesync source map "$TURL/m25" "$T/co25b" >/dev/null
-check "checkout behind: nothing to sync" "$(st a.c)" ""
-check "checkout behind: says so" \
-  "$(git filesync status 2>&1 | grep -c "a.c: last synced commit .* not found in local checkout .* (is the checkout behind? update it, or use --remote)")" "1"
-check "checkout behind: pull --all keeps the commit" \
-  "$(rc git filesync pull --all)-$(git config -f .git-filesync file.a.c.commit)-$(git status --porcelain)" \
-  "0-$(git -C ../m25 rev-parse HEAD)-"
+check "checkout behind: the hint" \
+  "$(git filesync status 2>&1 | grep -c "a.c: previous sync point .* not found in local checkout .*: if that is behind, update the checkout (or use --remote);")" "1"
+check "checkout behind: pull --all doesn't go back" \
+  "$(git filesync pull --all >/dev/null 2>&1; cat a.c)-$(git status --porcelain)" "a2-"
 check "checkout behind: --remote finds it" "$(git filesync status --remote -s 2>&1)" ""
 git filesync source map "$TURL/m25" --unset >/dev/null
-# without fetching (--no-fetch, a failed fetch), an unknown commit counts as
-# such a gap too; fetched, it is really unknown on the server
-git config -f .git-filesync file.a.c.commit "$(printf 'e%.0s' $(seq 40))"
-check "not fetched (--no-fetch): nothing to sync" "$(git filesync status --no-fetch -s 2>/dev/null)" ""
-check "not fetched: says so" \
-  "$(git filesync status --no-fetch 2>&1 | grep -c "a.c: last synced commit e* not found in .* (not fetched in this run)")" "1"
-check "fetched: unknown on the server, to sync" "$(st a.c)" "D"
-git checkout -q -- .git-filesync
 
 # the first sync of a new link warns as any pull (here: from an unpushed
 # commit of a mapped checkout)
