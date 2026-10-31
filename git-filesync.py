@@ -1014,12 +1014,12 @@ class Source:
         revs = [r for r in dict.fromkeys(revs) if r and ("date", r) not in self._memo]
         if not revs:
             return
-        p = self.git(["show", "-s", "--format=%cs"] + revs, check=False)
+        p = self.git(["show", "-s", "--no-show-signature", "--format=%cs"] + revs, check=False)
         lines = out(p).splitlines()
         if p.returncode or len(lines) != len(revs):
             for r in revs:      # one by one, so that a bad one fails on its own
-                self._memo[("date", r)] = out(self.git(["show", "-s", "--format=%cs", r],
-                                                       check=False)).strip()
+                self._memo[("date", r)] = out(self.git(["show", "-s", "--no-show-signature",
+                                                        "--format=%cs", r], check=False)).strip()
             return
         self._memo.update((("date", r), x) for r, x in zip(revs, lines))
 
@@ -1165,7 +1165,8 @@ class Source:
         return self._memo[key]
 
     def log(self, rng, *paths):
-        return out(self.git(["log", "--reverse", "--format=- %s (%h, %cs)", rng, "--"]
+        return out(self.git(["log", "--reverse", "--no-show-signature", "--format=- %s (%h, %cs)",
+                             rng, "--"]
                             + [lit(p) for p in paths]))
 
     def follow(self, old, tip, path):
@@ -3121,7 +3122,8 @@ def cmd_pull(ctx, repo, args):
     for src in {id(st.src): st.src for st in ok}.values():
         src.read_blobs(b for st in sync if st.src is src for b in (st.old_blob, st.new_blob))
         src.shorts(c for st in ok if st.src is src for c in (st.old, st.new))
-        src.dates(c for st in sync if st.src is src for c in (st.old, st.new))
+        src.dates(c for st in sync if st.src is src
+                  for c in (st.old if st.has_old else None, st.new))
     for st in sync:
         try:
             if st.new_blob and st.new_blob != st.old_blob:
@@ -3425,13 +3427,17 @@ def find_base(repo, src, rev, rel, path, target, overwrite=False):
         raise FsError(f"no file '{path}' in {src.label} at {src.short(rev)}")
     commit = src.last_change(rev, path)
     cur = repo.worktree_blob(target)
-    if cur is None or overwrite:
-        return commit, blob, src.read_content(blob, path), False, cur is not None
+    if cur is None:
+        return commit, blob, src.read_content(blob, path), False, False
     try:
         modified = not matches_base(repo, src, rel, blob, path, cur, target.read_bytes)
     except BaseUnavailable:
-        raise FsError(f"{rel}: upstream version {blob[:12]} not available, can't compare "
-                      "the existing file with it")
+        if not overwrite:
+            raise FsError(f"{rel}: upstream version {blob[:12]} not available, can't compare "
+                          "the existing file with it")
+        modified = True
+    if overwrite and modified:     # replaced only if it differs
+        return commit, blob, src.read_content(blob, path), False, True
     return commit, blob, None, modified, False
 
 
@@ -3688,14 +3694,21 @@ def cmd_restore(ctx, repo, args):
         try:
             if link.rel in bases:
                 base = oids[link.rel]
+            else:
+                base = local_equiv(repo, src, link.blob, link.rel, link.path)
+                if not base:
+                    raise FsError(f"{link.rel}: base version {link.blob[:12]} unavailable")
+            cur = None
+            if not worktree:          # -S: the working tree isn't looked at
+                problem = path_problem(link.rel)
+                if problem:
+                    raise FsError(f"'{link.rel}' in {REGISTRY}: {problem}")
+            elif link.rel in bases:
                 data = link.target.read_bytes() if link.target.is_file() else None
                 # differs if not the same without CR (eol conversion aside)
                 cur = None if data is None else base if data == bases[link.rel] else \
                     "" if repo.plain_content(link.rel, data) else repo.worktree_blob(link.target)
             else:
-                base = local_equiv(repo, src, link.blob, link.rel, link.path)
-                if not base:
-                    raise FsError(f"{link.rel}: base version {link.blob[:12]} unavailable")
                 cur = repo.worktree_blob(link.target)
             fix_tree = worktree and cur != base
             fix_index = args.staged and index.get(link.rel, (None, None))[1] != base
@@ -3776,6 +3789,7 @@ def cmd_mv(ctx, repo, args):
         old = repo.rel(repo.user_path(arg))
         if old not in reg.files:
             raise FsError(f"'{old}' is not linked")
+        Link(reg, old).target                    # nothing in the way at OLD
         dst = target
         if repo.names_dir(args.dst) and not dst.is_dir():      # NEW/: like git mv
             raise FsError(f"destination directory does not exist, source={old}, "
@@ -3797,10 +3811,12 @@ def cmd_mv(ctx, repo, args):
         for old, (new, _) in moves.items():
             print(f"would move {old} -> {new}")
         return EXIT_OK
+    tracked = [old for old in repo.index_entries(list(moves)) if old in moves]
+    if tracked:                  # one git mv: into DIR, or OLD to NEW
+        repo.git(["mv", "--"] + tracked + [repo.rel(target) if len(args.src) > 1
+                                           else moves[tracked[0]][0]])
     for old, (new, dst) in moves.items():
-        if repo.git(["ls-files", "--error-unmatch", "--", lit(old)], check=False).returncode == 0:
-            repo.git(["mv", "--", old, new])
-        elif Link(reg, old).target.exists():
+        if old not in tracked and (repo.top / old).exists():
             (repo.top / old).rename(dst)
         reg.rename_file(old, new)
     reg.finish()

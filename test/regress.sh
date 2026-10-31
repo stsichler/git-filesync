@@ -2266,6 +2266,12 @@ echo b > g.c && git add g.c .git-filesync && git commit -qm "g.c" && echo mine >
 check "new link: first sync stages uncommitted changes, as add does" \
   "$(rc git filesync pull g.c)-$(git show :g.c | oneline)-$(git status --porcelain g.c)" "0-b mine -M  g.c"
 git reset -q --hard
+# --overwrite replaces only a file that differs (add as well)
+printf '[file "h.c"]\n\tsource = %s\n\tpath = lib/b.c\n' "$SRC24" >> .git-filesync
+echo b > h.c
+check "new link: --overwrite of the same content replaces nothing" \
+  "$(git filesync pull --overwrite h.c 2>&1 | oneline)" "h.c: synced (first sync; existing file) h.c: staged. Commit with:     git commit (it offers the proposed commit message; a copy stays in .git/FILESYNC_MSG) "
+git reset -q --hard && rm -f h.c
 
 
 # =============================================================================
@@ -2288,6 +2294,16 @@ check "directory in the way: restore refuses, keeps it" "$(rc git filesync resto
 check "directory in the way: restore -SW too" "$(rc git filesync restore -SW a.c)-$(cat a.c/keep)" "2-precious"
 check "directory in the way: pull refuses, keeps it" "$(rc git filesync pull --overwrite a.c)-$(cat a.c/keep)" "2-precious"
 check "directory in the way: rm refuses, keeps it" "$(rc git filesync rm -f a.c)-$(cat a.c/keep)" "2-precious"
+# restore -S doesn't touch the working tree: what is in the way doesn't matter
+echo changed > b.c && git add b.c
+check "directory in the way elsewhere: restore -S of b.c" "$(rc git filesync restore -S b.c)-$(git show :b.c)" "0-b"
+check "directory in the way: restore -S works, keeps it" "$(rc git filesync restore -S a.c)-$(cat a.c/keep)" "0-precious"
+git checkout -q -- b.c
+# mv OLD... DIR checks every OLD first: nothing moved
+mkdir d25
+check "directory in the way: mv of several refuses all" \
+  "$(rc git filesync mv b.c a.c d25)-$(ls d25 | lines)-$(git status --porcelain b.c .git-filesync)" "2-0-"
+rmdir d25
 # ... also for a new link (no commit and blob yet), as for add
 printf '[file "c.c"]\n\tsource = %s\n\tpath = c.c\n' "$SRC25" >> .git-filesync
 mkdir c.c && echo precious > c.c/keep

@@ -115,7 +115,7 @@ file. Git-config format:
   link. Writing the file, git would delete what is there (a directory with
   all in it), or write elsewhere; so no command writes, deletes or reads
   there, and `status` reports an error – move it away, or remove the link
-  with `unlink`.
+  with `unlink`. (`restore -S` works anyway: it only sets the index.)
 
 ### Exact copies and adaptable files
 
