@@ -2357,6 +2357,30 @@ check "rewritten upstream: pull --all" "$(rc pullc --all)-$(git config -f .git-f
   "0-$(git -C ../m25 rev-parse HEAD)"
 check "rewritten upstream: then up to date" "$(git filesync status -s)-$(git status --porcelain)" "-"
 
+# the recorded commit unknown only because the source is behind the server
+# (a colleague synced later; a mapped checkout or the cache not fetched):
+# a warning, not something to sync - pull mustn't record an older commit
+git clone -q ../m25 "$T/co25b"
+(cd ../m25 && echo c2 > c.c && git commit -qam "c only")
+git config -f .git-filesync file.a.c.commit "$(git -C ../m25 rev-parse HEAD)" && git commit -qam "synced later"
+git filesync source map "$TURL/m25" "$T/co25b" >/dev/null
+check "checkout behind: nothing to sync" "$(st a.c)" ""
+check "checkout behind: says so" \
+  "$(git filesync status 2>&1 | grep -c "a.c: last synced commit .* not found in local checkout .* (is the checkout behind? update it, or use --remote)")" "1"
+check "checkout behind: pull --all keeps the commit" \
+  "$(rc git filesync pull --all)-$(git config -f .git-filesync file.a.c.commit)-$(git status --porcelain)" \
+  "0-$(git -C ../m25 rev-parse HEAD)-"
+check "checkout behind: --remote finds it" "$(git filesync status --remote -s 2>&1)" ""
+git filesync source map "$TURL/m25" --unset >/dev/null
+# without fetching (--no-fetch, a failed fetch), an unknown commit counts as
+# such a gap too; fetched, it is really unknown on the server
+git config -f .git-filesync file.a.c.commit "$(printf 'e%.0s' $(seq 40))"
+check "not fetched (--no-fetch): nothing to sync" "$(git filesync status --no-fetch -s 2>/dev/null)" ""
+check "not fetched: says so" \
+  "$(git filesync status --no-fetch 2>&1 | grep -c "a.c: last synced commit e* not found in .* (not fetched in this run)")" "1"
+check "fetched: unknown on the server, to sync" "$(st a.c)" "D"
+git checkout -q -- .git-filesync
+
 # the first sync of a new link warns as any pull (here: from an unpushed
 # commit of a mapped checkout)
 git clone -q ../m25 "$T/co25"

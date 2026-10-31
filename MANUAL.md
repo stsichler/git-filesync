@@ -85,7 +85,11 @@ file. Git-config format:
   or not – don't matter. If the recorded commit isn't found upstream any
   more (history rewritten there), `status` shows the file as `changed
   (previous sync point unknown)`, and `pull` records the current commit –
-  also if the file itself is the same.
+  also if the file itself is the same. Not so where it may just not be
+  there yet – in a [mapped checkout](#source-map) that is behind (someone
+  synced later), or without fetching (`--no-fetch`, a failed fetch): then
+  `status` only warns, and `pull` leaves the entry as it is unless the file
+  itself changed.
 - An entry **without** `commit` and `blob` is a **new link**, not synced
   yet: `status` shows it as `new`, and `pull` syncs it the first time,
   exactly as [`add`](#add) would – a missing file is fetched, an existing
