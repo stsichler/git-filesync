@@ -200,3 +200,8 @@ for any change in behavior.
 
 [MIT No Attribution (MIT-0)](LICENSE) – free to use, also in commercial and
 closed-source projects; no attribution required.
+
+## Acknowledgements
+
+This project – design, code, tests and documentation – is developed together
+with [Claude](https://claude.ai) by Anthropic.

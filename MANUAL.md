@@ -1,6 +1,6 @@
 # git-filesync manual
 
-The concepts, commands and options of git-filesync in detail. For the
+The concepts, commands and options of git-filesync in detail. For
 motivation and installation see the [README](README.md).
 
 ## Contents
@@ -173,26 +173,41 @@ Basic commands – what you need day to day:
 | [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear, print its directory |
 | [`hooks [ACTION]`](#hooks) | the hooks: show, install, remove; reminders, push check |
 
-Commands named like Git commands behave like them (`status`, `pull`,
-`diff`, `difftool`, `restore`, `add`, `rm`, `mv`; `source` like
-`git remote`): same kind of output, same exit codes, same caution with
+Commands named like a Git command behave like it (`status`, `pull`,
+`diff`, `difftool`, `restore`, `add`, `rm`, `mv`; `source` like `git
+remote`): the same kind of output and exit codes, the same caution with
 uncommitted changes.
 
-**No command commits** – you do. `pull`, `add`, `rm`, `mv`, `set`,
-`unlink`, `edit` and `source` stage their changes (`pull` like `git merge
---squash`); `restore` without `-S` changes only the working tree. So you can
-check everything first, undo it (`git restore -SW`), or combine several
-commands and your own changes in one commit. `pull` and `add` prepare a
-[proposed commit message](#proposed-commit-messages) that a plain `git
-commit` offers.
+**No command commits.** They change the working tree or stage, like `git
+add` – `pull` like `git merge --squash` – and you commit. So you can check
+everything first, undo it (`git restore -SW`), or combine several commands
+and your own changes in one commit. `pull` and `add` prepare a [proposed
+commit message](#proposed-commit-messages) that a plain `git commit`
+offers. The reading commands (`status`, `diff`, `difftool`, listing
+sources, the hooks) change nothing in the repository.
 
-The reading commands (`status`, `diff`, `difftool`, listing sources, the
-hooks) change nothing in the repository, not even its object store.
+Without a command, `status` runs. `PATH` is a file or a directory (all
+linked files below it), relative to the current directory, as are the
+paths in the output. Options follow the command; `git filesync <command>
+-h` lists them.
 
-`git filesync` without a command runs `status`. Paths are relative to the
-current directory, in arguments and output; where `PATH…` is accepted, a
-directory stands for all linked files below it. Options follow the command
-(`git filesync status --no-fetch`); `git filesync <command> -h` lists them.
+Two options mean the same everywhere (also in git-assetsync):
+**`--overwrite`** replaces local content – an existing file, local
+adaptations – with the upstream version; **`--force`** does something
+refused by default without losing local content (relink a file, add lines
+to the hooks of other tools; `rm -f` removes uncommitted changes, but keeps
+them as below).
+
+<a id="discarded-content"></a>**Discarded content can be got back.**
+Before `restore`, `rm -f` or `--overwrite` replace or delete content that
+is neither committed nor staged, they keep it as a Git object and say so:
+
+```text
+discarded: src/lib.c (git show 3f2a9c1d07be to get it back)
+```
+
+`git show 3f2a9c1d07be > src/lib.c` writes it back exactly. `git gc`
+removes such objects after a while (normally two weeks).
 
 ### Common options
 
@@ -413,19 +428,8 @@ stays as it is. A new link has nothing to restore.
 
 `restore -SW` discards committed adaptations: the synced version is back
 and staged, ready to commit. (`git restore FILE` discards only uncommitted
-changes, as usual.)
-
-<a id="discarded-content"></a>**Discarded content is kept:** before
-`restore`, `add --overwrite`, `pull --overwrite` (first sync) or `rm -f`
-overwrite or delete content that is neither committed nor staged, it is
-stored as a blob and reported:
-
-```text
-discarded: src/lib.c (git show 3f2a9c1d07be to get it back)
-```
-
-`git show 3f2a9c1d07be > src/lib.c` brings it back – until `git gc` removes
-unreferenced objects (after two weeks by default).
+changes, as usual.) Uncommitted content it overwrites is
+[kept](#discarded-content).
 
 ### `add`
 
