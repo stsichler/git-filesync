@@ -766,7 +766,7 @@ class Source:
         self.local = local   # mapped local checkout: ref is its local branch
         self.note = note     # remark about the ref choice, shown by status
         self.spec = None     # ('branch' | 'tag', name) it was made for (see Context.source)
-        self.tag_names = None   # for a tag pattern: the matching tags ref is at
+        self.tag_names: Optional[list] = None   # for a tag pattern: the matching tags ref is at
         self.lfs_server = None  # mapped: () -> repository to fetch missing LFS objects in
         self._memo = {}      # answers that don't change during a run (see prefetch)
 
@@ -965,7 +965,10 @@ class Source:
         is fetched with the cache clone of the source."""
         if not self.local:
             return lfs_smudge(self.git, pointer, path, self.label)
-        oid, size = lfs_pointer(pointer)
+        info = lfs_pointer(pointer)
+        if not info:
+            raise FsError(f"'{path}' in {self.label}: not a Git LFS pointer")
+        oid, size = info
         if ("common",) not in self._memo:
             self._memo[("common",)] = self.dir / out(self.git(["rev-parse", "--git-common-dir"]))
         common = self._memo[("common",)]
@@ -1828,6 +1831,8 @@ def replace_value(line, value):
     comment at the end of the line stay as they are. None if the line is
     odd (an unclosed quote)."""
     m = KEY_RX.fullmatch(line)
+    if not m:
+        return None
     indent, key, rest = m.groups()
     eq = re.match(r"\s*=\s*", rest)
     if not eq:                    # a key without '= value' (boolean): rest is a comment
@@ -3921,6 +3926,7 @@ def cmd_set(ctx, repo, args):
     changed = False
     if args.source or args.branch:
         # the source the files are to use: URL and branch (like add)
+        url = branch = None
         if args.source:
             url, branch, _ = add_ref(ctx, reg, args, "give the URL with -b, or -b alone "
                                                      "for the files' upstream")
@@ -4561,7 +4567,7 @@ class MainParser(argparse.ArgumentParser):
     """The top-level parser: usage line and the grouped command list (basic
     commands first, the rest in the order they were defined, `hook` last)
     in argparse's own colors - which exist from Python 3.14 on."""
-    sub = None        # the subparsers action, set once the commands exist
+    sub: "argparse._SubParsersAction"    # the subparsers action, set once the commands exist
 
     def theme(self):
         return getattr(self._get_formatter(), "_theme", None) or NoTheme()
@@ -4576,7 +4582,7 @@ class MainParser(argparse.ArgumentParser):
     def format_help(self):
         t = self.theme()
         width = max(shutil.get_terminal_size().columns - 2, 40)
-        helps = {a.dest: a.help for a in self.sub._choices_actions
+        helps = {a.dest: a.help or "" for a in self.sub._choices_actions
                  if a.help != argparse.SUPPRESS}
 
         def group(title, names):
@@ -4634,7 +4640,7 @@ def run(argv=None):
     argv = [a if a != "--color" else "--color=always" for a in argv[:end]] + argv[end:]
     # the help in colors exactly when the output on stdout would be colored
     # (argparse has colors from Python 3.14 on, and checks the terminal too)
-    color = {"color": color_wanted(color_option(argv), sys.stdout)} \
+    color: dict = {"color": color_wanted(color_option(argv), sys.stdout)} \
         if "color" in inspect.signature(argparse.ArgumentParser).parameters else {}
     ap = MainParser(prog="git filesync", usage=argparse.SUPPRESS,
                     description="Keep single files in sync between Git repositories.", **color)
