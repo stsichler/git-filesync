@@ -318,7 +318,7 @@ synced. In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 
 | Option | Effect |
 |---|---|
-| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths. Files left alone that need attention – missing, changed but not adaptable, or with an unknown previous sync point – are named: `2 linked files: not synced, but need attention (see 'git filesync status')` |
+| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths. Files left out that need attention are named, each with the reason: `warning: a.c: missing - left out (see 'git filesync status')` (or `modified, but not adaptable`, `previous sync point not found`) |
 | `--commit REV` | sync to this revision once – a branch, tag or commit id, also backwards (the message then lists what is reverted); the file keeps its branch or tag |
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH once (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG once |
@@ -333,7 +333,7 @@ synced. In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 - **Uncommitted changes:** like `git pull`, `pull` refuses such a file –
   commit, stash (`git stash`) or discard (`git restore`) them first.
 - **Missing files** are refused – `restore` them first, or `unlink` them.
-  `pull --all` leaves them alone and says they need attention.
+  `pull --all` leaves them out and says so.
 - **Renamed upstream:** `pull` follows the file, see [Files renamed or
   deleted upstream](#files-renamed-or-deleted-upstream).
 - **Pinned files:** `pull` ends with a hint if there are [newer

@@ -2363,14 +2363,15 @@ else
   echo "skipped: no symlinks here"
 fi
 
-# pull --all: files it leaves alone, but that need attention (missing; not
-# adaptable, but modified) are no 'everything up to date'
+# pull --all: files it leaves out, but that need attention (missing; not
+# adaptable, but modified) are named, each with the reason - as in
+# git-assetsync; no 'everything up to date'
 rm a.c
-check "pull --all with a missing file: not 'everything up to date'" \
-  "$(git filesync pull --all 2>&1 | oneline)" "a.c: not synced, but needs attention (see 'git filesync status') "
+check "pull --all with a missing file: named, not 'everything up to date'" \
+  "$(git filesync pull --all 2>&1 | oneline)" "warning: a.c: missing - left out (see 'git filesync status') "
 echo local >> b.c && git commit -qm "b local" b.c
-check "pull --all, two need attention" "$(git filesync pull --all 2>&1 | oneline)" \
-  "2 linked files: not synced, but need attention (see 'git filesync status') "
+check "pull --all, two need attention: each named" "$(git filesync pull --all 2>&1 | oneline)" \
+  "warning: a.c: missing - left out (see 'git filesync status') warning: b.c: modified, but not adaptable - left out (see 'git filesync status') "
 git checkout -q -- a.c && git reset -q --hard HEAD~1
 
 # the recorded commit not in the source: it may be behind (a colleague
@@ -2387,9 +2388,9 @@ check "sync point unknown: the hint names both causes" \
 OUT=$(git filesync hook post-merge 2>&1)
 check "sync point unknown: the hooks don't say pull" \
   "$(echo "$OUT" | grep -c "run 'git filesync pull")-$(echo "$OUT" | grep -c 'previous sync point not found')" "0-1"
-check "sync point unknown: pull --all leaves it alone, says so" \
-  "$(git filesync pull --all 2>&1 | grep -v '^warning' | oneline)-$(git status --porcelain)" \
-  "2 linked files: not synced, but need attention (see 'git filesync status') -"
+check "sync point unknown: pull --all leaves it out, says so" \
+  "$(git filesync pull --all 2>&1 | grep -c ": previous sync point not found - left out (see 'git filesync status')$")-$(git status --porcelain)" \
+  "2-"
 check "sync point unknown: pull FILE syncs it" "$(rc pullc a.c)-$(git config -f .git-filesync file.a.c.commit)" \
   "0-$(git -C ../m25 rev-parse HEAD)"
 check "sync point unknown: then up to date" "$(st a.c)-$(git status --porcelain)" "-"

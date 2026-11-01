@@ -75,7 +75,7 @@ Basic commands:
                                 followed, one deleted there is reported
         --all                   all files with something to sync (with
                                 --commit, -b, --tag: all files); names
-                                those left alone that need attention
+                                those left out that need attention
                                 (missing; modified, but not adaptable;
                                 previous sync point unknown: pull FILE)
         -b, --branch BRANCH     sync to the head of BRANCH, once: the files
@@ -3119,7 +3119,7 @@ def cmd_pull(ctx, repo, args):
     once = args.commit or args.branch or args.tag   # another revision, branch or tag, once
     prefetch(ctx, repo, links, new_links=not once)
     newest, synced = {}, []             # synced: (rel, source, message, conflicts)
-    skipped = []                        # pull --all: not synced, but to be seen to
+    left_out = False                    # pull --all: not synced, but to be seen to
     contents = {}                       # rel -> synced content (normalized form)
     selected = [lk.rel for lk in links]
     states = [evaluate(ctx, repo, link) for link in links]
@@ -3155,8 +3155,11 @@ def cmd_pull(ctx, repo, args):
         # missing, modified but not adaptable, or the previous sync point
         # unknown: only by name (or once to a given revision)
         if args.all and not once and (not st.pending or st.lost_old):
-            if st.attention:
-                skipped.append(st.rel)
+            why = "missing" if st.missing else "previous sync point not found" \
+                if st.lost_old else "modified, but not adaptable" if st.violation else None
+            if why:           # as in git-assetsync
+                warn(f"{st.rel}: {why} - left out (see 'git filesync status')")
+                left_out = True
             continue
         done += 1
         if args.verbose:
@@ -3185,11 +3188,7 @@ def cmd_pull(ctx, repo, args):
         how = f"'git filesync set <file>... {opt}'"
         print(f"hint: the links still follow their own branch or tag, so a plain pull goes "
               f"back; to stay on {once_text(args)}, use {how}")
-    if skipped:
-        what = skipped[0] if len(skipped) == 1 else plural(len(skipped), "linked file")
-        print(paint(f"{what}: not synced, but {'needs' if len(skipped) == 1 else 'need'} "
-                    "attention (see 'git filesync status')", "yellow"))
-    elif args.all and not done and rc == EXIT_OK:
+    if args.all and not done and not left_out and rc == EXIT_OK:
         print(paint("everything up to date", "green"))
     for _, (tag, line, new, rels) in sorted(newest.items()):
         print(newest_hint(rels, tag, line, new))
