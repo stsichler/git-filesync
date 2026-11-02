@@ -2,10 +2,7 @@
 
 # git-filesync
 
-[![Tests](https://github.com/stsichler/git-filesync/actions/workflows/test.yml/badge.svg)](https://github.com/stsichler/git-filesync/actions/workflows/test.yml)
-[![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](LICENSE)
-![Python 3.7+](https://img.shields.io/badge/python-3.7%2B-blue.svg)
-![Platforms](https://img.shields.io/badge/platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
+[![Version](https://img.shields.io/github/v/release/stsichler/git-filesync?label=Version)](https://github.com/stsichler/git-filesync/releases/latest) [![Tests](https://github.com/stsichler/git-filesync/actions/workflows/test.yml/badge.svg)](https://github.com/stsichler/git-filesync/actions/workflows/test.yml) [![Downloads](https://img.shields.io/github/downloads/stsichler/git-filesync/latest/total?label=Downloads)](https://github.com/stsichler/git-filesync/releases/latest) [![License: MIT-0](https://img.shields.io/badge/License-MIT--0-blue.svg)](LICENSE) ![Python 3.7+](https://img.shields.io/badge/Python-3.7%2B-blue.svg) ![Platforms](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)
 
 **Keep individual files in sync between Git repositories.** One repository is
 **upstream**, where a file is developed; other repositories (**downstream**)
