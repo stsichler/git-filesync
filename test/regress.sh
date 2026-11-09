@@ -51,6 +51,7 @@
 #   23. A cache that lacks a branch; symlinks in this repository; parallel clones
 #   24. New links written by hand: pull does the first sync, as add would
 #   25. Something in the way of a linked file; rewritten upstream history
+#   26. Current directory reached through a link: junction, subst drive, symlink
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -66,7 +67,8 @@ command -v cygpath >/dev/null && S=$(cygpath -m "$S")    # Git Bash: C:/... for 
 # Scratch directory for all repositories; removed on exit. In Git Bash on
 # Windows as a Windows path (C:/...), which native git and Python understand.
 T=$(cd "$(mktemp -d)" && pwd -P)       # physical path (macOS: /var -> /private/var)
-trap 'rm -rf "$T"' EXIT
+# a subst drive of section 26 left by an abort
+trap '[ -n "$D26" ] && cmd //c subst "$D26:" //d >/dev/null 2>&1; rm -rf "$T"' EXIT
 command -v cygpath >/dev/null && T=$(cygpath -m "$T")
 cd "$T" || exit 2
 
@@ -2450,6 +2452,62 @@ check "keys on the header line: one section, one value" \
   "$(grep -c '^\[file "a.c"\]' .git-filesync) $(git config -f .git-filesync --get-all file.a.c.adaptable)" "1 true"
 git reset -q --hard
 export FILESYNC_CACHE=$T/cache
+
+
+# =============================================================================
+section "26. Current directory reached through a link: junction, subst drive, symlink"
+# =============================================================================
+
+# git names the top-level directory by its real path. Run directly (an alias
+# runs in that directory), the current directory may be reached through a
+# link, and Windows keeps the link's name for it - a subst drive is even
+# another drive than the top-level directory. Output and paths given are the
+# same as in the real directory. (Git Bash itself resolves a junction, so it
+# only shows up from cmd or PowerShell; a subst drive it keeps.)
+cd "$T"
+git init -q m26 && (cd m26 && mkdir sub && echo a > sub/a.c && git add . && git commit -qm init)
+git clone -q --bare m26 m26.git && git -C m26.git config uploadpack.allowFilter true
+new_repo s26
+mkdir sub && addc "$TURL/m26.git" sub/a.c
+echo local >> sub/a.c
+EXP26=$(fsd status -s 2>/dev/null)
+EXP26S=$(cd sub && fsd status -s 2>/dev/null)
+EXP26L=$(cd sub && fsd status 2>&1)
+check "real directory: paths relative to it" "$EXP26 | $EXP26S" \
+  "  M sub/a.c  (not adaptable!) |   M a.c  (not adaptable!)"
+
+# link26 NAME DIR - the checks, run in DIR, a link to s26
+link26() {
+  check "$1: status -s" "$(cd "$2" && fsd status -s 2>/dev/null)" "$EXP26"
+  check "$1: status -s in a subdirectory" "$(cd "$2/sub" && fsd status -s 2>/dev/null)" "$EXP26S"
+  check "$1: status in a subdirectory" "$(cd "$2/sub" && fsd status 2>&1)" "$EXP26L"
+  check "$1: add with a path relative to it" \
+    "$(cd "$2/sub" && rc fsd add "$TURL/m26.git" b.c -p sub/a.c)-$(git config -f .git-filesync file.sub/b.c.path)" \
+    "0-sub/a.c"
+  git reset -q -- .git-filesync sub/b.c && git checkout -q -- .git-filesync && rm -f sub/b.c
+}
+
+if command -v cygpath >/dev/null; then
+  cmd //c mklink //J "$(cygpath -w "$T/j26")" "$(cygpath -w "$T/s26")" >/dev/null
+  link26 "junction" "$T/j26"
+  cmd //c rmdir "$(cygpath -w "$T/j26")"          # the junction only, not its target
+  # a free drive letter for subst (session-wide: removed right away)
+  D26=
+  for l in Z Y X W V U T S R Q P O N; do
+    [ -d "$l:/" ] && continue                    # in use: never subst /d it
+    if cmd //c subst "$l:" "$(cygpath -w "$T")" >/dev/null 2>&1; then D26=$l; break; fi
+  done
+  if [ -n "$D26" ]; then
+    link26 "subst drive" "$D26:/s26"
+    cmd //c subst "$D26:" //d >/dev/null; D26=
+  else
+    echo "skipped: no free drive letter for subst"
+  fi
+elif ln -s "$T/s26" "$T/l26" 2>/dev/null; then
+  link26 "symlink" "$T/l26"
+else
+  echo "skipped: no symlinks here"
+fi
 
 
 # =============================================================================
