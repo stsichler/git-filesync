@@ -287,7 +287,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.21.2"
+__version__ = "0.21.3"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
