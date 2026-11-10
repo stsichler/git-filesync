@@ -2625,7 +2625,7 @@ check "pull FILE of a [dir]: refused" "$(git filesync pull vendor/a.c 2>&1)" \
   "error: 'vendor/a.c' is in the linked directory 'vendor/' - give 'vendor' (the whole entry)"
 check "add FILE into a [dir]: refused" "$(rc git filesync add $URL27 vendor/top.txt -p top.txt)" "2"
 check "add DIR over linked files: refused" \
-  "$(git filesync add -n $URL27 . -p / 2>&1 | grep -c 'overlaps with the entry for vendor/')" "1"
+  "$(fsd add -n $URL27 . -p / 2>&1 | grep -c 'overlaps with the entry for vendor/')" "1"
 check "add --per-file into a [dir]: refused" \
   "$(git filesync add -n --per-file $URL27 vendor -p lib 2>&1)" \
   "error: cannot link 'vendor/a.c': it is in the linked directory vendor/"
