@@ -10,6 +10,7 @@ motivation and installation see the [README](README.md).
   - [The `.git-filesync` file](#the-git-filesync-file)
   - [Exact copies and adaptable files](#exact-copies-and-adaptable-files)
   - [Local modifications on top of the upstream version](#local-modifications-on-top-of-the-upstream-version)
+  - [Linked directories](#linked-directories)
 - [Commands](#commands)
   - [Common options](#common-options)
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool) · [`restore`](#restore)
@@ -62,6 +63,12 @@ committed like any other file, in git-config format:
 	tag = v1.2.0           # optional: pinned to a tag instead of following the branch
 	commit = …
 	blob = …
+[dir "third_party/lib"]
+	source = owner/lib
+	path = lib             # upstream directory ('/': the root)
+	exclude = test/ '*_test.c'   # optional, like include: patterns, quoted as in a shell
+	commit = …             # upstream commit that last changed the directory
+	tree = …               # the upstream directory at that commit
 ```
 
 - A `[source]` is an upstream repository with the branch its files follow,
@@ -72,6 +79,8 @@ committed like any other file, in git-config format:
 - A `[file]` is keyed by the path in the downstream repository. A `tag` in
   it [pins](#pinning-to-a-tag) the file to an upstream tag (or the newest
   tag matching a pattern).
+- A `[dir]` is a [linked directory](#linked-directories); it takes `tag`
+  and `adaptable` like a `[file]`, its base is `commit` and `tree`.
 - `commit` and `blob` are maintained by the tool: `blob` is the synced
   version of the upstream file, `commit` the upstream commit that last
   changed it (not the branch tip at sync time). So commits that don't touch
@@ -82,7 +91,7 @@ committed like any other file, in git-config format:
   file as `changed (previous sync point unknown)` and names both ways on,
   `pull --all` leaves it alone, and `pull FILE` syncs it to the source's
   current version.
-- An entry **without** `commit` and `blob` is a **new link**: `status`
+- An entry **without** `commit` and `blob` (`tree`) is a **new link**: `status`
   shows it as `new`, and `pull` does its first sync exactly as
   [`add`](#add) would. This links many files at once: write their entries
   with [`edit`](#edit) – just `source` and `path` (and `tag`, `adaptable`
@@ -145,6 +154,35 @@ committed or not – is never allowed while it is linked. Bring it back with
 [`restore`](#restore), or remove the link with [`unlink`](#unlink) (link and
 file: [`rm`](#rm)).
 
+### Linked directories
+
+A `[dir]` entry links a whole directory: `add URL DIR` (see [Linking a
+directory](#linking-a-directory)). Its files are those of the upstream
+directory at the base that its `include` / `exclude` patterns select.
+`pull` keeps them in sync – also adding the files new upstream and deleting
+those deleted there. Everything else in the directory belongs to this
+repository: no command looks at it or touches it.
+
+Each file of the entry follows the rules of a linked file: an exact copy
+unless the entry is adaptable, merged on `pull`, never missing. `status`
+shows the entry in one line, with the number of files concerned:
+`missing:    lib/  (2 of 40 files, NOT ALLOWED: still linked)`.
+
+`pull` refuses the whole entry where it would lose local content, and
+names the files:
+
+- a file **missing** here but still upstream (gone upstream too: fine);
+- a file **adapted here and deleted upstream** – `--overwrite` deletes it,
+  `--force` keeps it as a file of this repository;
+- a file **new upstream** where a different one of this repository is –
+  `--overwrite` replaces it, `--force` keeps it as an adaptation (an
+  adaptable entry only).
+
+Entries don't overlap: no `[file]` or other `[dir]` inside a `[dir]`.
+Commands that change an entry – `pull`, `set`, `rm`, `unlink`, `mv` – take
+the whole directory; `status`, `diff`, `difftool` and `restore` also take
+files in it (a file of this repository there isn't linked: an error).
+
 ## Commands
 
 Basic commands – what you need day to day:
@@ -156,7 +194,7 @@ Basic commands – what you need day to day:
 | [`diff [PATH…] [-- OPTS]`](#diff) | local changes against the synced upstream version |
 | [`difftool [PATH…] [-- OPTS]`](#difftool) | the same in your difftool |
 | [`restore PATH…`](#restore) | files back to the synced upstream version, like `git restore` |
-| [`add URL\|SOURCE FILE\|DIR`](#add) | link a file – or all files of a directory – to the upstream repository |
+| [`add URL\|SOURCE FILE\|DIR`](#add) | link a file – or a directory – to the upstream repository |
 | [`rm PATH…`](#rm) | remove linked files and their links, like `git rm` |
 | [`unlink PATH…`](#unlink) | remove links, keep the files |
 | [`mv OLD… NEW`](#mv) | move linked files and their links |
@@ -165,7 +203,7 @@ Basic commands – what you need day to day:
 
 | Command | Purpose |
 |---|---|
-| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, tag, upstream path, adaptable |
+| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, tag, upstream path, adaptable, patterns |
 | [`edit`](#edit) | edit `.git-filesync` in the editor |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL or branch |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
@@ -261,6 +299,10 @@ Uncommitted changes:
 	modified:   src/bar.c
 ```
 
+A [linked directory](#linked-directories) has one line, the files
+concerned counted in the note: `pending:    lib/  (2 commits; files: 1 new,
+1 deleted)`, `adapted:    lib/  (3 of 40 files)`.
+
 With nothing to report: `nothing to sync, all 5 linked files unmodified`.
 `-v` adds a `Linked files:` section, warnings (e.g. about a mapped
 checkout) follow in a `Warnings:` section, and `advice.statusHints = false`
@@ -323,6 +365,7 @@ synced. In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH once (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG once |
 | `--overwrite` | take the upstream version as it is, discarding adaptations (also if the file is up to date). Uncommitted changes are still refused, except at the first sync of a new link, which works like `add --overwrite` |
+| `--force` | [linked directory](#linked-directories): keep a file of this repository that `pull` would delete (adapted, deleted upstream) or replace (new upstream) |
 | `-n`, `--dry-run` | change nothing; report per file what would happen: the version, whether adaptations merge cleanly (or how many conflicts), a rename upstream, every refusal |
 | `-v`, `--verbose` | before each file, where it comes from and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` |
 
@@ -336,6 +379,8 @@ synced. In scripts and CI: `git filesync pull --all && git commit --no-edit`.
   `pull --all` leaves them out and says so.
 - **Renamed upstream:** `pull` follows the file, see [Files renamed or
   deleted upstream](#files-renamed-or-deleted-upstream).
+- **Linked directories:** `pull` syncs all their files or none, see
+  [Linked directories](#linked-directories).
 - **Pinned files:** `pull` ends with a hint if there are [newer
   tags](#newer-tags) on the source's branch.
 
@@ -385,6 +430,8 @@ git filesync diff -- --stat
 
 With `-- --exit-code` or `-- --quiet`, exit code 1 means differences, like
 `git diff`. Whether adaptations would merge cleanly tells `pull --dry-run`.
+For a [linked directory](#linked-directories), `diff` shows its files only
+(`--upstream`: also those new and deleted upstream).
 
 **Upstreaming local changes:** `--for-upstream` gives a patch with the
 current upstream paths (with `--committed`: only the adaptations):
@@ -420,7 +467,9 @@ the tool are kept.
 version (the base recorded in `.git-filesync`): e.g. to discard the changes
 of a file that isn't adaptable, or to bring back a missing file. Unlike
 `pull --overwrite`, it brings in no newer upstream version; `.git-filesync`
-stays as it is. A new link has nothing to restore.
+stays as it is. A new link has nothing to restore. For a [linked
+directory](#linked-directories), `restore` takes its files (all, or those
+given); the repository's own files stay.
 
 | Option | Effect |
 |---|---|
@@ -442,8 +491,8 @@ in `git submodule add`):
   default: the upstream default branch), which is created if needed.
 - **Source name**: the file joins that source; a `-b` must be its branch.
 
-`add URL|SOURCE DIR` links every file below an upstream directory (see
-[Linking a directory](#linking-a-directory)).
+`add URL|SOURCE DIR` links an upstream directory (see [Linking a
+directory](#linking-a-directory)).
 
 | Option | Effect |
 |---|---|
@@ -452,6 +501,7 @@ in `git submodule add`):
 | `-p`, `--path PATH` | upstream path; default: the same as FILE or DIR (`/`: the upstream root; `\` counts as `/`) |
 | `--include PATTERN` | directory: only files matching PATTERN; repeatable |
 | `--exclude PATTERN` | directory: skip files matching PATTERN; repeatable, beats `--include` |
+| `--per-file` | directory: an entry for each file instead of one for the directory |
 | `--commit REV` | base FILE on this upstream revision instead of the head of the branch (or the tag) |
 | `--overwrite` | replace an existing file that differs with the upstream version ([discarded content](#discarded-content) is kept) |
 | `--adaptable` | allow local adaptations; an existing FILE that differs is kept as it is |
@@ -493,14 +543,15 @@ git filesync add https://github.com/owner/lib.git cfg/x.yml --tag v1.2.0
 #### Linking a directory
 
 If DIR is an existing directory, the upstream path a directory, or
-`--include` / `--exclude` are given, `add` links every file below the
-upstream directory: `-p api` with DIR `proto` links `api/v1/x.proto` as
-`proto/v1/x.proto`. As for `cp -r`, DIR may be new, but its parent must
-exist. Each file gets an ordinary `[file]` entry, and all are staged with
-one proposed message:
+`--include` / `--exclude` are given, `add` links DIR to the upstream
+directory: one `[dir]` entry, a [linked directory](#linked-directories).
+`-p api` with DIR `proto` gets `api/v1/x.proto` as `proto/v1/x.proto`. As
+for `cp -r`, DIR may be new, but its parent must exist. Existing files are
+compared with upstream as for FILE. All is staged with one proposed
+message:
 
 ```
-[filesync] Add 2 files from owner/backend@a1b2c3d (2026-10-28)
+[filesync] Add proto/ from owner/backend@a1b2c3d (2026-10-28)
 
 Upstream: https://github.com/owner/backend.git (main:api/)
 
@@ -508,8 +559,10 @@ Upstream: https://github.com/owner/backend.git (main:api/)
 - proto/v1/b.proto
 ```
 
-Files already linked are skipped (`--force` relinks them), so the same
-`add` later links just the files new upstream.
+With `--per-file`, each file gets a `[file]` entry of its own instead;
+`pull` then adds and deletes no files. Files already linked are skipped
+(`--force` relinks them), so the same `add` later links just the files new
+upstream.
 
 Patterns work like `.gitignore` lines, relative to the upstream directory:
 
@@ -532,6 +585,8 @@ one has uncommitted changes (or was never committed), nothing is removed –
 unless `-f` / `--force` is given ([discarded content](#discarded-content) is
 kept). A file already gone just loses its link. `-n` / `--dry-run` only
 lists what would be removed; to keep the files, use [`unlink`](#unlink).
+Of a [linked directory](#linked-directories), `rm` removes the entry's
+files; those of this repository stay.
 
 ### `unlink`
 
@@ -543,8 +598,9 @@ staged. `-n` / `--dry-run` only lists them.
 `mv OLD NEW` – move a linked file and its link, both staged, like `git mv`:
 NEW may be an existing directory; the directory NEW goes into must exist,
 and a NEW ending in `/` must be an existing directory. `mv OLD… DIR` moves
-several files into the existing directory DIR – all or none. `-n` /
-`--dry-run` only shows what would be moved.
+several files into the existing directory DIR – all or none. A [linked
+directory](#linked-directories) moves as a whole, with the files of this
+repository in it. `-n` / `--dry-run` only shows what would be moved.
 
 ## Advanced commands
 
@@ -560,8 +616,10 @@ then shows what is to sync, and `pull` syncs.
 | `-b`, `--branch BRANCH` | follow BRANCH (with `--source URL`: of that upstream; default: its default branch) |
 | `--tag TAG` | [pin](#pinning-to-a-tag) the files to TAG or a [pattern](#tag-patterns); a tag that doesn't exist is refused |
 | `--no-tag` | follow the source's branch again |
-| `-p`, `--path PATH` | another upstream path (one file) |
+| `-p`, `--path PATH` | another upstream path (one file or directory) |
 | `--adaptable`, `--no-adaptable` | allow [local adaptations](#exact-copies-and-adaptable-files), or not any more (the default) |
+| `--include PATTERN`, `--exclude PATTERN` | [linked directory](#linked-directories): new patterns (repeatable; they replace the old ones) |
+| `--no-include`, `--no-exclude` | linked directory: remove the patterns |
 | `-n`, `--dry-run` | only show what would change |
 
 URL and branch select the source, as for [`add`](#add): the one with that
@@ -583,7 +641,12 @@ stay adaptations:
   the tag). The file stays as it is, so differences count as adaptations –
   or, if it isn't adaptable, as a change not allowed, which `pull
   --overwrite` resolves. (Renames upstream need no `set`: `pull` follows
-  them.)
+  them.) A linked directory with another path becomes a new link: `pull`
+  compares its files, as `add` does.
+
+New patterns apply at once, at the base: a file they select now is fetched
+and staged (an existing one must be the synced version, unless the entry
+is adaptable); one they leave out stays as a file of this repository.
 
 ```sh
 git filesync set src/foo.c --adaptable
@@ -599,8 +662,8 @@ git filesync set cfg/ --no-tag                   # follow the branch again
 (`GIT_EDITOR`, `core.editor`, `VISUAL`, `EDITOR`); afterwards it is checked
 and staged. A file that can't be read any more is not staged – run `edit`
 again to fix it. Gaps that `status` would report (a missing `[source]`,
-`url`, `branch` or `path`, only one of `commit` and `blob`, an unused
-source) are shown as warnings. `edit` keeps whatever you write: a changed
+`url`, `branch` or `path`, only one of `commit` and `blob` (`tree`),
+overlapping entries, an unused source) are shown as warnings. `edit` keeps whatever you write: a changed
 `commit` or `blob` changes what counts as an adaptation.
 
 Your comments and layout are kept: commands change only the lines they
@@ -615,7 +678,7 @@ to its last key, so comments after it stay.
 
 | Command | Effect |
 |---|---|
-| `source` | list the source names (`-v`: with URL, branch and number of files) |
+| `source` | list the source names (`-v`: with URL, branch and number of entries) |
 | `source rename OLD NEW` | rename a source and every reference to it |
 | `source set-url NAME URL` | change the URL, e.g. after upstream moved; the synced versions are looked up there as for [`set --source`](#set) |
 | `source set-branch NAME BRANCH` | follow BRANCH, for all files of the source; for [pinned](#pinning-to-a-tag) ones where newer tags are looked for |
@@ -873,6 +936,9 @@ commit that removed it:
 
 Renames are detected as by `git diff -M` (similar content). If the previous
 sync point is unknown, the missing path is an error; fix it with `set -p`.
+A [linked directory](#linked-directories) gone upstream counts as deleted
+(a rename isn't followed); a file in it renamed upstream takes its
+adaptations along.
 
 ### Git LFS
 

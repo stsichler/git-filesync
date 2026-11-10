@@ -42,7 +42,7 @@
 #   14. source: list, rename and change sources
 #   15. Files renamed or deleted upstream
 #   16. Dry runs: pull --dry-run, add / unlink / mv -n
-#   17. add DIR: all files of an upstream directory, --include / --exclude
+#   17. add DIR --per-file: each file of an upstream directory, --include / --exclude
 #   18. pull -b / --tag: another branch or tag, once; newer tags
 #   19. set: change source, tag, upstream path or adaptable of linked files
 #   20. cache: show, list and clean up the cache of upstream clones
@@ -52,6 +52,7 @@
 #   24. New links written by hand: pull does the first sync, as add would
 #   25. Something in the way of a linked file; rewritten upstream history
 #   26. Current directory reached through a link: junction, subst drive, symlink
+#   27. [dir] entries: a directory synced as a whole, files of its own
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -812,7 +813,8 @@ check "add: a file where the directory should be" \
   "$(git filesync add -n "$SRC" include/renamed.h/x.h -p lib/foo.c 2>&1 | grep -c "^error: cannot add 'include/renamed.h/x.h': 'include/renamed.h' is not a directory$")" "1"
 check "add DIR: a missing parent directory is refused" \
   "$(git filesync add -n "$SRC" nope/lib -p lib 2>&1 | grep -c "^error: directory 'nope' does not exist$")" "1"
-check "add DIR: DIR itself may be new" "$(git filesync add -n "$SRC" newdir -p lib | grep -c '^would link newdir/')" "3"
+check "add DIR: DIR itself may be new" "$(git filesync add -n "$SRC" newdir -p lib | grep -c '^would link newdir/ -> .*, 3 files: 3 fetched')" "1"
+check "add DIR --per-file: DIR itself may be new" "$(git filesync add -n --per-file "$SRC" newdir -p lib | grep -c '^would link newdir/')" "3"
 rm -r include
 check "restore: recreates a missing directory" "$(rc git filesync restore include/renamed.h) $(cat include/renamed.h)" "0 n"
 git rm -q -r include && git commit -qm "include gone, its entry kept"
@@ -1061,7 +1063,7 @@ quiet git filesync add file:///nowhere/m6.git d -p a.txt
 check "add FILE into existing directory" "$(git config -f .git-filesync file.d/a.txt.path)" "a.txt"
 git reset -q --hard
 # an upstream directory links the files below it
-check "upstream path is a directory" "$(git filesync add -n file:///nowhere/m6.git x.txt -p sub | cut -d' ' -f1-5)" \
+check "upstream path is a directory" "$(git filesync add -n --per-file file:///nowhere/m6.git x.txt -p sub | cut -d' ' -f1-5)" \
   "would link x.txt/s.txt -> nowhere/m6:sub/s.txt"
 check "upstream path with backslashes (copied on Windows)" \
   "$(git filesync add -n file:///nowhere/m6.git x.txt -p '.\sub\s.txt' | cut -d' ' -f1-5)" \
@@ -1534,7 +1536,7 @@ check "-n: nothing changed" "$(ls r.c) $(git status --porcelain)" "r.c "
 
 
 # =============================================================================
-section "17. add DIR: all files of an upstream directory, --include / --exclude"
+section "17. add DIR --per-file: each file of an upstream directory, --include / --exclude"
 # =============================================================================
 cd "$T"
 
@@ -1548,7 +1550,7 @@ git filesync source map file:///nowhere/m11.git "$T/m11" >/dev/null
 
 # PROTO - the options linking the .proto files of api/ as proto/
 PROTO=(-p api --include '*.proto' --exclude '*_test.proto' --exclude test/)
-addc file:///nowhere/m11.git proto "${PROTO[@]}"
+addc --per-file file:///nowhere/m11.git proto "${PROTO[@]}"
 check "add DIR: files linked" \
   "$(git config -f .git-filesync --get-regexp '^file\..*\.path' | LC_ALL=C sort | oneline)" \
   "file.proto/a.proto.path api/a.proto file.proto/v1/b.proto.path api/v1/b.proto "
@@ -1561,13 +1563,13 @@ check "add DIR: status clean" "$(st)" ""
 
 # a new upstream file: the same add links only that one
 (cd ../m11 && echo c > api/c.proto && git add . && git commit -qm c)
-OUT=$(git filesync add nowhere/m11 proto "${PROTO[@]}" 2>&1)
+OUT=$(git filesync add --per-file nowhere/m11 proto "${PROTO[@]}" 2>&1)
 git commit -q --no-edit
 check "add DIR again: linked ones skipped" "$(echo "$OUT" | grep -c '^2 files already linked, skipped')" "1"
 check "add DIR again: new file committed" "$(git show --name-only --format= HEAD | LC_ALL=C sort | oneline)" \
   ".git-filesync proto/c.proto "
 check "add DIR again: subject" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Add proto/c.proto from nowhere/m11"
-check "add DIR: nothing new" "$(git filesync add nowhere/m11 proto "${PROTO[@]}" 2>&1)" \
+check "add DIR: nothing new" "$(git filesync add --per-file nowhere/m11 proto "${PROTO[@]}" 2>&1)" \
   "3 files already linked, skipped (use --force to relink)"
 
 # mv OLD... DIR: several into an existing directory, like git mv; all or none
@@ -1590,21 +1592,21 @@ git reset -q --hard && rm -rf moved
 # an existing, different file: refused, or with --adaptable linked as it
 # is; '/x.md' is anchored at the directory
 mkdir docs && echo mine > docs/x.md
-check "add DIR: an existing, different file is refused" "$(rc fsd add nowhere/m11 docs --include /x.md)" "2"
-quiet fsd add --adaptable nowhere/m11 docs --include /x.md && git commit -q --no-edit
+check "add DIR: an existing, different file is refused" "$(rc fsd add --per-file nowhere/m11 docs --include /x.md)" "2"
+quiet fsd add --per-file --adaptable nowhere/m11 docs --include /x.md && git commit -q --no-edit
 check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
 check "add DIR: existing file adapted" "$(st docs)" " M"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Link docs/x.md to nowhere/m11"
 check "add DIR --overwrite: existing file replaced" \
-  "$(fsd add -n --force --overwrite nowhere/m11 docs --include /x.md | grep -c 'replacing the existing file')" "1"
+  "$(fsd add --per-file -n --force --overwrite nowhere/m11 docs --include /x.md | grep -c 'replacing the existing file')" "1"
 
 # pattern forms
-check "pattern '**/v1/*'" "$(git filesync add -n nowhere/m11 all -p api --include '**/v1/*' | lines)" "2"
-check "pattern 'test/' (directory)" "$(git filesync add -n nowhere/m11 all -p api --include 'test/' | cut -d' ' -f3)" "all/test/t.proto"
-check "pattern 'v?/b*.proto'" "$(git filesync add -n nowhere/m11 all -p api --include 'v?/b[_.]*' | lines)" "2"
-check "patterns need an upstream directory" "$(rc git filesync add nowhere/m11 x -p api/a.proto --include '*')" "2"
+check "pattern '**/v1/*'" "$(git filesync add -n --per-file nowhere/m11 all -p api --include '**/v1/*' | lines)" "2"
+check "pattern 'test/' (directory)" "$(git filesync add -n --per-file nowhere/m11 all -p api --include 'test/' | cut -d' ' -f3)" "all/test/t.proto"
+check "pattern 'v?/b*.proto'" "$(git filesync add -n --per-file nowhere/m11 all -p api --include 'v?/b[_.]*' | lines)" "2"
+check "patterns need an upstream directory" "$(rc git filesync add --per-file nowhere/m11 x -p api/a.proto --include '*')" "2"
 check "whole upstream repository (docs/x.md already linked)" \
-  "$(fsd add -n nowhere/m11 . -p / --exclude '*.proto' | grep '^would' | cut -d' ' -f3 | oneline)" "api/README.md "
+  "$(fsd add --per-file -n nowhere/m11 . -p / --exclude '*.proto' | grep '^would' | cut -d' ' -f3 | oneline)" "api/README.md "
 
 # the script itself, synced into the repository and run via a repo alias
 mkdir tools && cp "$S" tools/git-filesync.py
@@ -1969,9 +1971,9 @@ else
     && git add . && git commit -qm init)
   new_repo s21
   git filesync source map file:///nowhere/m21.git "$T/m21" >/dev/null
-  addc file:///nowhere/m21.git src -p lib --include 'f[1-3]?.c'      # 30 files
+  addc --per-file file:///nowhere/m21.git src -p lib --include 'f[1-3]?.c'      # 30 files
   C30=$(calls status)
-  addc file:///nowhere/m21.git src -p lib                             # all 60
+  addc --per-file file:///nowhere/m21.git src -p lib                             # all 60
   C60=$(calls status)
   check "status: git calls independent of the number of files ($C30 / $C60)" \
     "$([ "$C60" -le "$((C30 + 2))" ] && [ "$C60" -lt 30 ] && echo yes)" "yes"
@@ -2024,7 +2026,7 @@ else
   new_repo "$T/s21b"
   git filesync source map file:///nowhere/m21.git "$T/m21" >/dev/null
   printf '*.c ident\n' > .gitattributes && git add .gitattributes && git commit -qm attrs
-  addc --adaptable file:///nowhere/m21.git src -p lib --include 'f[1-9].c'
+  addc --per-file --adaptable file:///nowhere/m21.git src -p lib --include 'f[1-9].c'
   for i in 1 2 3 4 5 6 7 8 9; do echo local >> src/f$i.c; done
   git commit -qam "adapt 9"
   BA=$(calls status)
@@ -2047,7 +2049,7 @@ cd "$T"
 git init -q m22 && (cd m22 && for i in 1 2 3; do echo "v$i" > f$i; done && git add . && git commit -qm init)
 new_repo s22
 git filesync source map file:///nowhere/m22.git "$T/m22" >/dev/null
-fsd add file:///nowhere/m22.git d -p / >/dev/null 2>&1 && git commit -q --no-edit   # fsd: '/' (Windows)
+fsd add --per-file file:///nowhere/m22.git d -p / >/dev/null 2>&1 && git commit -q --no-edit   # fsd: '/' (Windows)
 check "closed pipe: files linked" "$(ls d | oneline)" "f1 f2 f3 "
 (cd ../m22 && for i in 1 2 3; do echo "w$i" >> f$i; done && git commit -qam w)
 
@@ -2512,6 +2514,199 @@ fi
 
 # =============================================================================
 # summary
+# =============================================================================
+section "27. [dir] entries: a directory synced as a whole, files of its own"
+# =============================================================================
+cd "$T"
+
+# m27 (only via mapping): lib/ with sources, a test directory and a README
+git init -q m27
+(cd m27 && mkdir -p lib/sub lib/t && printf 'a1\na2\na3\n' > lib/a.c && echo b > lib/sub/b.c \
+  && echo t > lib/t/x_test.c && echo r > lib/README && echo top > top.txt \
+  && git add . && git commit -qm init)
+new_repo s27
+git filesync source map file:///nowhere/m27.git "$T/m27" >/dev/null
+URL27=file:///nowhere/m27.git
+
+# add DIR: one entry for the directory, its files fetched
+check "add DIR -n" "$(git filesync add -n $URL27 vendor -p lib --exclude t/ | sed 's/based on .*/based on X/')" \
+  "would link vendor/ -> nowhere/m27:lib/ (main), 3 files: 3 fetched, based on X"
+addc $URL27 vendor -p lib --exclude t/
+check "add DIR: one [dir] entry" \
+  "$(git config -f .git-filesync --get-regexp '^dir\.' | cut -d' ' -f1 | oneline)" \
+  "dir.vendor.source dir.vendor.path dir.vendor.exclude dir.vendor.commit dir.vendor.tree "
+check "add DIR: no [file] entries" "$(git config -f .git-filesync --get-regexp '^file\.' | lines)" "0"
+check "add DIR: the upstream tree recorded" "$(git config -f .git-filesync dir.vendor.tree)" \
+  "$(git -C ../m27 rev-parse HEAD:lib)"
+check "add DIR: files" "$(git ls-files vendor | oneline)" "vendor/README vendor/a.c vendor/sub/b.c "
+check "add DIR: message" "$(git log -1 --format=%B | sed '/^$/d; s/@[0-9a-f]* ([0-9-]*)$/@X/' | oneline)" \
+  "[filesync] Add vendor/ from nowhere/m27@X Upstream: file:///nowhere/m27.git (main:lib/) - vendor/README - vendor/a.c - vendor/sub/b.c "
+check "add DIR: status" "$(git filesync status)" "nothing to sync, all 3 linked files unmodified"
+check "add DIR again: already linked" "$(rc git filesync add nowhere/m27 vendor -p lib)" "2"
+
+# files of this repository in the directory: not looked at, never touched
+echo mine > vendor/own.txt && mkdir vendor/build && echo o > vendor/build/out.o
+git add vendor/own.txt && git commit -qm own
+check "own files: status" "$(st)" ""
+check "own files: pull" "$(git filesync pull vendor)" "vendor/: up to date"
+check "own file: status refuses it, not linked" "$( (git filesync status vendor/own.txt; echo $?) 2>&1 | oneline)" \
+  "error: 'vendor/own.txt' is not linked (in the linked directory 'vendor/', but not one of its files) 2 "
+check "own file: diff refuses it" "$(rc git filesync diff vendor/own.txt)" "2"
+
+# upstream: a file changed, one new, one deleted - pull follows all three
+(cd ../m27 && echo a4 >> lib/a.c && echo n > lib/sub/new.c && git rm -q lib/README \
+  && echo t2 >> lib/t/x_test.c && git add . && git commit -qm "a4, new, no README")
+check "pending: short" "$(st)" "P"
+check "pending: long" "$(git filesync status | grep pending: | sed 's/[[:space:]]*pending:[[:space:]]*//')" \
+  "vendor/  (1 commit; files: 1 new, 1 deleted, 1 changed)"
+check "diff --upstream: new, deleted and changed files" \
+  "$(git filesync diff --upstream -- --name-status | oneline)" "D${TAB}vendor/README M${TAB}vendor/a.c A${TAB}vendor/sub/new.c "
+check "pull -n" "$(git filesync pull -n vendor | sed 's/@[0-9a-f]*/@X/')" \
+  "vendor/: would sync to nowhere/m27@X (1 new, 1 deleted, 1 changed)"
+OUT=$(git filesync pull vendor)
+check "pull: summary" "$(echo "$OUT" | head -1)" "vendor/: synced (1 new, 1 deleted, 1 changed)"
+check "pull: staged" "$(git diff --cached --name-status | oneline)" \
+  "M${TAB}.git-filesync D${TAB}vendor/README M${TAB}vendor/a.c A${TAB}vendor/sub/new.c "
+check "pull: own files stay" "$(cat vendor/own.txt vendor/build/out.o | oneline)" "mine o "
+git commit -q --no-edit
+check "pull: message" "$(git log -1 --format=%B | sed -n '/^- vendor/p' | oneline)" \
+  "- vendor/README (deleted upstream) - vendor/a.c (changed upstream) - vendor/sub/new.c (new upstream) "
+check "pull: up to date" "$(st)" ""
+
+# not adaptable (the default): a modification is not allowed
+echo local >> vendor/a.c && git commit -qam local
+check "not adaptable: status -s" "$(git filesync status -s)" " M  vendor/  (not adaptable!)"
+check "not adaptable: long" "$(git filesync status | grep adapted: | sed 's/^[[:space:]]*//')" \
+  "adapted:    vendor/  (1 of 3 files, NOT ALLOWED: not adaptable)"
+(cd ../m27 && echo b2 >> lib/sub/b.c && git commit -qam b2)
+check "not adaptable: pull refused" "$(git filesync pull vendor 2>&1 | grep -c 'NOT ALLOWED (not adaptable)')" "1"
+
+# adaptable: merged; a file adapted here and deleted upstream is refused
+quiet git filesync set --adaptable vendor && git commit -qm adaptable
+check "adaptable: pull merges" "$(pullc vendor | head -1)" "vendor/: synced (1 changed)"
+check "adaptable: adaptation kept" "$(tail -1 vendor/a.c)" "local"
+(cd ../m27 && git rm -q lib/a.c && git commit -qm "no a.c")
+check "adapted, deleted upstream: refused" \
+  "$(git filesync pull vendor 2>&1 | grep -c '^error: vendor/a.c: deleted upstream, but adapted here')" "1"
+check "adapted, deleted upstream: --force keeps it as a file of this repository" \
+  "$(pullc --force vendor >/dev/null; git ls-files vendor/a.c; st)" "vendor/a.c"
+(cd ../m27 && git revert --no-edit HEAD >/dev/null)
+check "back upstream: an existing, different file is refused" \
+  "$(git filesync pull vendor 2>&1 | grep -c '^error: vendor/a.c: new upstream, but another file is here')" "1"
+check "--force (adaptable): kept as an adaptation" "$(pullc --force vendor >/dev/null; st)" " M"
+
+# a missing file is never allowed - unless upstream deleted it too
+git rm -q vendor/sub/b.c && git commit -qm "no b.c"
+check "missing: short" "$(git filesync status -s)" " MD vendor/  (missing!)"
+check "missing: long" "$(git filesync status | grep missing: | sed 's/^[[:space:]]*//')" \
+  "missing:    vendor/  (1 of 3 files, NOT ALLOWED: still linked)"
+(cd ../m27 && echo n2 >> lib/sub/new.c && git commit -qam n2)
+check "missing: pull refused" "$(git filesync pull vendor 2>&1 | grep -c '1 of 3 files missing (vendor/sub/b.c)')" "1"
+check "missing: pull --all leaves it out" "$(git filesync pull --all 2>&1 | grep -c 'missing - left out')" "0"
+check "restore FILE of a [dir]" "$(git filesync restore vendor/sub/b.c | sed 's/@.*//')" \
+  "vendor/sub/b.c: restored (nowhere/m27"
+check "restore: own file refused" "$(rc git filesync restore vendor/own.txt)" "2"
+quiet git filesync restore -SW vendor && git commit -qm restored
+check "restore DIR: back to the base, own files stay" "$(st)-$(cat vendor/own.txt)" "P-mine"
+rm vendor/sub/b.c                     # deleted, not staged
+(cd ../m27 && git rm -q lib/sub/b.c && git commit -qm "no b.c")
+check "missing, deleted upstream too: pull goes" "$(pullc vendor | head -1)" "vendor/: synced (1 deleted, 1 changed)"
+check "missing, deleted upstream too: no longer the entry's" "$(st)" ""
+check "missing, deleted upstream too: the deletion committed" "$(git ls-files vendor/sub/b.c; git status --porcelain vendor/sub)" ""
+
+# a new upstream file where one of this repository is
+echo mine > vendor/sub/c.c && git add vendor/sub/c.c && git commit -qm c
+(cd ../m27 && echo c > lib/sub/c.c && git add . && git commit -qm c)
+check "collision: refused" "$(rc git filesync pull vendor)" "2"
+check "collision: --overwrite takes the upstream file" "$(pullc --overwrite vendor >/dev/null; cat vendor/sub/c.c)" "c"
+
+# commands that change an entry take it whole
+check "pull FILE of a [dir]: refused" "$(git filesync pull vendor/a.c 2>&1)" \
+  "error: 'vendor/a.c' is in the linked directory 'vendor/' - give 'vendor' (the whole entry)"
+check "add FILE into a [dir]: refused" "$(rc git filesync add $URL27 vendor/top.txt -p top.txt)" "2"
+check "add DIR over linked files: refused" \
+  "$(git filesync add -n $URL27 . -p / 2>&1 | grep -c 'overlaps with the entry for vendor/')" "1"
+check "add --per-file into a [dir]: refused" \
+  "$(git filesync add -n --per-file $URL27 vendor -p lib 2>&1)" \
+  "error: cannot link 'vendor/a.c': it is in the linked directory vendor/"
+
+# diff: the files of the entry only
+echo more >> vendor/sub/new.c && echo x >> vendor/own.txt
+check "diff: files of the entry" "$(git filesync diff -- --name-only | oneline)" "vendor/sub/new.c "
+check "diff FILE of a [dir]" "$(git filesync diff vendor/sub -- --name-only | oneline)" "vendor/sub/new.c "
+git checkout -q vendor/sub/new.c vendor/own.txt
+
+# set --include / --exclude: applies at once, at the base
+quiet git filesync set --no-exclude vendor
+check "set --no-exclude: the test files fetched and staged" "$(git diff --cached --name-only | oneline)" \
+  ".git-filesync vendor/t/x_test.c "
+check "set --no-exclude: registry" "$(git config -f .git-filesync dir.vendor.exclude || echo none)" "none"
+git commit -qm tests
+quiet git filesync set --exclude 't/' --exclude '*_test.c' vendor
+check "set --exclude: patterns in one line" "$(git config -f .git-filesync dir.vendor.exclude)" "t/ *_test.c"
+check "set --exclude: files left out stay" "$(cat vendor/t/x_test.c | head -1)-$(st)" "t-"
+git commit -qm "no tests"
+
+# mv: the whole directory, own files too; unlink and rm
+quiet git filesync mv vendor third && git commit -qm mv
+check "mv DIR" "$(git config -f .git-filesync --get-regexp '^dir\..*\.path')-$(cat third/own.txt)" \
+  "dir.third.path lib-mine"
+check "mv DIR: status" "$(st)" ""
+check "rm DIR" "$(git filesync rm third)" "removed third/ (3 files; files of this repository stay)"
+check "rm DIR: own files stay" "$(ls third | oneline)" "build own.txt t "
+git reset -q --hard && git clean -qfd
+check "unlink DIR" "$(git filesync unlink third)" "unlinked third/ (files kept)"
+git reset -q --hard
+
+# written by hand: pull does the first sync; the root of the upstream repository
+new_repo "$T/s27b"
+git filesync source map $URL27 "$T/m27" >/dev/null
+printf '[source "m27"]\n\turl = %s\n\tbranch = main\n[dir "up"]\n\tsource = m27\n\tpath = /\n\texclude = lib/\n' \
+  $URL27 > .git-filesync
+git add .git-filesync && git commit -qm reg
+check "new [dir]: status" "$(st)" "N"
+check "new [dir]: pull --all" "$(git filesync pull --all | head -1)" "up/: synced (first sync; 1 file: 1 fetched)"
+check "new [dir]: the root" "$(git ls-files up | oneline)" "up/top.txt "
+git commit -q --no-edit
+# the upstream directory deleted: pull refuses, like for a file
+addc $URL27 sub -p lib/sub
+(cd ../m27 && git rm -rq lib/sub && git commit -qm "no sub")
+check "upstream directory deleted: short" "$(st sub)" "X"
+check "upstream directory deleted: pull refused" \
+  "$(git filesync pull sub 2>&1 | grep -c "^error: sub/: 'lib/sub/' was deleted in")" "1"
+check "upstream directory deleted: difftool --upstream" \
+  "$(git filesync difftool -y --upstream sub -- -x true 2>&1; echo $?)" "0"
+# only files the patterns leave out changed upstream (lib/sub above): the
+# synced commit stays, and the tree recorded is the one at that commit
+echo mine >> up/top.txt && git commit -qam mine
+quiet pullc --overwrite up
+check "tree at the synced commit" "$(git config -f .git-filesync dir.up.tree)" \
+  "$(git -C ../m27 rev-parse "$(git config -f .git-filesync dir.up.commit)^{tree}")"
+
+# git calls don't grow with the number of files (see section 21)
+if ! command -v cygpath >/dev/null; then
+  cd "$T"
+  git init -q m27p && (cd m27p && mkdir lib && for i in $(seq 1 60); do echo "v$i" > lib/f$i.c; done \
+    && git add . && git commit -qm init)
+  new_repo "$T/s27p"
+  git filesync source map file:///nowhere/m27p.git "$T/m27p" >/dev/null
+  addc file:///nowhere/m27p.git src -p lib --include 'f[1-3]?.c'      # 30 files
+  C30=$(calls status)
+  addc --force file:///nowhere/m27p.git src -p lib                    # all 60
+  C60=$(calls status)
+  check "[dir] status: git calls independent of the number of files ($C30 / $C60)" \
+    "$([ "$C60" -le "$((C30 + 2))" ] && echo yes)" "yes"
+  for i in 1 2 3 4 5 6 7 8 9; do echo local >> src/f$i.c; done
+  git commit -qam adapt && quiet git filesync set --adaptable src && git commit -qm adaptable
+  check "[dir] status: adapted files cost no git calls each" \
+    "$([ "$(calls status)" -le "$((C60 + 3))" ] && echo yes)" "yes"
+  (cd ../m27p && for i in $(seq 1 60); do echo "w$i" >> lib/f$i.c; done && git commit -qam w)
+  CP=$(calls pull src)
+  check "[dir] pull: git calls only for the merges ($CP for 60, 9 merged)" \
+    "$([ "$CP" -le $((C60 + 3 * 9 + 20)) ] && echo yes)" "yes"
+fi
+
+
 # =============================================================================
 section "Upstream repositories untouched"
 check "no writes outside the repository git-filesync runs in" \

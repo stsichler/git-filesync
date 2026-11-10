@@ -49,7 +49,7 @@ a firmware image, a generated header – there is the sibling tool
 
 | | Git submodules | git-filesync |
 |---|---|---|
-| Unit | a whole repository, in its own directory | single files, each at any path |
+| Unit | a whole repository, in its own directory | single files or directories, each at any path |
 | Your repository contains | a pointer to a commit elsewhere | a real copy of the file |
 | Local changes | made in the other repository | exact copy by default; per file allowed (`adaptable`) and kept on every sync by a 3-way merge |
 | Cloning and building | needs `--recurse-submodules` and access to every submodule | a plain clone is complete, even if upstream is gone |
@@ -68,13 +68,14 @@ self-contained.
 directory into your repository; git-vendor manages it exclusively and
 discards local changes on update. git-filesync links single files at any
 path, next to your own, keeps committed adaptations by merging, and lists
-the upstream commits in every sync. A whole directory works too: `add`
-links all its files at once.
+the upstream commits in every sync. A whole directory works too: `pull`
+then also adds and deletes files, and your own files in it stay.
 
 ## Features
 
-- Single files, one by one or all files of an upstream directory; all links
-  in one file, `.git-filesync`, in git-config format like `.gitmodules`
+- Single files, or whole directories (new and deleted upstream files follow,
+  your own files in them stay); all links in one file, `.git-filesync`, in
+  git-config format like `.gitmodules`
 - Follows an upstream branch, or per file a tag (with a hint at newer tags)
   or the newest tag matching a pattern (`v1.*`)
 - Proposed commit message listing the upstream commits since the last sync
@@ -159,7 +160,7 @@ Basic commands – what you need day to day:
 | `pull PATH…`, `pull --all` | sync files from upstream, keeping local adaptations |
 | `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced upstream version |
 | `restore PATH…` | files back to the synced upstream version, like `git restore` |
-| `add URL\|SOURCE FILE\|DIR` | link a file (or all files of an upstream directory) to upstream |
+| `add URL\|SOURCE FILE\|DIR` | link a file (or a directory) to upstream |
 | `rm PATH…`, `unlink PATH…`, `mv OLD… NEW` | remove links with their files (like `git rm`) or without, move them |
 
 Advanced commands:

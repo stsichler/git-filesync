@@ -26,16 +26,26 @@ upstream repository:
         adaptable = true       ; optional: local adaptations allowed
         commit = <upstream commit of the last sync>
         blob = <blob id of the upstream file at that commit>
+    [dir "third_party/lib"]    ; a directory: the files of an upstream one
+        source = owner/lib
+        path = lib             ; upstream directory (/: the root)
+        exclude = test/ '*_test.c'   ; optional, like include: patterns
+        commit = <upstream commit that last changed it>
+        tree = <the upstream directory at that commit>
 
 A link records the upstream version the file is based on (commit/blob).
 A file must stay an exact copy of it, unless it is marked adaptable: then
 local adaptations on top of it are allowed and kept by a 3-way merge on
 pull. An entry without commit and blob (e.g. written by hand, to link
 many files at once) is a new link: pull syncs it the first time, as add
-would.
+would. A [dir] entry's files are those of the upstream directory at its
+base its patterns select, each one like a linked file; pull also adds and
+deletes them. All other files in the directory are this repository's own,
+which no command touches. Entries don't overlap.
 
 Commands (run inside the repository; without a command: status).
-PATH may be a file or a directory (= all linked files below it); options
+PATH may be a file or a directory (= all linked files below it; a file in
+a [dir] entry: that entry - pull, set, rm, unlink take it whole); options
 follow the command. No command commits: they stage (restore: with -S), like
 their git namesakes, and propose a commit message that a plain `git commit`
 offers (.git/SQUASH_MSG; a copy stays in .git/FILESYNC_MSG) - committing
@@ -72,7 +82,8 @@ Basic commands:
                                 changes refused, a missing file too (see
                                 restore); a new link is synced the first
                                 time as by add; a file renamed upstream is
-                                followed, one deleted there is reported
+                                followed, one deleted there is reported; a
+                                [dir] entry: all its files or none
         --all                   all files with something to sync (with
                                 --commit, -b, --tag: all files); names
                                 those left out that need attention
@@ -85,6 +96,9 @@ Basic commands:
         --commit REV            sync to this upstream revision, once (as -b;
                                 also backwards)
         --overwrite             discard local adaptations instead of merging
+        --force                 [dir]: keep a file of this repository that
+                                pull would delete (adapted, deleted
+                                upstream) or replace (new upstream)
         -n, --dry-run           only report what would happen (incl.
                                 merge conflicts); change nothing
         -v, --verbose           before each file: where it comes from (as
@@ -129,10 +143,10 @@ Basic commands:
                                 exist, as for cp); FILE and
                                 .git-filesync are staged like `git add` - a
                                 plain `git commit` offers the proposed message
-    add URL|SOURCE DIR          link every file below an upstream directory
-                                (-p, default: same as DIR) as DIR/...; files
-                                already linked are skipped; as for cp -r, DIR
-                                may be new, its parent must exist
+    add URL|SOURCE DIR          link DIR to an upstream directory (-p,
+                                default: same as DIR): one [dir] entry; its
+                                files are compared as for FILE; as for cp -r,
+                                DIR may be new, its parent must exist
         -b, --branch BRANCH     the source's upstream branch (default: its
                                 default branch, or that of SOURCE)
         --tag TAG               pin the file to an upstream tag instead of
@@ -143,6 +157,8 @@ Basic commands:
         --include PATTERN       DIR: only files matching (gitignore-like,
                                 relative to the upstream directory; repeatable)
         --exclude PATTERN       DIR: skip files matching (repeatable)
+        --per-file              DIR: a [file] entry for each file instead;
+                                files already linked are skipped
         --commit REV            upstream revision to base FILE on instead
                                 of the head
         --overwrite             replace an existing FILE with the upstream
@@ -154,8 +170,9 @@ Basic commands:
         -n, --dry-run           only show what would be linked
 
     rm PATH...                  remove linked files and their links, staged
-                                like `git rm`; refused for files with
-                                uncommitted changes
+                                like `git rm` ([dir]: its files, the own ones
+                                stay); refused for files with uncommitted
+                                changes
         -f, --force             remove them anyway (their content: as
                                 restore)
         -n, --dry-run           only show what would be removed
@@ -164,6 +181,7 @@ Basic commands:
     mv OLD NEW                  move a linked file (git mv), keeping its link;
                                 the directory of NEW must exist
     mv OLD... DIR               move several into the existing directory DIR
+                                (a [dir] moves with the own files in it)
         -n, --dry-run           (both) only show what would be done
 
 Advanced commands:
@@ -184,8 +202,13 @@ Advanced commands:
         --no-tag                follow the source's branch again
         -p, --path PATH         another upstream path (one file); its
                                 current version becomes the base, as for add
-                                (the file stays as it is)
+                                (the file stays as it is); a [dir]: a new
+                                link then, compared by pull
         --adaptable, --no-adaptable  allow local adaptations / not any more
+        --include, --exclude PATTERN  [dir]: new patterns (repeatable),
+                                applied at once: files they select now are
+                                fetched (staged), those left out stay
+        --no-include, --no-exclude  [dir]: remove the patterns
         -n, --dry-run           only show what would change
 
     edit                        open .git-filesync in the editor (like `git
@@ -193,7 +216,7 @@ Advanced commands:
                                 and staged
 
     source                      list the [source]s (-v: with URL, branch,
-                                files)
+                                entries)
     source rename OLD NEW       rename a [source] and all references to it
     source set-url NAME URL     change the URL of a [source]; the synced
                                 versions are looked up there as for set
@@ -274,6 +297,7 @@ import inspect
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -287,7 +311,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.21.3"
+__version__ = "0.22.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -821,8 +845,9 @@ class Source:
             self._memo[("published", c)] = c not in unpublished
 
     def has_uncommitted(self, path):
-        """Does a local checkout have uncommitted changes to path? One `git
-        status` for the whole checkout, asked once. The checkout is only read:
+        """Does a local checkout have uncommitted changes to path (a file, or
+        a directory: to a file below it, '' = the root)? One `git status`
+        for the whole checkout, asked once. The checkout is only read:
         --no-optional-locks keeps git from rewriting its index (`git diff`
         would), lfs_elsewhere Git LFS from writing into its .git/lfs."""
         key = ("uncommitted",)
@@ -835,8 +860,8 @@ class Source:
                                if e} if p.returncode == 0 else None
         if self._memo[key] is None:
             with lfs_elsewhere() as lfs:
-                return bool(out(self.git(lfs + status + ["--", lit(path)], check=False)))
-        return path in self._memo[key]
+                return bool(out(self.git(lfs + status + ["--", lit(path or ".")], check=False)))
+        return any(p == path or not path or p.startswith(path + "/") for p in self._memo[key])
 
     def resolve(self, rev=None):
         key = ("resolve", rev)
@@ -1218,13 +1243,50 @@ class Source:
         return result
 
     def is_dir(self, commit, path):
-        p = self.git(["cat-file", "-t", f"{commit}:{path}"], check=False)
-        return p.returncode == 0 and out(p) == "tree"
+        return bool(self.tree_at(commit, path))
+
+    def tree_at(self, rev, path):
+        """Tree id of the directory path ('' = the root) at commit rev, None
+        if there is none."""
+        key = ("tree", rev, path)
+        if key not in self._memo:
+            p = self.git(["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+                         data=f"{rev}:{path}\n".encode(), check=False)
+            oid, _, kind = out(p).partition(" ")
+            self._memo[key] = oid if p.returncode == 0 and kind == "tree" else None
+        return self._memo[key]
+
+    def tree_files(self, tree):
+        """{path: blob id} of the regular files in a tree and below it, None
+        if the tree isn't there. Needs no blobs (blobless cache)."""
+        key = ("files", tree)
+        if key not in self._memo:
+            p = self.git(["ls-tree", "-r", "-z", tree], check=False)
+            files = None
+            if p.returncode == 0:
+                files = {}
+                for entry in p.stdout.decode("utf-8", "replace").split("\0"):
+                    info, _, name = entry.partition("\t")
+                    if name and info.split(" ")[0] in ("100644", "100755"):
+                        files[name] = info.split(" ")[2]
+            self._memo[key] = files
+        return self._memo[key]
+
+    def files_at(self, rev, path):
+        """(tree id, {path below: blob id}) of the directory path at commit
+        rev (see tree_files); (None, None) if there is none. What blob_at()
+        answers for these files is known then too."""
+        tree = self.tree_at(rev, path)
+        files = self.tree_files(tree) if tree else None
+        for below, oid in (files or {}).items():
+            self._memo.setdefault(("blob", rev, up_join(path, below)), oid)
+        return tree, files
 
     def path_history(self, path, max_count):
-        """[(commit, blob id)] of commits on the branch touching path, newest first."""
+        """[(commit, blob id)] of commits on the branch touching path, newest
+        first (a directory: tree ids; '' = the root)."""
         revs = out(self.git(["rev-list", f"--max-count={max_count}",
-                             self.ref, "--", lit(path)])).split()
+                             self.ref, "--", lit(path or ".")])).split()
         if not revs:
             return []
         data = "".join(f"{r}:{path}\n" for r in revs).encode()
@@ -1241,7 +1303,7 @@ class Context:
         # restore, and diff of local changes, only need the synced versions,
         # which never change (a blob missing in the cache is fetched lazily):
         # fetched only if the cache lacks the branch (lazy)
-        offline = args.cmd == "restore" or \
+        offline = args.cmd in ("restore", "rm") or \
             args.cmd in ("diff", "difftool") and not args.upstream
         no_fetch = getattr(args, "no_fetch", False)
         self.remote = getattr(args, "remote", False)     # mappings ignored this once
@@ -1935,8 +1997,9 @@ def edit_registry(data, pending, drop=(), renames=None):
 
 
 def parse_registry(raw):
-    """({source: {key: value}}, {file: {key: value}}) from `git config --list -z`."""
-    sources, files = {}, {}
+    """({source: {key: value}}, {file: {key: value}}, {dir: {key: value}})
+    from `git config --list -z`."""
+    sections = {"source": {}, "file": {}, "dir": {}}
     for item in raw.decode("utf-8", "replace").split("\0"):
         if not item:
             continue
@@ -1945,11 +2008,9 @@ def parse_registry(raw):
             val = "true"     # a key without '= value' is a boolean true in git config
         sect, _, rest = key.partition(".")
         sub, _, name = rest.rpartition(".")
-        if sect == "source" and sub:
-            sources.setdefault(sub, {})[name] = val
-        elif sect == "file" and sub:
-            files.setdefault(sub, {})[name] = val
-    return sources, files
+        if sect in sections and sub:
+            sections[sect].setdefault(sub, {})[name] = val
+    return sections["source"], sections["file"], sections["dir"]
 
 
 def is_tag_pattern(tag):
@@ -2047,6 +2108,16 @@ def blocked_text(repo, rel, blocked):
             f"'git filesync unlink {path_arg(repo, rel)}'")
 
 
+def is_below(rel, d):
+    """Is rel the directory d or below it ('.' = the root)?"""
+    return d == "." or rel == d or rel.startswith(d + "/")
+
+
+def join_rel(d, below):
+    """Path of below in directory d of this repository ('.' = the root)."""
+    return below if d == "." else f"{d}/{below}"
+
+
 def registry_path(repo):
     """.git-filesync - refused if it is a symlink: it comes from a commit,
     possibly made by others, and is written to (also: as git writes it)."""
@@ -2057,16 +2128,16 @@ def registry_path(repo):
 
 
 class Registry:
-    """The repository's .git-filesync: [source] and [file] sections."""
+    """The repository's .git-filesync: [source], [file] and [dir] sections."""
 
     def __init__(self, repo):
         self.repo = repo
         self.path = registry_path(repo)
-        self.sources, self.files = {}, {}
+        self.sources, self.files, self.dirs = {}, {}, {}
         self.dry_run = False      # only change the in-memory state
         # written later, all at once (see flush): pull, add, rm, unlink and
         # set change many entries
-        self._pending = {}        # ("file" | "source", name, key) -> value, see _set
+        self._pending = {}        # ("file" | "dir" | "source", name, key) -> value, see _set
         self._drop = set()        # (section, name): sections to remove, see remove_file
         self._renames = {}        # (section, old name) -> new name, see _rename
         if self.path.exists():
@@ -2074,15 +2145,39 @@ class Registry:
             if p.returncode:
                 raise FsError(f"{REGISTRY}: cannot parse: "
                               + p.stderr.decode("utf-8", "replace").strip())
-            self.sources, self.files = parse_registry(p.stdout)
+            self.sources, self.files, self.dirs = parse_registry(p.stdout)
 
     def links(self):
-        return [Link(self, rel) for rel in sorted(self.files)]
+        """All entries, [file] and [dir], by path."""
+        return sorted([Link(self, rel) for rel in self.files]
+                      + [DirLink(self, rel) for rel in self.dirs], key=lambda lk: lk.rel)
+
+    def entry(self, rel):
+        """The [file] or [dir] entry for rel, None if there is none."""
+        return Link(self, rel) if rel in self.files else \
+            DirLink(self, rel) if rel in self.dirs else None
+
+    def store(self, sect):
+        return {"file": self.files, "dir": self.dirs, "source": self.sources}[sect]
+
+    def uses(self, name):
+        """Rels of the entries ([file] and [dir]) of the [source] name."""
+        return sorted(rel for store in (self.files, self.dirs)
+                      for rel, v in store.items() if v.get("source") == name)
+
+    def overlapping(self, rel, kind):
+        """Entries other than rel that overlap with an entry at rel of this
+        kind ('file' | 'dir'): a [dir] holds everything below it, so no
+        other entry may be there - nor a [dir] above any entry."""
+        others = [r for r in self.files if is_below(r, rel)] if kind == "dir" else []
+        others += [d + "/" for d in self.dirs if (d, "dir") != (rel, kind)
+                   and (is_below(rel, d) or kind == "dir" and is_below(d, rel))]
+        return sorted(others)
 
     def _set(self, sect, name, key, value):
-        """Set (value None: remove) a key of a [file] or [source] - written
-        later (see flush); a removed key's line goes at once, with git."""
-        store = self.files if sect == "file" else self.sources
+        """Set (value None: remove) a key of a [file], [dir] or [source] -
+        written later (see flush); a removed key's line goes at once, with git."""
+        store = self.store(sect)
         if value is None:
             if key in store.get(name, {}):
                 if not self.dry_run:
@@ -2138,18 +2233,23 @@ class Registry:
 
     def rename_source(self, old, new):
         self._rename("source", old, new)
-        for rel, f in self.files.items():
-            if f.get("source") == old:
-                self.set_file(rel, "source", new)
+        for sect in ("file", "dir"):
+            for rel, f in self.store(sect).items():
+                if f.get("source") == old:
+                    self._set(sect, rel, "source", new)
+
+    def kind(self, rel):
+        """'file' or 'dir': the section of the entry rel."""
+        return "file" if rel in self.files or rel not in self.dirs else "dir"
 
     def remove_file(self, rel, keep_source=None):
-        """Remove a [file]; its [source] too when no other file uses it
-        (unless it is keep_source). Removed later, all at once (see flush)
-        - rm and unlink remove many."""
-        src = self.files.pop(rel, {}).get("source")
-        self._remove_section("file", rel)
-        if src and src != keep_source and src in self.sources and \
-                not any(f.get("source") == src for f in self.files.values()):
+        """Remove a [file] or [dir]; its [source] too when no other entry
+        uses it (unless it is keep_source). Removed later, all at once (see
+        flush) - rm and unlink remove many."""
+        sect = self.kind(rel)
+        src = self.store(sect).pop(rel, {}).get("source")
+        self._remove_section(sect, rel)
+        if src and src != keep_source and src in self.sources and not self.uses(src):
             self.remove_source(src)
 
     def _remove_section(self, sect, name):
@@ -2162,14 +2262,14 @@ class Registry:
     def _rename(self, sect, old, new):
         """Rename a section: only the name in its header changes."""
         self.flush()              # what is pending still goes by the old name
-        store = self.files if sect == "file" else self.sources
+        store = self.store(sect)
         store[new] = store.pop(old)
         if not self.dry_run:
             self._renames[(sect, old)] = new
             self.flush()
 
     def rename_file(self, old, new):
-        self._rename("file", old, new)
+        self._rename(self.kind(old), old, new)
 
     def flush(self):
         """Write what is pending - removed and renamed sections, values (see
@@ -2189,7 +2289,8 @@ class Registry:
         if edited is not None:
             self.path.write_bytes(edited)
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
-            if p.returncode == 0 and parse_registry(p.stdout) == (self.sources, self.files):
+            if p.returncode == 0 and \
+                    parse_registry(p.stdout) == (self.sources, self.files, self.dirs):
                 return
         self.path.write_bytes(original)
         for sect, name in sorted(drop):
@@ -2203,7 +2304,7 @@ class Registry:
         """Fix line endings and stage the registry (or its removal when empty)."""
         self.flush()
         if self.path.exists():
-            if not self.sources and not self.files:
+            if not self.sources and not self.files and not self.dirs:
                 self.path.unlink()
             else:
                 self.repo.fix_eol(self.path)
@@ -2260,27 +2361,144 @@ class Link:
     def set(self, name, value):
         self.reg.set_file(self.rel, name, value)
 
+    is_dir = False
+    shown_rel = property(lambda self: self.rel)       # rel as shown: 'src/' for a [dir]
+    only = None       # a [dir] selected by some of its files: their paths (see select_links)
 
-def select_links(repo, reg, paths):
-    """Links for the given files/directories (all links if none given)."""
+
+def up_join(path, below):
+    """Upstream path of below in the upstream directory path ('' = the root)."""
+    return f"{path}/{below}" if path else below
+
+
+def split_patterns(value):
+    """The patterns of an include / exclude value: separated by blanks,
+    quoted like in a shell ('*.c' "my file")."""
+    try:
+        return shlex.split(value)
+    except ValueError as e:
+        raise FsError(f"cannot read the patterns '{value}': {e}")
+
+
+def join_patterns(patterns):
+    """The value of include / exclude for these patterns (see split_patterns)."""
+    return " ".join(p if re.fullmatch(r"[\w./*?\[\]!@+-]+", p) else shlex.quote(p)
+                    for p in patterns) or None
+
+
+class DirLink(Link):
+    """One [dir] entry: a directory here that holds the files of an upstream
+    directory - those its include / exclude patterns select. The base is the
+    upstream tree (tree, at commit): the files it lists are the entry's
+    files (see Member); all others below the directory are this
+    repository's own, which no command touches. values: the entry's keys
+    (one not written yet), instead of those in the registry."""
+    is_dir = True
+    shown_rel = property(lambda self: self.rel.rstrip("/") + "/")
+
+    def __init__(self, reg, rel, values=None):
+        super().__init__(reg, rel)
+        self.values = values
+
+    @property
+    def v(self):
+        return self.values if self.values is not None else self.reg.dirs.get(self.rel, {})
+
+    def set(self, name, value):
+        self.reg._set("dir", self.rel, name, value)
+
+    path = property(lambda self: upstream_path(self.v.get("path", "")))   # '' = the root
+    tree = property(lambda self: self.v.get("tree", ""))
+    blob = tree
+    include = property(lambda self: split_patterns(self.v.get("include", "")))
+    exclude = property(lambda self: split_patterns(self.v.get("exclude", "")))
+
+    @property
+    def unsynced(self):
+        return not self.commit and not self.tree
+
+    @property
+    def target(self):
+        problem = path_problem(self.rel) if self.rel != "." else None
+        if problem:
+            raise FsError(f"'{self.rel}' in {REGISTRY}: {problem}")
+        blocked = in_the_way(self.reg.repo.top, self.rel) if self.rel != "." else None
+        if blocked and blocked != "is a directory, not a file":
+            raise FsError(f"{self.shown_rel}: {blocked_text(self.reg.repo, self.rel, blocked)}")
+        return self.reg.repo.top / self.rel
+
+    def selects(self, below):
+        """Is the upstream file below (relative to the upstream directory)
+        one of the entry's, by its patterns? (like add DIR, see glob_regex)"""
+        if not hasattr(self, "_rx"):
+            self._rx = ([glob_regex(p) for p in self.include],
+                        [glob_regex(p) for p in self.exclude])
+        inc, exc = self._rx
+        return (not inc or any(r.match(below) for r in inc)) and \
+            not any(r.match(below) for r in exc)
+
+    def member(self, below, blob=""):
+        return Member(self, below, blob)
+
+
+class Member(Link):
+    """A file of a [dir] entry, as a link of its own: what evaluate(), pull,
+    diff and restore do with a linked file applies to it. Its base (blob)
+    comes from the entry's upstream tree; without one (blob ''), it is new
+    to the entry - like a new link, its first sync compares it with
+    upstream (see first_sync)."""
+
+    def __init__(self, dlink, below, blob):
+        super().__init__(dlink.reg, join_rel(dlink.rel, below))
+        self.dlink, self.below, self._blob = dlink, below, blob
+
+    @property
+    def v(self):
+        d = self.dlink
+        return {"source": d.name, "path": up_join(d.path, self.below), "commit": d.commit,
+                "blob": self._blob, "tag": d.tag, "adaptable": d.v.get("adaptable", "")}
+
+    @property
+    def unsynced(self):
+        return not self._blob
+
+    def set(self, name, value):
+        pass                      # the [dir] entry records the base
+
+
+def select_links(repo, reg, paths, whole=False):
+    """Entries for the given files/directories (all entries if none given).
+    A file of a [dir] entry (or a directory in it) selects that entry, its
+    `only` naming which of its files; whole: for commands that change the
+    entry (pull, set, rm, unlink), which take whole entries only."""
     if not paths:
         return reg.links()
-    result = []
+    found = {}
     for s in paths:
         rel = repo.rel(repo.user_path(s))
-        if rel in reg.files:
-            result.append(Link(reg, rel))
+        lk = reg.entry(rel)
+        if lk:
+            found[rel] = lk
+            lk.only = None
+            continue
+        inside = [d for d in reg.dirs if is_below(rel, d)]
+        if inside:
+            d = inside[0]
+            if whole:
+                raise FsError(f"'{rel}' is in the linked directory '{shown(repo, d)}/' - "
+                              f"give '{shown(repo, d)}' (the whole entry)")
+            if d not in found:
+                found[d] = DirLink(reg, d)
+                found[d].only = []
+            if found[d].only is not None:
+                found[d].only.append(rel)
             continue
         under = [lk for lk in reg.links() if rel == "." or lk.rel.startswith(rel + "/")]
         if not under:
             raise FsError(f"'{rel}' is not linked (use 'git filesync add' to link it)")
-        result += under
-    seen, unique = set(), []
-    for lk in result:
-        if lk.rel not in seen:
-            seen.add(lk.rel)
-            unique.append(lk)
-    return unique
+        for lk in under:
+            found.setdefault(lk.rel, lk).only = None
+    return sorted(found.values(), key=lambda lk: lk.rel)
 
 
 # --------------------------------------------------------------------------
@@ -2360,6 +2578,9 @@ class FileState:
     violation: bool = False   # modified, but not adaptable
     once: Optional[str] = None  # pull --commit/-b/--tag: what is synced to, once
     target: Optional[str] = None    # ... and its revision
+    members: list = field(default_factory=list)   # a [dir]: FileStates of its files, at
+                                                  # the base and new upstream (DirState)
+    base_members = property(lambda self: [m for m in self.members if not m.unsynced])
 
     @property
     def missing(self):
@@ -2389,13 +2610,31 @@ def commits_behind(st):
     return st.src.count(*st.behind_args) if st.behind_args else 0
 
 
+def dir_links(ctx, dlink):
+    """Member links of a [dir] entry for prefetch(): the files at its base
+    and the new ones upstream; none if its source or base isn't there."""
+    try:
+        src = ctx.source(dlink.url, dlink.ref, dlink.name, dlink.line)
+        tip = src.resolve()
+        base = {} if dlink.unsynced else dir_base(src, dlink) or {}
+        _, files = src.files_at(tip, dlink.path) if tip else (None, None)
+        news = [b for b in files or {} if b not in base and dlink.selects(b)]
+    except FsError:
+        return []
+    return [dlink.member(b, o) for b, o in base.items()] + [dlink.member(b) for b in news]
+
+
 def prefetch(ctx, repo, links, new_links=False):
     """Ask git about many links at once - one command per repository and per
     source instead of several per file, which adds up (starting a process
     is slow on Windows). Only fills caches: evaluate() asks for whatever is
     missing, and reports the errors. new_links (pull): also what the first
-    sync of new links compares their files with (see first_sync)."""
-    links = [lk for lk in links if not (path_problem(lk.rel) or in_the_way(repo.top, lk.rel))]
+    sync of new links compares their files with (see first_sync). A [dir]
+    entry counts with its files (members): those at its base and the new
+    ones upstream."""
+    links = [m for lk in links for m in ([lk] + dir_links(ctx, lk) if lk.is_dir else [lk])]
+    links = [lk for lk in links if lk.is_dir or not (
+        path_problem(lk.rel) or in_the_way(repo.top, lk.rel))]
     repo.prefetch(lk.rel for lk in links)
     groups = {}
     for lk in links:
@@ -2445,6 +2684,68 @@ def prefetch(ctx, repo, links, new_links=False):
         repo.as_local_many(items)
 
 
+def source_problem(link):
+    """Why the entry link has no usable source, None if it has one."""
+    if link.source.get("tag"):
+        return (f'tag in [source "{link.name}"] is no longer supported: pin the files '
+                f"themselves ('tag' in each entry, with 'git filesync edit'), and give "
+                "the source its branch")
+    if not (link.url and link.ref and link.v.get("path")):
+        return f"incomplete entry in {REGISTRY} (needs a source with url and branch, and path)"
+    return None
+
+
+def overlap_text(repo, link, others):
+    """The error for an entry that overlaps with others (see Registry.overlapping)."""
+    return (f"overlaps with the entry for {and_list(others)} - entries must not overlap; "
+            f"remove one with 'git filesync unlink {path_arg(repo, link.rel)}'")
+
+
+def base_matcher(repo, src, link, st):
+    """matches_base() for the base of link; a base that can't be read
+    counts as different, with a warning in st."""
+    def base_matches(oid, read):
+        try:
+            return matches_base(repo, src, link.rel, link.blob, link.path, oid, read)
+        except BaseUnavailable as e:
+            if str(e) not in st.warnings:
+                st.warnings.append(str(e))
+            return False
+    return base_matches
+
+
+def local_state(repo, st, link, base_matches):
+    """The committed, worktree and local respects of a linked file (see
+    evaluate); raises FsError if something is in the way of it."""
+    blocked = in_the_way(repo.top, link.rel)
+    if blocked:          # not 'missing': restore and pull would delete what is there
+        if isinstance(link, Member):      # the entry is what can be unlinked
+            raise FsError(f"{link.rel}: {blocked_text(repo, link.dlink.rel, blocked)}")
+        raise FsError(blocked_text(repo, link.rel, blocked))
+    exists = link.target.is_file()
+    head = st.head_blob = repo.head_blob(link.rel)
+    if head and not st.unsynced:      # a new link: no base to compare with
+        st.committed = "unmodified" if base_matches(
+            head, lambda: repo.read_blob(head)) else "adapted"
+    if not exists:
+        st.worktree = "deleted" if head else "missing"
+    elif not head:
+        st.worktree = "added"
+    elif repo.is_modified(link.rel):
+        st.worktree = "modified"
+    if not exists:
+        st.local = "missing"
+    elif st.unsynced:
+        pass                          # compared with upstream by its first sync
+    elif st.worktree == "clean":
+        st.local = "clean" if st.committed == "unmodified" else "modified"
+    elif base_matches(repo.worktree_blob(link.target), link.target.read_bytes):
+        st.local = "clean"
+    else:
+        st.local = "modified"
+    st.violation = not st.adaptable and (st.committed == "adapted" or st.local == "modified")
+
+
 def evaluate(ctx, repo, link):
     """State of a linked file in three independent respects:
     upstream  - synced upstream version vs. current one (changed/behind/
@@ -2455,7 +2756,10 @@ def evaluate(ctx, repo, link):
                 ('clean' | 'modified' | 'deleted' | 'added' | 'missing')
     local     - working file vs. synced upstream version ('clean' | 'modified'
                 | 'missing'); what a pull has to merge. A missing file (deleted
-                or not, committed or not) is never allowed (see missing)"""
+                or not, committed or not) is never allowed (see missing)
+    A [dir] entry: see evaluate_dir."""
+    if link.is_dir:
+        return evaluate_dir(ctx, repo, link)
     st = FileState(link=link, rel=link.rel, old=link.commit, old_blob=link.blob,
                    new_path=link.path, adaptable=link.adaptable, unsynced=link.unsynced)
     url, ref, path = link.url, link.ref, link.path
@@ -2464,58 +2768,24 @@ def evaluate(ctx, repo, link):
         st.error = (f"{problem} - entry ignored; remove it with "
                     f"'git config -f {REGISTRY} --remove-section \"file.{link.rel}\"'")
         return st
-    if link.source.get("tag"):
-        st.error = (f'tag in [source "{link.name}"] is no longer supported: pin the files '
-                    f"themselves ('tag' in each [file], with 'git filesync edit'), and give "
-                    "the source its branch")
+    others = link.reg.overlapping(link.rel, "file")
+    if others:
+        st.error = overlap_text(repo, link, others)
         return st
-    if not (url and ref and path):
-        st.error = (f"incomplete entry in {REGISTRY} (needs a source with url and branch, "
-                    "and path)")
+    problem = source_problem(link)
+    if problem:
+        st.error = problem
         return st
     try:
         src = st.src = ctx.source(url, ref, link.name, link.line)
     except FsError as e:
         st.error = str(e)
         return st
-
-    def base_matches(oid, read):
-        try:
-            return matches_base(repo, src, link.rel, link.blob, link.path, oid, read)
-        except BaseUnavailable as e:
-            if str(e) not in st.warnings:
-                st.warnings.append(str(e))
-            return False
-    blocked = in_the_way(repo.top, link.rel)
-    if blocked:          # not 'missing': restore and pull would delete what is there
-        st.error = blocked_text(repo, link.rel, blocked)
-        return st
     try:
-        exists = link.target.is_file()
-        head = st.head_blob = repo.head_blob(link.rel)
-        if head and not st.unsynced:      # a new link: no base to compare with
-            st.committed = "unmodified" if base_matches(
-                head, lambda: repo.read_blob(head)) else "adapted"
-        if not exists:
-            st.worktree = "deleted" if head else "missing"
-        elif not head:
-            st.worktree = "added"
-        elif repo.is_modified(link.rel):
-            st.worktree = "modified"
-        if not exists:
-            st.local = "missing"
-        elif st.unsynced:
-            pass                          # compared with upstream by its first sync
-        elif st.worktree == "clean":
-            st.local = "clean" if st.committed == "unmodified" else "modified"
-        elif base_matches(repo.worktree_blob(link.target), link.target.read_bytes):
-            st.local = "clean"
-        else:
-            st.local = "modified"
+        local_state(repo, st, link, base_matcher(repo, src, link, st))
     except FsError as e:
         st.error = str(e)
         return st
-    st.violation = not st.adaptable and (st.committed == "adapted" or st.local == "modified")
     where = f"{ref[0]} '{ref[1]}'"
     try:
         tip = src.tip()
@@ -2540,47 +2810,190 @@ def evaluate(ctx, repo, link):
             return st
         path = st.new_path = st.moved[1]
         st.new_blob = src.blob_at(tip, path)
-    if st.has_old and st.new_blob == st.old_blob and path == link.path:
-        st.new = st.old           # unchanged upstream: no history to look at
-    else:
-        st.new = src.last_change(tip, path)    # not the tip: what a pull records
+    track_history(repo, st, src, tip, link.path, path,
+                  st.has_old and st.new_blob == st.old_blob and path == link.path)
+    st.changed = st.new_blob != st.old_blob
+    st.pending = st.changed or bool(st.moved) or st.lost_old
+    checkout_warnings(st, src, ref, path, lambda: src.blob_at("HEAD", path) != st.new_blob)
+    return st
+
+
+def track_history(repo, st, src, tip, old_path, path, unchanged):
+    """The upstream commit a pull records (st.new) - the newest one up to
+    tip that changed path - and where it is relative to the synced one:
+    behind it, how many commits after it, diverged; or the synced commit
+    unknown upstream (lost_old). unchanged: the same version as synced, no
+    history to look at."""
+    st.new = st.old if unchanged else src.last_change(tip, path or ".")
     if st.has_old:
         if st.new == st.old:
             pass
         elif src.is_ancestor(st.new, st.old):
-            st.behind_args = (st.new, st.old, path)   # branch older than last sync
+            st.behind_args = (st.new, st.old, path or ".")   # branch older than last sync
         else:
-            st.count_args = (st.old, st.new, *dict.fromkeys((link.path, path)))
+            st.count_args = (st.old, st.new, *dict.fromkeys((old_path or ".", path or ".")))
             st.diverged = not src.is_ancestor(st.old, st.new)
     elif not st.unsynced:
         # the source may be behind, or upstream history was rewritten: not
         # guessed - pull --all leaves the file alone, pull FILE syncs it
         st.lost_old = True
-        pull = f"'git filesync pull {path_arg(repo, link.rel)}' syncs to its current version"
+        pull = f"'git filesync pull {path_arg(repo, st.rel)}' syncs to its current version"
         # a cache clone asks the server for a commit it lacks: not there
         why = ("if the checkout is behind, update it (or use --remote); otherwise "
                if src.local else "not on the server (history rewritten there, synced from "
                "an unpushed commit or another upstream): ")
         st.warnings.append(f"previous sync point {st.old[:12] or '-'} not found in "
                            f"{src.label} - {why}{pull}")
-    st.changed = st.new_blob != st.old_blob
-    st.pending = st.changed or bool(st.moved) or st.lost_old
-    if src.local:
-        if src.note:
-            st.warnings.append(src.note)
-        if not src.is_published(st.new):   # other unpushed commits don't matter
-            st.warnings.append(f"'{path}' in {src.label} comes from commit "
-                               f"{src.short(st.new)}, which is not pushed")
-        if ref[0] == "tag":
-            return st   # a pinned tag: whatever is checked out doesn't matter
-        if src.head_ref() != src.ref:
-            if src.blob_at("HEAD", path) != st.new_blob:
-                st.warnings.append(f"{src.label} has {src.head_desc()} checked out; "
-                                   f"'{path}' there differs from {where}, "
-                                   "which is what gets synced")
-        elif src.has_uncommitted(path):
-            st.warnings.append(f"uncommitted changes to '{path}' in {src.label} "
-                               "are not synced (commit them first)")
+
+
+def checkout_warnings(st, src, ref, path, head_differs):
+    """Warnings for a source that is a mapped checkout: the version to sync
+    not pushed, another branch checked out (head_differs(): with another
+    version of path), uncommitted changes to path."""
+    if not src.local:
+        return
+    what = path + "/" if st.link.is_dir else path
+    if src.note:
+        st.warnings.append(src.note)
+    if not src.is_published(st.new):   # other unpushed commits don't matter
+        st.warnings.append(f"'{what}' in {src.label} comes from commit "
+                           f"{src.short(st.new)}, which is not pushed")
+    if ref[0] == "tag":
+        return      # a pinned tag: whatever is checked out doesn't matter
+    if src.head_ref() != src.ref:
+        if head_differs():
+            st.warnings.append(f"{src.label} has {src.head_desc()} checked out; "
+                               f"'{what}' there differs from {ref[0]} '{ref[1]}', "
+                               "which is what gets synced")
+    elif src.has_uncommitted(path):
+        st.warnings.append(f"uncommitted changes to '{what}' in {src.label} "
+                           "are not synced (commit them first)")
+
+
+@dataclass
+class DirState(FileState):
+    """What evaluate_dir() finds out about a [dir] entry: a FileState for
+    the entry as a whole, from those of its files (members)."""
+    n: int = 0                # files at the base
+    no_base: bool = False     # the base tree isn't available: synced like a new link
+    new_tree: Optional[str] = None   # upstream tree a pull would sync to
+    tip: Optional[str] = None        # ... and the upstream revision it is at
+
+    # members by what a pull does with them
+    adds = property(lambda self: [m for m in self.members if m.unsynced and m.new_blob])
+    dels = property(lambda self: [m for m in self.members if not m.unsynced and not m.new_blob])
+    mods = property(lambda self: [m for m in self.members if not m.unsynced and m.new_blob
+                                  and m.new_blob != m.old_blob])
+
+
+def dir_base(src, dlink):
+    """{path below: blob id} of the files of a [dir] entry at its base: the
+    upstream tree's files its patterns select; None if the tree isn't
+    there (or the entry has none)."""
+    files = src.tree_files(dlink.tree) if dlink.tree else None
+    return None if files is None else {b: o for b, o in files.items() if dlink.selects(b)}
+
+
+def dir_members(repo, dlink, base, upstream):
+    """FileStates of the members of a [dir] entry: the files at its base
+    (base: {path below: blob id}) and the new ones in upstream ({path
+    below: blob id}, already selected by the patterns); FsError for one
+    that can't be a file here (e.g. .git-filesync)."""
+    sts = []
+    for below in sorted(set(base) | set(upstream)):
+        m = dlink.member(below, base.get(below, ""))
+        problem = path_problem(m.rel)
+        if problem:
+            raise FsError(f"{m.rel}: {problem} - leave it out with --exclude /{below} "
+                          f"('git filesync set --exclude ... {path_arg(repo, dlink.rel)}')")
+        sts.append(FileState(link=m, rel=m.rel, old=dlink.commit, old_blob=m.blob,
+                             new_path=m.path, adaptable=dlink.adaptable, unsynced=m.unsynced,
+                             new_blob=upstream.get(below)))
+    return sts
+
+
+def fill_members(repo, st, base, upstream):
+    """The members of a [dir] entry (see dir_members), each evaluated as a
+    linked file, and the entry's state from theirs: adapted if one is,
+    missing if one is, and so on. FsError if something is in the way of one."""
+    st.members = dir_members(repo, st.link, base, upstream)
+    for m in st.members:
+        m.src, m.has_old = st.src, st.has_old
+        local_state(repo, m, m.link, base_matcher(repo, st.src, m.link, m))
+    sts, st.n = st.base_members, len(base)
+    st.committed = "adapted" if any(m.committed == "adapted" for m in sts) else \
+        "unmodified" if any(m.committed for m in sts) else None
+    st.local = "missing" if any(m.local == "missing" for m in sts) else \
+        "modified" if any(m.local == "modified" for m in sts) else "clean"
+    st.worktree = "added" if sts and all(m.worktree == "added" for m in sts) else \
+        "modified" if any(m.worktree in ("modified", "added") for m in sts) else "clean"
+    st.violation = any(m.violation for m in sts)
+
+
+def evaluate_dir(ctx, repo, dlink):
+    """State of a [dir] entry, in the respects of evaluate() - each of its
+    files evaluated as a linked file (see Member), summed up: adapted if one
+    is, missing if one is (never allowed, as for a file), and so on.
+    Upstream: the files the entry would have after a pull - those of the
+    upstream directory its patterns select - against those at its base."""
+    st = DirState(link=dlink, rel=dlink.rel, old=dlink.commit, old_blob=dlink.tree,
+                  new_path=dlink.path, adaptable=dlink.adaptable, unsynced=dlink.unsynced)
+    try:
+        dlink.target
+        dlink.selects("")         # the patterns can be read
+    except FsError as e:
+        st.error = str(e)
+        return st
+    others = dlink.reg.overlapping(dlink.rel, "dir")
+    problem = overlap_text(repo, dlink, others) if others else source_problem(dlink)
+    if problem:
+        st.error = problem
+        return st
+    ref, path = dlink.ref, dlink.path
+    try:
+        src = st.src = ctx.source(dlink.url, ref, dlink.name, dlink.line)
+        tip = src.tip()
+    except FsError as e:
+        st.error = str(e)
+        return st
+    if ref[0] == "tag" and not src.tag_names:      # a pattern: no hints at other tags
+        st.newest, problem = src.tag_info(ref[1], dlink.line, ctx.want_tags)
+        if problem:
+            st.warnings.append(f"{problem} (where newer tags are looked for)")
+    st.has_old = bool(st.old) and src.resolve(st.old) == st.old
+    base = {} if st.unsynced else dir_base(src, dlink)
+    if base is None:
+        st.no_base, base = True, {}
+        st.warnings.append(f"synced tree {dlink.tree[:12]} not found in {src.label}: the "
+                           "files of the entry are unknown - 'git filesync pull "
+                           f"{path_arg(repo, dlink.rel)}' syncs it as a new link")
+    st.tip = tip
+    st.new_tree, files = src.files_at(tip, path)
+    upstream = {b: o for b, o in (files or {}).items() if dlink.selects(b)}
+    try:
+        fill_members(repo, st, base, upstream)
+    except FsError as e:
+        st.error = str(e)
+        return st
+    if not st.new_tree:           # gone upstream: deleted (not followed if renamed)
+        gone = st.has_old and out(src.git(["rev-list", "-1", f"{st.old}..{tip}", "--",
+                                           lit(path)], check=False))
+        if not gone:
+            st.error = (f"'{path}/' does not exist in {ref[0]} '{ref[1]}' of {src.label} "
+                        f"(renamed upstream? fix the path in {REGISTRY})")
+            return st
+        st.new = gone
+        for m in st.members:
+            m.new = gone
+        st.moved, st.pending = ("deleted", path + "/", gone), True
+        return st
+    st.changed = st.no_base or upstream != base
+    track_history(repo, st, src, tip, path, path, st.has_old and not st.changed)
+    for m in st.members:
+        m.new = st.new
+        m.changed = m.new_blob != m.old_blob
+    st.pending = st.changed or st.lost_old
+    checkout_warnings(st, src, ref, path, lambda: src.tree_at("HEAD", path) != st.new_tree)
     return st
 
 
@@ -2603,15 +3016,36 @@ def upstream_state(st, note=True):
             what = "upstream branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
             return "older", f"{what} is {plural(behind, 'commit')} older than last sync"
         if st.has_old and not st.diverged:
-            return "pending", plural(commits_since(st), "commit") if note else None
+            return "pending", plural(commits_since(st), "commit") + files_note(st) \
+                if note else None
         return "changed", "history diverged" if st.has_old else "previous sync point unknown"
     return None
+
+
+def files_note(st):
+    """'; files: 2 new, 1 deleted' - what a pull of a [dir] entry brings."""
+    if not st.link.is_dir:
+        return ""
+    what = [f"{len(ms)} {kind}" for ms, kind in ((st.adds, "new"), (st.dels, "deleted"),
+                                                 (st.mods, "changed")) if ms]
+    return f"; files: {', '.join(what)}" if what else ""
+
+
+def of_files(st, members):
+    """'2 of 40 files' - the members of a [dir] entry concerned."""
+    return f"{len(members)} of {plural(st.n, 'file')}"
 
 
 def violation_text(st):
     what = (["adapted"] if st.committed == "adapted" else []) + \
         (["uncommitted changes"] if st.worktree != "clean" and st.local == "modified" else [])
-    return f"{', '.join(what) or 'local modifications'} NOT ALLOWED (not adaptable)"
+    where = f" in {of_files(st, [m for m in st.base_members if m.violation])}" \
+        if st.link.is_dir else ""
+    return f"{', '.join(what) or 'local modifications'}{where} NOT ALLOWED (not adaptable)"
+
+
+def missing_members(st):
+    return [m for m in st.base_members if m.local == "missing"]
 
 
 def describe(st):
@@ -2626,7 +3060,8 @@ def describe(st):
     if st.violation:
         parts.append((violation_text(st), "boldred"))
     if st.missing:
-        parts.append(("MISSING (still linked)", "boldred"))
+        parts.append(((f"{of_files(st, missing_members(st))} " if st.link.is_dir else "")
+                      + "MISSING (still linked)", "boldred"))
     return parts or [("up to date", "green")]
 
 
@@ -2665,6 +3100,12 @@ def shown(repo, rel):
     return shown_path(repo, repo.top / rel)
 
 
+def shown_entry(repo, link):
+    """An entry as shown: its path (see shown), a [dir] with a trailing '/'."""
+    name = shown(repo, link.rel)
+    return name.rstrip("/") + "/" if link.is_dir else name
+
+
 def path_arg(repo, rel):
     """A path of this repository as argument in a command shown to the user."""
     return cmd_arg(shown(repo, rel))
@@ -2678,7 +3119,7 @@ def print_short(repo, sts):
             if code[0] == "E":
                 line = paint(code, "boldred")
             note = "  (missing!)" if st.missing else "  (not adaptable!)" if st.violation else ""
-            print(f"{line} {shown(repo, st.rel)}" + paint(note, "boldred"))
+            print(f"{line} {shown_entry(repo, st.link)}" + paint(note, "boldred"))
 
 
 def link_text(st):
@@ -2687,12 +3128,16 @@ def link_text(st):
     adaptable = ", adaptable" if st.adaptable else ""
     newest = f", newest {newest_text(st.newest, st.link.line)}" if st.newest else ""
     names = st.src.tag_names if st.src else None
-    return (f"from {st.link.name}:{st.link.path} "
-            f"({ref_text(st.link.ref, st.link.line, names)}{newest}{adaptable}){via}")
+    path, files = st.link.path, ""
+    if st.link.is_dir:
+        path, files = up_join(path, ""), ("" if st.unsynced else f", {plural(st.n, 'file')}")
+    return (f"from {st.link.name}:{path or '/'} "
+            f"({ref_text(st.link.ref, st.link.line, names)}{newest}{files}{adaptable}){via}")
 
 
 def print_long(repo, sts, verbose):
-    """Sections like `git status`."""
+    """Sections like `git status`; a [dir] entry in one line, with the
+    number of its files concerned in the note."""
     hints = out(repo.git(["config", "--type=bool", "advice.statusHints"], check=False)) != "false"
 
     def section(title, hint_lines, rows, style):
@@ -2702,14 +3147,20 @@ def print_long(repo, sts, verbose):
         if hints:
             for h in hint_lines:
                 print(f"  ({h})")
-        for label, rel, note, nstyle in rows:
-            line = paint(f"{label + ':':<12}{shown(repo, rel)}", style)
+        for label, st, note, nstyle in rows:
+            line = paint(f"{label + ':':<12}{shown_entry(repo, st.link)}", style)
             print(f"\t{line}" + (f"  {paint('(' + note + ')', nstyle)}" if note else ""))
         print()
 
+    def note(st, members, text=None, style="dim"):
+        """(note, style) of a row: for a [dir] the number of its files
+        concerned, then text."""
+        what = ([of_files(st, members)] if st.link.is_dir else []) + ([text] if text else [])
+        return (", ".join(what) or None, style if text else "dim")
+
     ok = [st for st in sts if not st.error]
     if verbose:
-        rows = [("new" if st.unsynced else st.committed or "uncommitted", st.rel,
+        rows = [("new" if st.unsynced else st.committed or "uncommitted", st,
                  link_text(st), "dim") for st in ok]
         section("Linked files:", [], rows, None)
 
@@ -2717,7 +3168,7 @@ def print_long(repo, sts, verbose):
     for st in ok:
         up = upstream_state(st)
         if up:
-            up_rows.append((up[0], st.rel, up[1], "dim"))
+            up_rows.append((up[0], st, up[1], "dim"))
     section("Upstream changes to sync:",
             ['use "git filesync diff --upstream <file>..." to see what pull would bring',
              'use "git filesync pull <file>..." to sync']
@@ -2725,14 +3176,15 @@ def print_long(repo, sts, verbose):
                if any(r[0] == "deleted" for r in up_rows) else []),
             up_rows, "yellow")
 
-    not_allowed = ("NOT ALLOWED: not adaptable", "boldred")
+    not_allowed = "NOT ALLOWED: not adaptable"
     adapted = [st for st in ok if st.committed == "adapted"]
     section("Locally adapted files:",
             ['use "git filesync diff --committed <file>..." to see the adaptations']
             + (['use "git filesync restore -SW <file>..." to discard them, or '
                 '"git filesync set --adaptable <file>..." to allow them']
                if any(not st.adaptable for st in adapted) else []),
-            [("adapted", st.rel) + ((None, None) if st.adaptable else not_allowed)
+            [("adapted", st) + note(st, [m for m in st.members if m.committed == "adapted"],
+                                    None if st.adaptable else not_allowed, "boldred")
              for st in adapted],
             "cyan")
 
@@ -2740,7 +3192,8 @@ def print_long(repo, sts, verbose):
     section("Missing files:",
             ['use "git filesync restore <file>..." to bring them back (the synced version)',
              'use "git filesync unlink <file>..." to remove the links'],
-            [("missing", st.rel, "NOT ALLOWED: still linked", "boldred") for st in missing],
+            [("missing", st) + note(st, missing_members(st), "NOT ALLOWED: still linked",
+                                    "boldred") for st in missing],
             "red")
 
     labels = {"modified": "modified", "added": "new file"}
@@ -2748,11 +3201,13 @@ def print_long(repo, sts, verbose):
     section("Uncommitted changes:",
             ['use "git filesync diff <file>..." to see all local changes',
              'use "git restore <file>..." to discard uncommitted changes'],
-            [(labels[st.worktree], st.rel) +
-             (not_allowed if not st.adaptable and st.local == "modified" else (None, None))
+            [(labels[st.worktree], st) + note(
+                st, [m for m in st.base_members if m.worktree in labels],
+                not_allowed if not st.adaptable and st.local == "modified" else None, "boldred")
              for st in dirty], "red")
 
-    warnings = [(st.rel, w) for st in ok for w in st.warnings]
+    warnings = [(st.rel, w) for st in ok for w in st.warnings] + \
+        [(m.rel, w) for st in ok if st.link.is_dir for m in st.members for w in m.warnings]
     if warnings:
         print("Warnings:")
         for rel, w in warnings:
@@ -2760,7 +3215,7 @@ def print_long(repo, sts, verbose):
         print()
 
     if not up_rows and len(ok) == len(sts):
-        n = len(sts)
+        n = sum(st.n if st.link.is_dir else 1 for st in sts)
         files = plural(n, "linked file")
         print("nothing to sync" + ("" if adapted or dirty or missing else
                                    f", {'all ' if n > 1 else ''}{files} unmodified"))
@@ -2781,6 +3236,7 @@ def cmd_status(ctx, repo, args):
         return EXIT_OK
     prefetch(ctx, repo, links)
     sts = [evaluate(ctx, repo, link) for link in links]
+    check_only(sts)
     attention = [st for st in sts if st.attention]
     rc = EXIT_ERROR if any(st.error for st in sts) else \
         EXIT_PENDING if args.exit_code and attention else EXIT_OK
@@ -2825,29 +3281,35 @@ def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, dis
              upstream_line(src, link.url, link.ref, path)]
     if path != old_path:
         lines += ["", f"Renamed upstream: {old_path} -> {path}"]
-    if new == st.old:
-        pass
-    elif st.has_old:
-        old = st.old
-        if src.is_ancestor(new, old) and new != old:
-            log = src.log(f"{new}..{old}", *paths)
-            if log:
-                lines += ["", f"Reverts upstream changes after {src.dated(new)}:", log]
-        else:
-            if not src.is_ancestor(old, new):
-                lines += ["", f"Note: {src.dated(new)} is not a descendant of the "
-                          f"previous sync point {src.dated(old)}."]
-            log = src.log(f"{old}..{new}", *paths)
-            if log:
-                lines += ["", f"Upstream changes since {src.dated(old)}:", log]
-    else:
-        lines += ["", "Previous sync point unknown; change list not available."]
+    lines += history_lines(st, src, new, paths)
     if merged:
         lines += ["", "Merged with local modifications of this repository"
                   + (" (conflicts resolved manually)." if conflicts else ".")]
     if discarded:
         lines += ["", "Local modifications of this repository were discarded."]
     return "\n".join(lines) + "\n"
+
+
+def history_lines(st, src, new, paths):
+    """The upstream commits on paths a sync to new brings (or reverts), for
+    its proposed commit message."""
+    if new == st.old:
+        return []
+    if not st.has_old:
+        return ["", "Previous sync point unknown; change list not available."]
+    old, lines = st.old, []
+    if src.is_ancestor(new, old):
+        log = src.log(f"{new}..{old}", *paths)
+        if log:
+            lines += ["", f"Reverts upstream changes after {src.dated(new)}:", log]
+    else:
+        if not src.is_ancestor(old, new):
+            lines += ["", f"Note: {src.dated(new)} is not a descendant of the "
+                      f"previous sync point {src.dated(old)}."]
+        log = src.log(f"{old}..{new}", *paths)
+        if log:
+            lines += ["", f"Upstream changes since {src.dated(old)}:", log]
+    return lines
 
 
 def propose_message(repo, msg):
@@ -2970,26 +3432,8 @@ def pull_one(repo, reg, st, args):
     for w in st.warnings:
         warn(f"{st.rel}: {w}")
 
-    # all versions in this repo's normalized form, so that differing eol
-    # conventions (and LFS) upstream and here don't matter
-    theirs = repo.normalize(src.read_content(new_blob, path), st.rel)
-    merged, conflicts = False, 0
-    if local_mod and not discard:
-        try:
-            base = repo.normalize(src.read_content(st.old_blob, link.path), st.rel)
-        except FsError:
-            raise FsError(f"{st.rel}: base version {st.old_blob[:12]} unavailable; "
-                          "cannot merge local modifications - 'git filesync pull --overwrite "
-                          f"{path_arg(repo, st.rel)}' takes the upstream version, discarding "
-                          "them")
-        ours = repo.read_content(st.head_blob, st.rel)   # no uncommitted changes here
-        old_label = synced_label(st)
-        conflicts, content = merge3(ours, base, theirs,
-                                    [f"{st.rel} (local)", f"upstream {old_label}",
-                                     f"upstream {src.short(new)}"])
-        merged = True
-    else:
-        content = theirs
+    content, merged, conflicts = sync_content(repo, st, new, new_blob, path,
+                                              local_mod and not discard)
 
     if args.dry_run:
         notes = ([f"{st.once} once"] if st.once else []) + \
@@ -3019,6 +3463,32 @@ def pull_one(repo, reg, st, args):
     # the file itself is written (and staged) with the others: write_synced
     return build_message(st, src, new, new_blob, old_path, path, merged, conflicts,
                          discard), conflicts, content
+
+
+def sync_content(repo, st, new, new_blob, path, merge, rel=None, old_path=None):
+    """Content of a linked file synced to upstream version new_blob (at
+    path, commit new), in this repository's stored form: upstream's, or
+    merged with the local adaptations (merge). Returns (content, merged,
+    conflicts). rel, old_path: the file and its upstream path if renamed
+    (a [dir] entry's file renamed upstream: it moves along)."""
+    src, rel = st.src, rel or st.rel
+    # all versions in this repo's normalized form, so that differing eol
+    # conventions (and LFS) upstream and here don't matter
+    theirs = repo.normalize(src.read_content(new_blob, path), rel)
+    if not merge:
+        return theirs, False, 0
+    try:
+        base = repo.normalize(src.read_content(st.old_blob, old_path or st.link.path), rel)
+    except FsError:
+        raise FsError(f"{st.rel}: base version {st.old_blob[:12]} unavailable; "
+                      "cannot merge local modifications - 'git filesync pull --overwrite "
+                      f"{path_arg(repo, st.rel)}' takes the upstream version, discarding "
+                      "them")
+    ours = repo.read_content(st.head_blob, st.rel)   # no uncommitted changes here
+    conflicts, content = merge3(ours, base, theirs,
+                                [f"{rel} (local)", f"upstream {synced_label(st)}",
+                                 f"upstream {src.short(new)}"])
+    return content, True, conflicts
 
 
 def first_sync(repo, st, args, new, path):
@@ -3058,14 +3528,282 @@ def first_sync(repo, st, args, new, path):
                              st.adaptable, commit), 0, content
 
 
-def pull_message(parts, names):
-    """The commit message of a pull: a file's own message, or for several
-    files a subject over all and each file's message as a section of it."""
+def few(repo, sts, n=3):
+    """'a.c, b.c and 2 more' - files named in a message."""
+    names = [shown(repo, st.rel) for st in sts]
+    return and_list(names) if len(names) <= n else \
+        ", ".join(names[:n]) + f" and {len(names) - n} more"
+
+
+def plan_dir_sync(repo, src, dlink, rev, overwrite):
+    """The first sync of a [dir] entry to upstream revision rev, as add
+    does it: (commit, tree, [Planned]) - every file of the upstream
+    directory the patterns select; a file already here is compared with it
+    (see compare_existing). The commit is the last that changed the
+    directory, the tree its upstream tree there."""
+    path = dlink.path
+    tree, files = src.files_at(rev, path)
+    if not tree:
+        raise FsError(f"no directory '{path or '/'}' in {src.label} at {src.short(rev)}")
+    upstream = {b: o for b, o in files.items() if dlink.selects(b)}
+    commit = src.last_change(rev, path or ".")
+    sts = dir_members(repo, dlink, {}, upstream)
+    for m in sts:
+        blocked = in_the_way(repo.top, m.rel)
+        if blocked:
+            raise FsError(f"{m.rel}: {blocked}")
+    rels = [m.rel for m in sts]
+    here = {r for r in rels if (repo.top / r).is_file()}
+    repo.check_plain(here)
+    repo.worktree_blobs(here)               # compared at once, not with a git each
+    src.check_plain(m.new_blob for m in sts if m.rel in here)
+    src.read_blobs(m.new_blob for m in sts if overwrite or m.rel not in here)
+    plan = [Planned(m.rel, m.new_path, commit, m.new_blob, *compare_existing(
+        repo, src, m.rel, m.new_path, m.new_blob, repo.top / m.rel, overwrite)) for m in sts]
+    return commit, tree, plan
+
+
+def plan_note(plan):
+    """'3 files: 2 fetched, 1 existing' - what the first sync of a [dir] does."""
+    counts = [(sum(1 for p in plan if p.content is not None and not p.replaced), "fetched"),
+              (sum(1 for p in plan if p.content is None and not p.modified), "existing"),
+              (sum(1 for p in plan if p.modified), "existing with local modifications"),
+              (sum(1 for p in plan if p.replaced), "replaced")]
+    what = ", ".join(f"{n} {w}" for n, w in counts if n)
+    return plural(len(plan), "file") + (f": {what}" if what else "")
+
+
+def first_sync_dir(repo, st, args):
+    """pull of a new [dir] entry (no base yet, or the base unavailable)
+    does what add does (see plan_dir_sync): an existing file that differs
+    is refused unless the entry is adaptable (its differences become
+    adaptations) or --overwrite. Returns as pull_dir."""
+    dlink, src = st.link, st.src
+    name = dlink.shown_rel
+    commit, tree, plan = plan_dir_sync(repo, src, dlink, st.target if st.once else st.tip,
+                                       args.overwrite)
+    modified = [p for p in plan if p.modified]
+    if modified and not st.adaptable:
+        arg = path_arg(repo, dlink.rel)
+        raise FsError(f"{name}: not synced yet, and {few(repo, modified)} "
+                      f"differ{'s' if len(modified) == 1 else ''} from upstream "
+                      f"{src.short(commit)} - use 'git filesync pull --overwrite {arg}' to take "
+                      f"the upstream versions, or 'git filesync set --adaptable {arg}' to keep "
+                      "them (the differences become local adaptations)")
+    for w in st.warnings:
+        warn(f"{st.rel}: {w}")
+    note = plan_note(plan)
+    if args.dry_run:
+        once = f"; {st.once} once" if st.once else ""
+        print(f"{name}: would sync to {dlink.name}@{src.short(commit)} "
+              f"(not synced yet; {note}{once})")
+        return None
+    # kept by the caller, for all files at once (see save_discarded)
+    st.discards = ([p.rel for p in plan if p.replaced],
+                   [p.rel for p in plan] if args.overwrite else [])
+    dlink.set("commit", commit)
+    dlink.set("tree", tree)
+    print(f"{name}: {paint('synced', 'green')} (first sync; {note})")
+    msg = build_add_message(plan, src, dlink.name, dlink.url, dlink.ref, dlink.path, False,
+                            st.adaptable, commit, entry=name)
+    contents = {p.rel: None if p.content is None else repo.normalize(p.content, p.rel)
+                for p in plan}
+    return msg, [], contents, []
+
+
+def retarget_dir(repo, st, rev):
+    """pull --commit / -b / --tag of a [dir] entry: the upstream directory
+    at revision rev instead of the head of its branch (or its tag)."""
+    dlink, src = st.link, st.src
+    new = src.require(rev)
+    tree, files = src.files_at(new, dlink.path)
+    if not tree:
+        raise FsError(f"no directory '{dlink.path or '/'}' at {rev}")
+    st.tip, st.new_tree, st.moved = new, tree, None
+    base = {m.link.below: m.old_blob for m in st.base_members}
+    upstream = {b: o for b, o in files.items() if dlink.selects(b)}
+    fill_members(repo, st, base, upstream)
+    st.changed = st.no_base or upstream != base
+    st.new = src.last_change(new, dlink.path or ".")
+    for m in st.members:
+        m.new = st.new
+
+
+def pull_dir(repo, reg, st, args):
+    """Sync a [dir] entry - all its files or none: changed ones as pull_one
+    does it (adaptations merged), new upstream ones fetched, those deleted
+    upstream deleted here; files of this repository below it stay. Returns
+    (its part of the commit message, files with merge conflicts, {rel:
+    content}, files to delete), or None if there is nothing to do (or only
+    a dry run)."""
+    dlink, src = st.link, st.src
+    name, arg = dlink.shown_rel, path_arg(repo, dlink.rel)
+    if st.once:
+        retarget_dir(repo, st, st.target)
+    elif st.moved:
+        raise FsError(f"{name}: '{st.moved[1]}' was deleted in {src.label} "
+                      f"({src.short(st.moved[2])}) - keep the files with "
+                      f"'git filesync unlink {arg}', or delete them too with "
+                      f"'git filesync rm {arg}'")
+    if st.unsynced or st.no_base:
+        return first_sync_dir(repo, st, args)
+    # a missing file is never allowed - unless upstream deleted it too
+    missing = [m for m in missing_members(st) if m.new_blob]
+    if missing:
+        raise FsError(f"{name}: {of_files(st, missing_members(st))} missing "
+                      f"({few(repo, missing)}) - bring them back with "
+                      "'git filesync restore <file>...', or remove the link with "
+                      f"'git filesync unlink {arg}'")
+    local_mod = [m for m in st.base_members if m.local == "modified"]
+    if not st.adaptable and local_mod and not args.overwrite:
+        # uncommitted changes: pull refuses them anyway (see below)
+        ways = (f", or sync anyway with 'git filesync pull --overwrite {arg}'; or allow "
+                f"them with 'git filesync set --adaptable {arg}'" if st.worktree == "clean"
+                else ", or only the uncommitted ones with 'git restore <file>...'")
+        raise FsError(f"{name}: {violation_text(st)} - inspect with "
+                      f"'git filesync diff {arg}'; discard them with "
+                      f"'git filesync restore -SW {arg}'{ways}")
+    back = [m for m in local_mod if args.overwrite and m.new_blob == m.old_blob]
+    dels = [m for m in st.dels if m.local != "missing"]
+    if not (st.mods or dels or st.adds or back) and st.new == st.old:
+        print(f"{name}: {paint('up to date', 'green')}"
+              + (" (adaptations kept)" if st.committed == "adapted" else ""))
+        return None
+    # like `git pull`: uncommitted changes are never merged into a sync
+    dirty = [m for m in st.mods + dels + back if m.worktree in ("modified", "added")]
+    if dirty:
+        raise FsError(f"your local changes to {few(repo, dirty)} would be overwritten by "
+                      "pull - commit or stash them first ('git stash'; 'git restore "
+                      "<file>...' discards them)")
+    for w in st.warnings:
+        warn(f"{st.rel}: {w}")
+    for m in st.members:
+        for w in m.warnings:
+            warn(f"{m.rel}: {w}")
+
+    contents, notes, refused = {}, {}, []     # notes: rel -> what happened
+    conflicted, discarded = [], []
+    # deleted here and upstream: the deletion staged too, if it isn't yet
+    deletes = [m.rel for m in st.dels if m.local == "missing"]
+    notes.update((r, "deleted upstream, gone here already") for r in deletes)
+    adds = {m.link.below: m for m in st.adds}
+    for m in dels:
+        if m.local == "modified" and not args.overwrite:
+            # adapted, and renamed upstream within the directory: the
+            # adaptations move along, as for a linked file
+            moved = src.follow(st.old, st.tip, m.link.path) if st.has_old else None
+            to = moved and moved[0] == "renamed" and next(
+                (a for a in adds.values() if a.link.path == moved[1] and a.local == "missing"),
+                None)
+            if to:
+                del adds[to.link.below]
+                contents[to.rel], _, n = sync_content(repo, m, st.new, to.new_blob, to.new_path,
+                                                      True, rel=to.rel)
+                deletes.append(m.rel)
+                notes[to.rel] = f"renamed upstream from {m.rel}, adaptations merged"
+                if n:
+                    conflicted.append(to.rel)
+            elif args.force:
+                notes[m.rel] = "deleted upstream, kept as a file of this repository"
+            else:
+                refused.append((m, "deleted upstream, but adapted here"))
+            continue
+        deletes.append(m.rel)
+        notes[m.rel] = "deleted upstream" + (", local adaptations discarded"
+                                             if m.local == "modified" else "")
+    for m in adds.values():
+        if m.local == "missing":
+            contents[m.rel] = sync_content(repo, m, st.new, m.new_blob, m.new_path, False)[0]
+            notes[m.rel] = "new upstream"
+            continue
+        content, modified, replaced = compare_existing(
+            repo, src, m.rel, m.new_path, m.new_blob, repo.top / m.rel, args.overwrite)
+        if modified and not (args.force and st.adaptable):
+            refused.append((m, "new upstream, but another file is here"
+                            + ("" if st.adaptable else " (not adaptable: only --overwrite)")))
+            continue
+        contents[m.rel] = None if content is None else repo.normalize(content, m.rel)
+        notes[m.rel] = "new upstream, replacing the file here" if replaced else \
+            "new upstream, existing file kept, with local adaptations" if modified else \
+            "new upstream, existing file"
+        if replaced:
+            discarded.append(m.rel)
+    for m in st.mods + back:
+        mod = m.local == "modified"
+        discard = args.overwrite and mod
+        contents[m.rel], merged, n = sync_content(repo, m, st.new, m.new_blob, m.new_path,
+                                                  mod and not discard)
+        notes[m.rel] = (f"{n} merge conflict(s)" if n else "adaptations merged") if merged \
+            else "restored, local adaptations discarded" if m in back else \
+            "local adaptations discarded" if discard else "changed upstream"
+        if n:
+            conflicted.append(m.rel)
+    if refused:
+        raise FsError("".join(f"{m.rel}: {why}\n" for m, why in refused[:-1])
+                      + f"{refused[-1][0].rel}: {refused[-1][1]} - use 'git filesync pull "
+                      f"--overwrite {arg}' to take what upstream has, or --force to keep "
+                      "the files of this repository")
+    counts = [(sum(1 for v in notes.values() if v.startswith("new upstream")), "new"),
+              (sum(1 for v in notes.values() if v.startswith("deleted upstream")), "deleted"),
+              (sum(1 for v in notes.values() if not v.startswith(("new", "deleted"))),
+               "changed")]
+    summary = ", ".join(f"{n} {w}" for n, w in counts if n) or "no file changed"
+    merged = [r for r, v in notes.items() if "merge" in v]
+    if args.dry_run:
+        what = ([f"{st.once} once"] if st.once else []) + [summary] + \
+            ([paint(f"merge conflicts in {len(conflicted)}", "boldred") if conflicted else
+              "adaptations merged cleanly"] if merged else [])
+        print(f"{name}: would sync to {dlink.name}@{src.short(st.new)} ({'; '.join(what)})")
+        if conflicted:
+            print(f"hint: compare the adaptations ('git filesync diff {arg}') with the "
+                  f"upstream changes ('git filesync diff --upstream{target_opts(args)} {arg}')")
+        return None
+    # kept by the caller, for all files at once (see save_discarded)
+    st.discards = (discarded + deletes, discarded + deletes)
+    dlink.set("commit", st.new)
+    # the directory at that commit (upstream may have changed only files
+    # the patterns leave out since: the synced commit stays)
+    dlink.set("tree", src.tree_at(st.new, dlink.path) or st.new_tree)
+    if conflicted:
+        status = paint("merge conflicts in " + few(
+            repo, [m for m in st.members if m.rel in conflicted]), "boldred")
+    else:
+        status = paint("synced", "green")
+    print(f"{name}: {status} ({summary}"
+          + (", adaptations merged" if merged and not conflicted else "") + ")")
+    return build_dir_message(st, src, notes), conflicted, contents, deletes
+
+
+def build_dir_message(st, src, notes):
+    """The proposed commit message of a [dir] entry's sync: the upstream
+    commits that changed the directory, and its files that changed."""
+    dlink = st.link
+    lines = [f"{MSG_PREFIX}Sync {dlink.shown_rel} from {dlink.name}@{src.dated(st.new)}", "",
+             upstream_line(src, dlink.url, dlink.ref, up_join(dlink.path, "") or "/")]
+    lines += history_lines(st, src, st.new, [dlink.path or "."])
+    if notes:
+        lines += [""] + [f"- {rel} ({note})" for rel, note in sorted(notes.items())]
+    if any("conflict" in v for v in notes.values()):
+        lines += ["", "Merged with local modifications of this repository "
+                  "(conflicts resolved manually)."]
+    return "\n".join(lines) + "\n"
+
+
+def entries_text(rels):
+    """'2 files and 1 directory' - the entries rels ('src/' for a [dir])."""
+    dirs = sum(1 for r in rels if r.endswith("/"))
+    return and_list([plural(n, w) for n, w in ((len(rels) - dirs, "file"),
+                                                (dirs, "directory")) if n])
+
+
+def pull_message(parts, names, rels):
+    """The commit message of a pull: an entry's own message, or for several
+    a subject over all and each entry's message as a section of it."""
     if len(parts) == 1:
         return parts[0]
     sources = sorted(set(names))
     what = f"from {sources[0]}" if len(sources) == 1 else f"from {len(sources)} sources"
-    return f"{MSG_PREFIX}Sync {len(parts)} files {what}\n\n" + \
+    return f"{MSG_PREFIX}Sync {entries_text(rels)} {what}\n\n" + \
         "\n".join(m[len(MSG_PREFIX):] if m.startswith(MSG_PREFIX) else m for m in parts)
 
 
@@ -3098,9 +3836,9 @@ def report_pull(repo, reg, synced):
     commit message for all of them, which a plain `git commit` offers."""
     reg.finish()
     rels = [rel for rel, _, _, _ in synced]
-    msg = pull_message([m for _, _, m, _ in synced], [name for _, name, _, _ in synced])
-    name = rels[0] if len(rels) == 1 else plural(len(rels), "file")
-    conflicted = [rel for rel, _, _, c in synced if c]
+    msg = pull_message([m for _, _, m, _ in synced], [name for _, name, _, _ in synced], rels)
+    name = rels[0] if len(rels) == 1 else entries_text(rels)
+    conflicted = [r for _, _, _, c in synced for r in c]
     if conflicted:
         add = " ".join(path_arg(repo, r) for r in conflicted)
         print(f"{paint('merge conflicts', 'boldred')} - resolve them, then run:\n"
@@ -3116,7 +3854,7 @@ def cmd_pull(ctx, repo, args):
     if args.all:
         links = reg.links()
     elif args.files:
-        links = select_links(repo, reg, args.files)
+        links = select_links(repo, reg, args.files, whole=True)
     else:
         raise FsError("specify file(s) or --all")
     if args.all and args.files:
@@ -3125,26 +3863,28 @@ def cmd_pull(ctx, repo, args):
     rc, done, moved = EXIT_OK, 0, False
     once = args.commit or args.branch or args.tag   # another revision, branch or tag, once
     prefetch(ctx, repo, links, new_links=not once)
-    newest, synced = {}, []             # synced: (rel, source, message, conflicts)
+    newest, synced = {}, []             # synced: (rel, source, message, [conflicted])
     left_out = False                    # pull --all: not synced, but to be seen to
     contents = {}                       # rel -> synced content (normalized form)
-    selected = [lk.rel for lk in links]
+    deletes = []                        # files deleted with a [dir] entry's sync
     states = [evaluate(ctx, repo, link) for link in links]
     # what syncing needs, asked at once: upstream contents, short commit ids,
     # attributes of the files here
-    repo.check_plain(selected)
+    repo.check_plain([st.rel for st in states if not st.link.is_dir]
+                     + [m.rel for st in states if st.link.is_dir for m in st.members])
     items = []
     ok = [st for st in states if st.src and not st.error]
     # contents only of the files to sync (in the blobless cache, each one
     # may have to be fetched)
     sync = [st for st in ok if (st.pending or args.overwrite)
             and not (args.all and not once and st.lost_old)]
+    files = [m for st in sync for m in (st.members if st.link.is_dir else [st])]
     for src in {id(st.src): st.src for st in ok}.values():
-        src.read_blobs(b for st in sync if st.src is src for b in (st.old_blob, st.new_blob))
+        src.read_blobs(b for st in files if st.src is src for b in (st.old_blob, st.new_blob))
         src.shorts(c for st in ok if st.src is src for c in (st.old, st.new))
         src.dates(c for st in sync if st.src is src
                   for c in (st.old if st.has_old else None, st.new))
-    for st in sync:
+    for st in files:
         try:
             if st.new_blob and st.new_blob != st.old_blob:
                 items.append((st.src.read_content(st.new_blob, st.new_path), st.rel))
@@ -3177,10 +3917,17 @@ def cmd_pull(ctx, repo, args):
             if once:
                 st.target, st.once = target_rev(ctx, link, args), once_text(args)
             before = link.commit
-            result = pull_one(repo, reg, st, args)
+            if link.is_dir:
+                result = pull_dir(repo, reg, st, args)
+            else:
+                result = pull_one(repo, reg, st, args)
+                if result:
+                    msg, conflicts, content = result
+                    result = msg, [st.rel] if conflicts else [], {st.rel: content}, []
             if result:
-                synced.append((st.rel, link.name) + result[:2])
-                contents[st.rel] = result[2]
+                synced.append((link.shown_rel, link.name) + result[:2])
+                contents.update(result[2])
+                deletes += result[3]
             moved = moved or once and link.commit != before
         except FsError as e:   # report and carry on with the other files
             error(str(e) if str(e).startswith(st.rel) else f"{st.rel}: {e}")
@@ -3188,7 +3935,12 @@ def cmd_pull(ctx, repo, args):
     if synced:
         save_discarded(repo, [r for st in states for r in st.discards[0]],
                        [r for st in states for r in st.discards[1]])
-        write_synced(repo, contents, {rel for rel, _, _, c in synced if c})
+        for part in chunks(deletes):
+            repo.git(["rm", "-q", "-f", "--ignore-unmatch", "--"] + [lit(r) for r in part])
+        for r in deletes:
+            if (repo.top / r).is_file():       # never added to git
+                (repo.top / r).unlink()
+        write_synced(repo, contents, {r for _, _, _, c in synced for r in c})
         rc = max(rc, report_pull(repo, reg, synced))
     if moved and not args.dry_run and not args.commit:
         opt = f"--tag {args.tag}" if args.tag else f"-b {args.branch}"
@@ -3207,9 +3959,12 @@ def diff_pairs(ctx, repo, args):
     base = last synced upstream version (None: a new link, --upstream);
     other = local file (None if missing),
     or with --upstream the upstream version pull would sync to (with the same
-    --commit / -b / --tag). All as actual content in this repo's normalized
-    form (LFS resolved), so eol conventions and LFS pointers don't show up."""
-    if (args.commit or args.branch or args.tag) and not args.upstream:
+    --commit / -b / --tag; None: deleted there, for a [dir] entry's file).
+    All as actual content in this repo's normalized form (LFS resolved), so
+    eol conventions and LFS pointers don't show up. A [dir] entry: each of
+    its files (or those given), its own files left out."""
+    once = args.commit or args.branch or args.tag
+    if once and not args.upstream:
         raise FsError("--commit, -b and --tag require --upstream")
     rc = EXIT_OK
     pairs = []
@@ -3217,12 +3972,29 @@ def diff_pairs(ctx, repo, args):
     links = select_links(repo, reg, args.files)
     check_target_args(args)
     prefetch(ctx, repo, links)
-    repo.check_plain(lk.rel for lk in links)
-    states = [evaluate(ctx, repo, link) for link in links]
-    if args.upstream and not (args.commit or args.branch or args.tag):
+    states, files = [evaluate(ctx, repo, link) for link in links], []
+    check_only(states)
+    for link, st in zip(links, states):
+        if st.error:
+            report_error(st)
+            rc = EXIT_ERROR
+        elif not link.is_dir:
+            files.append(st)
+        else:
+            try:
+                if args.upstream and once:
+                    retarget_dir(repo, st, target_rev(ctx, link, args))
+            except FsError as e:
+                error(f"{st.rel}: {e}")
+                rc = EXIT_ERROR
+                continue
+            files += [m for m in st.members if link.only is None
+                      or any(is_below(m.rel, o) for o in link.only)]
+    repo.check_plain(st.rel for st in files)
+    if args.upstream and not once:
         items = []
-        for st in states:
-            if st.src and not st.error and st.new_blob and st.new_blob != st.old_blob:
+        for st in files:
+            if st.src and st.new_blob and st.new_blob != st.old_blob:
                 try:
                     items.append((st.src.read_content(st.new_blob, st.new_path), st.rel))
                 except FsError:
@@ -3231,16 +4003,13 @@ def diff_pairs(ctx, repo, args):
     worktree_ids = {}
     if not (args.upstream or args.committed):     # the working tree files, read at once
         worktree_ids = repo.worktree_blobs(
-            st.rel for st in states if not st.error and st.local not in ("clean", "missing")
+            st.rel for st in files if st.local not in ("clean", "missing")
             and not repo.plain_content(st.rel, st.link.target.read_bytes()))
         repo.read_blobs(worktree_ids.values())
-    for link, st in zip(links, states):
-        if st.error:
-            report_error(st)
-            rc = EXIT_ERROR
-            continue
+    for st in files:
+        link, member = st.link, isinstance(st.link, Member)
         if args.upstream:
-            if args.commit or args.branch or args.tag:
+            if once and not member:
                 try:
                     st.new, st.new_blob, st.new_path = commit_target(
                         st, target_rev(ctx, link, args))
@@ -3248,7 +4017,8 @@ def diff_pairs(ctx, repo, args):
                     error(f"{st.rel}: {e}")
                     rc = EXIT_ERROR
                     continue
-            if not st.new_blob or st.new_blob == st.old_blob:   # unchanged or deleted
+            # unchanged, or deleted upstream (shown for a [dir]'s file)
+            if st.new_blob == st.old_blob or not st.new_blob and not member:
                 continue
         elif st.unsynced:             # no base yet: no local changes against it
             continue
@@ -3266,7 +4036,8 @@ def diff_pairs(ctx, repo, args):
             except FsError:
                 raise FsError(f"synced version {st.old_blob[:12]} unavailable")
             if args.upstream:
-                other = repo.normalize(st.src.read_content(st.new_blob, st.new_path), st.rel)
+                other = repo.normalize(st.src.read_content(st.new_blob, st.new_path),
+                                       st.rel) if st.new_blob else None
             elif args.committed:
                 other = repo.read_content(st.head_blob, st.rel)
             elif st.local == "missing":
@@ -3448,10 +4219,16 @@ def find_base(repo, src, rev, rel, path, target, overwrite=False):
     blob = src.blob_at(rev, path)
     if not blob:
         raise FsError(f"no file '{path}' in {src.label} at {src.short(rev)}")
-    commit = src.last_change(rev, path)
+    return (src.last_change(rev, path), blob) + \
+        compare_existing(repo, src, rel, path, blob, target, overwrite)
+
+
+def compare_existing(repo, src, rel, path, blob, target, overwrite=False):
+    """A file to link to upstream version blob (at path): (content to write
+    or None, modified, replaced) - see find_base."""
     cur = repo.worktree_blob(target)
     if cur is None:
-        return commit, blob, src.read_content(blob, path), False, False
+        return src.read_content(blob, path), False, False
     try:
         modified = not matches_base(repo, src, rel, blob, path, cur, target.read_bytes)
     except BaseUnavailable:
@@ -3460,8 +4237,8 @@ def find_base(repo, src, rev, rel, path, target, overwrite=False):
                           "the existing file with it")
         modified = True
     if overwrite and modified:     # replaced only if it differs
-        return commit, blob, src.read_content(blob, path), False, True
-    return commit, blob, None, modified, False
+        return src.read_content(blob, path), False, True
+    return None, modified, False
 
 
 # a file to link: its path here, upstream path, base commit and blob, content to
@@ -3470,12 +4247,16 @@ def find_base(repo, src, rev, rel, path, target, overwrite=False):
 Planned = namedtuple("Planned", "rel path commit blob content modified replaced")
 
 
-def build_add_message(plan, src, name, url, ref, mpath, relink, adaptable, at):
+def build_add_message(plan, src, name, url, ref, mpath, relink, adaptable, at, entry=None):
     """Commit message for add; plan: [Planned]; at: the upstream revision a
-    directory was linked at."""
+    directory was linked at; entry: a [dir] entry ('src/') with all the
+    files of plan."""
     fetched = all(p.content is not None and not p.replaced for p in plan)
-    subject_ref = f"{name}@{src.dated(plan[0].commit)}"
-    if len(plan) == 1:
+    subject_ref = f"{name}@{src.dated(plan[0].commit if plan else at)}"
+    if entry:
+        path = mpath.rstrip("/") + "/" if mpath else "/"
+        what = f"Add {entry} from" if fetched else f"{'Relink' if relink else 'Link'} {entry} to"
+    elif len(plan) == 1:
         rel, path = plan[0].rel, plan[0].path
         what = f"Add {rel} from" if fetched else f"{'Relink' if relink else 'Link'} {rel} to"
     else:
@@ -3483,15 +4264,15 @@ def build_add_message(plan, src, name, url, ref, mpath, relink, adaptable, at):
         what = f"Add {len(plan)} files from" if fetched else f"Link {len(plan)} files to"
         subject_ref = f"{name}@{src.dated(at)}"
     lines = [f"{MSG_PREFIX}{what} {subject_ref}", "", upstream_line(src, url, ref, path)]
-    if len(plan) > 1:
+    if len(plan) > 1 or entry and plan:
         lines.append("")
         for p in plan:
             notes = (["replaced"] if p.replaced else [] if p.content is not None else
                      ["existing"]) + (["local modifications"] if p.modified else [])
             lines.append(f"- {p.rel}" + (f" ({', '.join(notes)})" if notes else ""))
-    if len(plan) == 1 and plan[0].modified:
+    if len(plan) == 1 and plan[0].modified and not entry:
         lines += ["", "Contains local modifications of this repository."]
-    if len(plan) == 1 and plan[0].replaced:
+    if len(plan) == 1 and plan[0].replaced and not entry:
         lines += ["", "The existing file was replaced by the upstream version."]
     if adaptable:
         lines += ["", "Adaptable: local adaptations allowed."]
@@ -3524,15 +4305,23 @@ def cmd_add(ctx, repo, args):
     if target.is_dir() or patterns or not upstream_file and src.is_dir(at or head, path):
         # like cp -r: DIR may be new, the directory it goes into must exist
         require_dir(repo, target if target.is_dir() else target.parent, rel)
+        if not args.per_file:
+            return add_dir(repo, reg, args, src, (url, branch, named), ref, line, at or head,
+                           rel, path, target)
         plan, relink = plan_dir(repo, reg, src, args, at or head, rel, path, target)
         if not plan:
             return EXIT_OK
     else:
+        if args.per_file:
+            raise FsError(f"--per-file: '{path}' in {src.label} is a file, not a directory")
         relink = rel in reg.files
         if relink and not args.force:
             raise FsError(f"'{rel}' is already linked (use --force to relink)")
         if target.is_dir():
             raise FsError(f"cannot link '{rel}': is a directory")
+        others = reg.overlapping(rel, "file")
+        if others:
+            raise FsError(f"cannot link '{rel}': it is in the linked directory {others[0]}")
         require_dir(repo, target.parent, rel)   # like cp
         plan = [Planned(rel, path, *find_base(repo, src, at or head, rel, path, target,
                                               args.overwrite))]
@@ -3595,6 +4384,78 @@ def cmd_add(ctx, repo, args):
     return EXIT_OK
 
 
+def add_dir(repo, reg, args, src, where, ref, line, at, rel, path, target):
+    """add DIR: one [dir] entry for the files of the upstream directory path
+    (at revision at) that --include / --exclude select; an existing file
+    there is compared with its upstream version as for add FILE (see
+    plan_dir_sync). where: (url, branch, name of the [source] or None)."""
+    url, branch, named = where
+    if target.exists() and not target.is_dir():
+        raise FsError(f"'{rel}' is a file, but '{path or '/'}' in {src.label} is a directory")
+    if path and not src.is_dir(at, path):
+        raise FsError(f"no directory '{path}' in {src.label} at {src.short(at)}")
+    shown_rel = rel.rstrip("/") + "/"
+    others = reg.overlapping(rel, "dir")
+    if others:
+        raise FsError(f"cannot link '{shown_rel}': overlaps with the entry for "
+                      f"{and_list(others)} - entries must not overlap (unlink those first; "
+                      "their files stay)")
+    relink = rel in reg.dirs
+    if relink and not args.force:
+        raise FsError(f"'{shown_rel}' is already linked (use --force to relink)")
+    name = named or reg.source_name(url, branch)
+    values = {"source": name, "path": path or "/", "include": join_patterns(args.include or []),
+              "exclude": join_patterns(args.exclude or []), "tag": args.tag,
+              "adaptable": "true" if args.adaptable else None}
+    values = {k: v for k, v in values.items() if v}
+    draft = DirLink(reg, rel, values)
+    commit, tree, plan = plan_dir_sync(repo, src, draft, at, args.overwrite)
+    if not plan:
+        print(f"no files to link below '{path or '/'}' in {src.label}")
+        return EXIT_OK
+    modified = [p for p in plan if p.modified]
+    if modified:
+        base = src.short(at)
+        if not args.adaptable:
+            it = "it" if len(modified) == 1 else "them"
+            raise FsError("".join(f"{p.rel}: differs from upstream {base}\n" for p in modified[:-1])
+                          + f"{modified[-1].rel}: differs from upstream {base} - use --adaptable "
+                          f"to keep {it} (the differences become local adaptations), --overwrite "
+                          f"to take the upstream version, or --commit to base {it} on another one")
+        warn(f"{plural(len(modified), 'existing file')} below {shown_rel} "
+             f"differ{'s' if len(modified) == 1 else ''} from upstream {base}; the "
+             "differences count as local adaptations")
+    shown_ref = ref_text(ref, line, src.tag_names)
+    up = up_join(path, "") or "/"
+    if args.dry_run:
+        print(f"would link {shown_rel} -> {name}:{up} ({shown_ref}), {plan_note(plan)}, "
+              f"based on {src.short(commit)}")
+        return EXIT_OK
+    rels = [p.rel for p in plan]
+    repo.check_plain(rels)
+    repo.normalize_many([(p.content, p.rel) for p in plan if p.content is not None])
+    save_discarded(repo, [p.rel for p in plan if p.replaced], rels if args.overwrite else [])
+    if relink:
+        reg.remove_file(rel, keep_source=named)
+    values["source"] = name = named or reg.add_source(url, branch)
+    entry = DirLink(reg, rel)
+    for k, v in list(values.items()) + [("commit", commit), ("tree", tree)]:
+        entry.set(k, v)
+    write_synced(repo, {p.rel: None if p.content is None else repo.normalize(p.content, p.rel)
+                        for p in plan})
+    reg.finish()
+    print(f"{paint('linked', 'green')} {shown_rel} -> {name}:{up} ({shown_ref}), "
+          f"{plural(len(plan), 'file')}")
+    if repo.git(["diff", "--cached", "--quiet", "HEAD", "--"] + [lit(r) for r in rels]
+                 + [REGISTRY], check=False).returncode == 0:
+        print(f"{shown_rel}: link and files unchanged, nothing to commit")
+        return EXIT_OK
+    msg = build_add_message(plan, src, name, url, ref, path, relink, args.adaptable, at,
+                            entry=shown_rel)
+    report_staged(repo, shown_rel, msg, paint("staged", "green"))
+    return EXIT_OK
+
+
 def require_dir(repo, path, rel):
     """add puts rel into an existing directory path only, like cp: a
     mistyped directory isn't created."""
@@ -3624,6 +4485,9 @@ def plan_dir(repo, reg, src, args, at, rel, path, target):
         problem = path_problem(r)
         if problem or (repo.top / r).is_dir():
             warn(f"skipping {r}: {problem or 'is a directory'}")
+        elif reg.overlapping(r, "file"):
+            raise FsError(f"cannot link '{r}': it is in the linked directory "
+                          f"{reg.overlapping(r, 'file')[0]}")
         elif r in reg.files and not args.force:
             skipped.append(r)
         else:
@@ -3685,11 +4549,10 @@ def cmd_restore(ctx, repo, args):
     The files are written all at once (see Repo.put_blobs); plain content
     of files without content-changing attributes is compared without git."""
     reg = Registry(repo)
-    links = select_links(repo, reg, args.files)
     worktree = args.worktree or not args.staged
     done = "restored and staged" if worktree and args.staged else \
         "restored in the index" if args.staged else "restored"
-    rc = EXIT_OK
+    rc, links = dir_files(ctx, repo, select_links(repo, reg, args.files))
     srcs, bases = {}, {}           # rel -> Source, base content in this repo's form
     repo.check_plain(lk.rel for lk in links)
     for link in links:
@@ -3753,7 +4616,8 @@ def cmd_restore(ctx, repo, args):
             fix_tree = worktree and cur != base
             fix_index = args.staged and index.get(link.rel, (None, None))[1] != base
             if not (fix_tree or fix_index):
-                said.append(f"{link.rel}: nothing to restore")
+                if not isinstance(link, Member):     # a [dir]: said once for all its files
+                    said.append(f"{link.rel}: nothing to restore")
                 continue
             fixes.append((link, base, fix_tree, fix_index))     # written below, all at once
             at = src.short(link.commit) if link.commit else link.blob[:8]
@@ -3768,29 +4632,85 @@ def cmd_restore(ctx, repo, args):
                         if (fix_tree, fix_index) == (tree, index)], stage=index, worktree=tree)
     for line in said:
         print(line)
+    restored = {lk.dlink.rel for lk, _, _, _ in fixes if isinstance(lk, Member)}
+    for d in dict.fromkeys(lk.dlink for lk in links if isinstance(lk, Member)):
+        if d.rel not in restored:
+            print(f"{d.shown_rel}: nothing to restore")
     return rc
+
+
+def not_linked_text(rel, dlink):
+    """The error for a path in a [dir] entry that isn't one of its files."""
+    return (f"'{rel}' is not linked (in the linked directory '{dlink.shown_rel}', but not "
+            "one of its files)")
+
+
+def check_only(sts):
+    """status, diff: a path given in a [dir] entry must be one of its files
+    (or a directory with some) - one of this repository's own isn't linked."""
+    for st in sts:
+        for o in (st.link.only or []) if not st.error else []:
+            if not any(is_below(m.rel, o) for m in st.members):
+                raise FsError(not_linked_text(o, st.link))
+
+
+def dir_files(ctx, repo, links):
+    """(exit code, links): [dir] entries replaced by their files at the
+    base (Member) - those of `only` if it names some - for commands that
+    act on the files (restore, rm); errors reported."""
+    rc, result = EXIT_OK, []
+    for link in links:
+        if not link.is_dir:
+            result.append(link)
+            continue
+        if link.unsynced:
+            result.append(link)          # reported by the command
+            continue
+        try:
+            src = ctx.source(link.url, link.ref, link.name, link.line)
+            base = dir_base(src, link)
+            if base is None:
+                raise FsError(f"synced tree {link.tree[:12]} not found in {src.label}")
+        except FsError as e:
+            error(f"{link.shown_rel}: {e}")
+            rc = EXIT_ERROR
+            continue
+        ms = [link.member(b, o) for b, o in sorted(base.items())]
+        for o in link.only or []:
+            if not any(is_below(m.rel, o) for m in ms):
+                error(not_linked_text(o, link))
+                rc = EXIT_ERROR
+        result += [m for m in ms if link.only is None or any(is_below(m.rel, o)
+                                                              for o in link.only)]
+    return rc, result
 
 
 def cmd_unlink(ctx, repo, args):
     reg = Registry(repo)
-    links = select_links(repo, reg, args.files)
+    links = select_links(repo, reg, args.files, whole=True)
     for link in links:
         if args.dry_run:
-            print(f"would unlink {link.rel}")
+            print(f"would unlink {link.shown_rel}")
             continue
         reg.remove_file(link.rel)
-        print(f"{paint('unlinked', 'green')} {link.rel} (file kept)")
+        print(f"{paint('unlinked', 'green')} {link.shown_rel} "
+              f"({'files' if link.is_dir else 'file'} kept)")
     if not args.dry_run:
         reg.finish()
     return EXIT_OK
 
 
 def cmd_rm(ctx, repo, args):
-    """Like `git rm`: remove the links and the files, both staged. Refused
-    (for all) if a file has uncommitted changes, unless -f; a committed
-    adaptation is no reason to refuse. A file that is gone already is fine."""
+    """Like `git rm`: remove the links and the files, both staged - of a
+    [dir] entry the files at its base, its own stay. Refused (for all) if
+    a file has uncommitted changes, unless -f; a committed adaptation is no
+    reason to refuse. A file that is gone already is fine."""
     reg = Registry(repo)
-    links = select_links(repo, reg, args.files)
+    entries = select_links(repo, reg, args.files, whole=True)
+    rc, links = dir_files(ctx, repo, entries)
+    if rc:
+        return rc
+    links = [lk for lk in links if not lk.is_dir]     # a new [dir]: none of its own yet
     for link in links:
         link.target               # refused (for all) if something is in the way
     repo.prefetch([lk.rel for lk in links])
@@ -3802,8 +4722,8 @@ def cmd_rm(ctx, repo, args):
                           + f"{dirty[-1]}: has uncommitted changes - use -f to remove "
                           f"{'it' if len(dirty) == 1 else 'them'} anyway")
     if args.dry_run:
-        for link in links:
-            print(f"would remove {link.rel}")
+        for link in entries:
+            print(f"would remove {link.shown_rel}" + dir_note(link, links))
         return EXIT_OK
     save_discarded(repo, [lk.rel for lk in links], [lk.rel for lk in links])
     for part in chunks(lk.rel for lk in links):
@@ -3811,10 +4731,22 @@ def cmd_rm(ctx, repo, args):
     for link in links:
         if link.target.is_file():       # never added to git
             link.target.unlink()
+    for link in entries:
         reg.remove_file(link.rel)
-        print(f"{paint('removed', 'green')} {link.rel}")
+        note = dir_note(link, links)
+        if link.is_dir and link.target.is_dir() and any(link.target.iterdir()):
+            note = note[:-1] + "; files of this repository stay)"     # the own ones
+        print(f"{paint('removed', 'green')} {link.shown_rel}{note}")
     reg.finish()
     return EXIT_OK
+
+
+def dir_note(link, files):
+    """' (3 files)' - the files of a [dir] entry among files, for rm."""
+    if not link.is_dir:
+        return ""
+    n = sum(1 for f in files if isinstance(f, Member) and f.dlink.rel == link.rel)
+    return f" ({plural(n, 'file')})"
 
 
 def cmd_mv(ctx, repo, args):
@@ -3827,9 +4759,14 @@ def cmd_mv(ctx, repo, args):
     moves = {}                    # old -> (new, its path)
     for arg in args.src:
         old = repo.rel(repo.user_path(arg))
-        if old not in reg.files:
-            raise FsError(f"'{old}' is not linked")
-        Link(reg, old).target                    # nothing in the way at OLD
+        link = reg.entry(old)
+        if not link:
+            inside = [d for d in reg.dirs if is_below(old, d)]
+            raise FsError(f"'{old}' is in the linked directory '{inside[0]}/' - move that "
+                          "one" if inside else f"'{old}' is not linked")
+        if old == ".":
+            raise FsError("cannot move the root directory")
+        link.target                              # nothing in the way at OLD
         dst = target
         if repo.names_dir(args.dst) and not dst.is_dir():      # NEW/: like git mv
             raise FsError(f"destination directory does not exist, source={old}, "
@@ -3842,8 +4779,12 @@ def cmd_mv(ctx, repo, args):
             raise FsError(f"cannot move to '{new}': {problem}")
         if any(new == n for n, _ in moves.values()):              # like git mv
             raise FsError(f"multiple sources for the same target, source={old}, destination={new}")
-        if new in reg.files or dst.exists():
+        if reg.entry(new) or dst.exists():
             raise FsError(f"'{new}' already exists")
+        others = reg.overlapping(new, reg.kind(old))
+        if others:
+            raise FsError(f"cannot move to '{new}': would overlap with the entry for "
+                          f"{and_list(others)} - entries must not overlap")
         if not dst.parent.is_dir():                  # like git mv
             raise FsError(f"destination directory does not exist, source={old}, destination={new}")
         moves[old] = (new, dst)
@@ -3851,7 +4792,8 @@ def cmd_mv(ctx, repo, args):
         for old, (new, _) in moves.items():
             print(f"would move {old} -> {new}")
         return EXIT_OK
-    tracked = [old for old in repo.index_entries(list(moves)) if old in moves]
+    indexed = repo.index_entries(list(moves))       # of a [dir]: the files in it
+    tracked = [old for old in moves if any(is_below(e, old) for e in indexed)]
     renamed = []                 # untracked files moved - back if anything fails
     try:
         for old, (new, dst) in moves.items():
@@ -3869,7 +4811,8 @@ def cmd_mv(ctx, repo, args):
         reg.rename_file(old, new)
     reg.finish()
     for old, (new, _) in moves.items():
-        print(f"{paint('moved', 'green')} {old} -> {new} (link kept)")
+        d = "/" if reg.kind(new) == "dir" else ""
+        print(f"{paint('moved', 'green')} {old}{d} -> {new}{d} (link kept)")
     return EXIT_OK
 
 
@@ -3911,15 +4854,19 @@ def cmd_set(ctx, repo, args):
     still applies: for another branch or tag of the same upstream, and for
     another upstream that has it (a fork, a moved repository); with another
     path it is looked up like for add."""
+    patterns = args.include or args.exclude or args.no_include or args.no_exclude
     if not (args.source or args.branch or args.tag or args.no_tag or args.path
-            or args.adaptable is not None):
-        raise FsError("nothing to change: give --source, -b, --tag/--no-tag, -p or "
-                      "--adaptable/--no-adaptable")
+            or args.adaptable is not None or patterns):
+        raise FsError("nothing to change: give --source, -b, --tag/--no-tag, -p, "
+                      "--adaptable/--no-adaptable or --include/--exclude")
     reg = Registry(repo)
     reg.dry_run = args.dry_run
-    links = select_links(repo, reg, args.files)
+    links = select_links(repo, reg, args.files, whole=True)
     if args.path and len(links) != 1:
-        raise FsError("-p requires exactly one file")
+        raise FsError("-p requires exactly one file or directory")
+    if patterns and not all(lk.is_dir for lk in links):
+        raise FsError("--include and --exclude are for linked directories only, not for "
+                      + and_list([lk.rel for lk in links if not lk.is_dir]))
     for lk in links:
         if not lk.source.get("branch") or lk.source.get("tag"):
             raise FsError(f"{lk.rel}: its [source \"{lk.name}\"] in {REGISTRY} needs a url "
@@ -3955,7 +4902,7 @@ def cmd_set(ctx, repo, args):
                     keep_base(src, lk)
                 if lk.name != name:
                     lk.set("source", name)
-                    print(f"{would}{lk.rel}: source {old} -> {name}")
+                    print(f"{would}{lk.shown_rel}: source {old} -> {name}")
             if name != old and old in reg.sources and not source_files(reg, old):
                 reg.remove_source(old)
             changed = True
@@ -3969,10 +4916,27 @@ def cmd_set(ctx, repo, args):
                 src.tip()
                 warn_tag_line(src, args.tag, lk.source.get("branch"))
             lk.set("tag", args.tag or None)
-            print(f"{would}{lk.rel}: " + (f"tag {args.tag}" if args.tag else
+            print(f"{would}{lk.shown_rel}: " + (f"tag {args.tag}" if args.tag else
                                           f"follows branch {lk.source.get('branch')}"))
             changed = True
-    if args.path:
+    if args.path and links[0].is_dir:
+        # another upstream directory: its files aren't these; pull compares
+        # them, as for a new link (see first_sync_dir)
+        lk = links[0]
+        src = ctx.source(lk.url, lk.ref, lk.name, lk.line)
+        head = src.tip()
+        path = upstream_path(args.path)
+        if not src.is_dir(head, path):
+            raise FsError(f"no directory '{path or '/'}' in {src.label} at {src.short(head)}")
+        if path != lk.path:
+            print(f"{would}{lk.shown_rel}: path {up_join(lk.path, '') or '/'} -> "
+                  f"{up_join(path, '') or '/'}" + ("" if lk.unsynced else
+                                                   " (not synced yet: pull compares the files)"))
+            lk.set("path", path or "/")
+            lk.set("commit", None)
+            lk.set("tree", None)
+            changed = True
+    elif args.path:
         lk = links[0]
         src = ctx.source(lk.url, lk.ref, lk.name, lk.line)
         head = src.tip()
@@ -3995,14 +4959,76 @@ def cmd_set(ctx, repo, args):
         for lk in links:
             if lk.adaptable != args.adaptable:
                 lk.set("adaptable", "true" if args.adaptable else None)
-                print(f"{would}{lk.rel}: {'adaptable' if args.adaptable else 'not adaptable'}")
+                print(f"{would}{lk.shown_rel}: "
+                      f"{'adaptable' if args.adaptable else 'not adaptable'}")
+                changed = True
+    staged = []
+    if patterns:
+        for lk in links:
+            files = set_patterns(ctx, repo, lk, args, would)
+            if files is not None:
+                staged += files
                 changed = True
     if not changed:
         print("nothing to change")
     elif not args.dry_run:
         reg.finish()
-        print(REGISTRY_STAGED)
+        if staged:
+            print(f"{REGISTRY} and {plural(len(staged), 'file')} staged (use \"git filesync "
+                  "status\" to see what changes)")
+        else:
+            print(REGISTRY_STAGED)
     return EXIT_OK
+
+
+def set_patterns(ctx, repo, lk, args, would):
+    """set --include / --exclude (--no-...) of a [dir] entry: the new
+    patterns apply at once, at its base - a file they select now is the
+    entry's, fetched like by add if it isn't there (an existing one must
+    be the synced version unless the entry is adaptable); one they leave
+    out stays, as a file of this repository. Returns the files written
+    (and staged), None if nothing changes."""
+    old = {"include": lk.include, "exclude": lk.exclude}
+    new = {k: [] if getattr(args, f"no_{k}") else getattr(args, k) or old[k] for k in old}
+    if new == old:
+        return None
+    src = None if lk.unsynced else ctx.source(lk.url, lk.ref, lk.name, lk.line)
+    before = None if lk.unsynced else dir_base(src, lk)
+    if src and before is None:
+        raise FsError(f"{lk.shown_rel}: synced tree {lk.tree[:12]} not found in {src.label}")
+    draft = DirLink(lk.reg, lk.rel, dict(lk.v, **{k: join_patterns(v) or "" for k, v in
+                                                   new.items()}))
+    after = {} if lk.unsynced else dir_base(src, draft)
+    plan, gone = [], sorted(set(before or {}) - set(after))
+    for below in sorted(set(after) - set(before or {})):
+        m = draft.member(below, after[below])
+        problem = path_problem(m.rel) or in_the_way(repo.top, m.rel)
+        if problem:
+            raise FsError(f"{m.rel}: {problem}")
+        plan.append(Planned(m.rel, m.path, lk.commit, m.blob, *compare_existing(
+            repo, src, m.rel, m.path, m.blob, repo.top / m.rel)))
+    modified = [p for p in plan if p.modified]
+    if modified and not lk.adaptable:
+        raise FsError(f"{lk.shown_rel}: {few(repo, modified)} "
+                      f"differ{'s' if len(modified) == 1 else ''} from the synced version - "
+                      "make the entry adaptable (--adaptable) to keep them as adaptations, "
+                      "or move them away first")
+    for k in old:
+        if new[k] != old[k]:
+            print(f"{would}{lk.shown_rel}: {k} " + (join_patterns(new[k]) or "(none)"))
+            if not args.dry_run:
+                lk.set(k, join_patterns(new[k]))
+    if plan:
+        print(f"{would}{lk.shown_rel}: now also {plan_note(plan)}")
+    if gone:
+        print(f"{would}{lk.shown_rel}: {plural(len(gone), 'file')} no longer linked "
+              "(kept as files of this repository)")
+    if args.dry_run or not plan:
+        return []
+    repo.check_plain(p.rel for p in plan)
+    write_synced(repo, {p.rel: None if p.content is None else repo.normalize(p.content, p.rel)
+                        for p in plan})
+    return [p.rel for p in plan]
 
 
 def shell():
@@ -4045,6 +5071,28 @@ def registry_problems(reg):
         if bool(v.get("commit")) != bool(v.get("blob")):
             problems.append(f"{what} has only one of commit and blob (both: the synced "
                             "version; neither: a new link, synced by pull)")
+        others = reg.overlapping(rel, "file")
+        if others:
+            problems.append(f"{what} is in the linked directory {others[0]}")
+    for rel, v in sorted(reg.dirs.items()):
+        what = f'[dir "{rel}"]'
+        problem = path_problem(rel) if rel != "." else None
+        if problem:
+            problems.append(f"{what}: {problem}")
+        if v.get("source", "") not in reg.sources:
+            problems.append(f"{what}: no [source \"{v.get('source', '')}\"]")
+        if not v.get("path"):
+            problems.append(f"{what} has no path ('/' for the upstream root)")
+        if bool(v.get("commit")) != bool(v.get("tree")):
+            problems.append(f"{what} has only one of commit and tree (both: the synced "
+                            "version; neither: a new link, synced by pull)")
+        others = [o for o in reg.overlapping(rel, "dir") if o.endswith("/")]
+        if others:
+            problems.append(f"{what} overlaps with the entry for {and_list(others)}")
+        try:
+            DirLink(reg, rel).selects("")
+        except FsError as e:
+            problems.append(f"{what}: {e}")
     return problems
 
 
@@ -4077,7 +5125,8 @@ def cmd_edit(ctx, repo, args):
 
 
 def source_files(reg, name):
-    return sorted(rel for rel, f in reg.files.items() if f.get("source") == name)
+    """The entries ([file] and [dir]) of the [source] name."""
+    return reg.uses(name)
 
 
 def cmd_source(ctx, repo, args):
@@ -4091,9 +5140,9 @@ def cmd_source(ctx, repo, args):
             if not args.verbose:
                 print(name)
                 continue
-            n = len(source_files(reg, name))
+            used = [reg.entry(r).shown_rel for r in source_files(reg, name)]
             print(f"{name}\t{s.get('url', '')} ({s.get('branch') or 'branch missing'}, "
-                  f"{plural(n, 'file')})")
+                  f"{entries_text(used) or '0 files'})")
         return EXIT_OK
     if args.name not in reg.sources:
         raise FsError(f"no source '{args.name}' in {REGISTRY}"
@@ -4122,7 +5171,7 @@ def cmd_source(ctx, repo, args):
             src.tip()
             if key == "url" and norm_url(url) != norm_url(s.get("url", "")):
                 for rel in source_files(reg, args.name):
-                    keep_base(src, Link(reg, rel))
+                    keep_base(src, reg.entry(rel))
         old = s.get(key)
         reg.set_source(args.name, key, args.value)
         done = f"{args.name}: {key} {args.value}" + (f" (was {old})" if old and old != args.value
@@ -4337,9 +5386,9 @@ def registry_entries(repo, blob):
     p = repo.git(["config", "--blob", blob, "--list", "-z"], check=False)
     if p.returncode:
         return []
-    sources, files = parse_registry(p.stdout)
+    sources, files, dirs = parse_registry(p.stdout)
     entries = []
-    for rel, v in sorted(files.items()):
+    for rel, v in sorted(list(files.items()) + [(d + "/", v) for d, v in dirs.items()]):
         url = sources.get(v.get("source", ""), {}).get("url")
         if url and v.get("commit"):
             entries.append((url, v["commit"], rel))
@@ -4669,6 +5718,9 @@ def run(argv=None):
     p.add_argument("--tag", help="sync to this upstream tag, once (as -b)")
     p.add_argument("--overwrite", action="store_true",
                    help="discard local adaptations instead of merging them")
+    p.add_argument("--force", action="store_true",
+                   help="linked directory: keep a file of this repository that pull would "
+                        "delete (adapted, deleted upstream) or replace (new upstream)")
     p.add_argument("-n", "--dry-run", action="store_true",
                    help="only report what would happen (incl. merge conflicts)")
     p.add_argument("-v", "--verbose", action="store_true",
@@ -4720,6 +5772,9 @@ def run(argv=None):
                    help="directory: only files matching PATTERN (gitignore-like; repeatable)")
     p.add_argument("--exclude", metavar="PATTERN", action="append",
                    help="directory: skip files matching PATTERN (repeatable)")
+    p.add_argument("--per-file", action="store_true",
+                   help="directory: link each file on its own ([file] entries) instead of the "
+                        "directory ([dir]: pull also adds and deletes files)")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would be linked")
     p.add_argument("--commit", metavar="REV", help="upstream revision to base the file on "
                                                     "instead of the head")
@@ -4750,6 +5805,14 @@ def run(argv=None):
                    help="allow local adaptations")
     g.add_argument("--no-adaptable", dest="adaptable", action="store_const", const=False,
                    help="the files must stay exact copies again (the default)")
+    for k, what in (("include", "only files matching PATTERN"),
+                    ("exclude", "skip files matching PATTERN")):
+        g = p.add_mutually_exclusive_group()
+        g.add_argument(f"--{k}", metavar="PATTERN", action="append",
+                       help=f"linked directory: {what} (repeatable; replaces the patterns; "
+                            "applies at once)")
+        g.add_argument(f"--no-{k}", action="store_true", help=f"linked directory: no {k} "
+                                                               "patterns")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
 
     add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then check "
