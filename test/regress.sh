@@ -1839,6 +1839,10 @@ check "set: changes need paths" "$(rc git filesync set --adaptable)" "2"
 check "set: nothing given" "$(rc git filesync set)" "2"
 check "set --list with a path: refused" "$(rc git filesync set --list a.c)" "2"
 check "set -p, the same path: nothing to change" "$(git filesync set a.c -p a.c)" "nothing to change"
+git config -f .git-filesync file.a.c.path ./a.c          # as if written by hand
+check "set -p, the same path written differently: nothing to change" "$(git filesync set a.c -p a.c)" \
+  "nothing to change"
+git checkout -q .git-filesync
 check "set --adaptable" "$(git filesync set a.c --adaptable | head -1)" "a.c: adaptable"
 check "set --adaptable: entry" "$(git config -f .git-filesync file.a.c.adaptable)" "true"
 check "set: only staged" "$(git status --porcelain | oneline) $(git log -1 --format=%s | cut -c1-16)" "M  .git-filesync  [filesync] Add b"
@@ -1877,7 +1881,8 @@ git commit -qm fork
 
 # a copy with a history of its own: a.c alone moves to a new source; its
 # commit is the copy's commit with the same version of a.c
-quiet git filesync set a.c --source "$TURL/m13copy.git"
+# (also with -p, the same path, as in the template set shows)
+quiet git filesync set a.c --source "$TURL/m13copy.git" -b main -p a.c
 check "set --source copy: new source" \
   "$(git config -f .git-filesync file.a.c.source | grep -c m13copy) $(git config -f .git-filesync file.b.c.source)" "1 $SRC13"
 check "set --source copy: commit of the copy" "$(git config -f .git-filesync file.a.c.commit)" "$(git -C ../m13copy rev-parse HEAD)"
@@ -2679,6 +2684,22 @@ check "set --include: pending" "$(git filesync status | grep pending: | sed 's/[
   "vendor/  (patterns changed; files: 1 deleted)"
 quiet git filesync set --no-include vendor
 check "set --no-include: back to the synced patterns" "$(grep -c synced- .git-filesync)" "0"
+# without the base tree, the old patterns are kept too (files unknown)
+git config -f .git-filesync dir.vendor.tree 0123456789012345678901234567890123456789
+check "set, base tree unavailable: no counts" "$(git filesync set --include sub/ vendor 2>&1 | head -1)" \
+  "vendor/: include (none) -> sub/"
+check "set, base tree unavailable: synced-include" "$(grep -c '^	synced-include = ""$' .git-filesync)" "1"
+git reset -q && git checkout -q .git-filesync
+
+# patterns that only drop a file gone here already: pull stages the deletion
+git rm -q vendor/sub/c.c && git commit -qm "no c.c"
+quiet git filesync set --exclude t/ --exclude c.c vendor
+git commit -qm "exclude c.c"
+check "deselected and gone here: pull" "$(pullc vendor | head -1)" "vendor/: synced (1 deleted)"
+check "deselected and gone here: synced-* gone, up to date" "$(grep -c synced- .git-filesync)-$(st)" "0-"
+quiet git filesync set --exclude t/ vendor && git commit -qm "c.c again"
+quiet pullc vendor
+check "selected again: back" "$(cat vendor/sub/c.c)" "c"
 quiet git filesync set --no-exclude vendor
 git commit -qm "with tests"
 check "pull: newly selected files fetched" "$(pullc vendor | head -1)" "vendor/: synced (1 new)"

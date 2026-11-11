@@ -1938,7 +1938,7 @@ def edit_registry(data, pending, drop=(), renames=None):
              changes;
     pending  {(section, name, key): value}: a value replaced in its line,
              a new key added after the section's last one, a new section
-             appended.
+             appended; value None: the key's line removed.
     None if the file isn't laid out simply enough for that (a section or
     key twice, keys on the header line, an unclosed quote)."""
     renames = renames or {}
@@ -1984,6 +1984,10 @@ def edit_registry(data, pending, drop=(), renames=None):
     after, appended = {}, {}
     for (s, n, k), v in pending.items():
         sec = (s, n)
+        if v is None:
+            if sec not in drop and (sec, k) in keys:
+                dropped.add(keys[(sec, k)])
+            continue
         if sec in drop or sec not in headers:          # (again) a new section
             appended.setdefault(sec, []).append(f"\t{k} = {config_value(v)}\n".encode())
         elif (sec, k) in keys:
@@ -2000,7 +2004,7 @@ def edit_registry(data, pending, drop=(), renames=None):
     for i, raw in enumerate(lines):
         if i not in dropped:
             out_lines.append(raw)
-            out_lines += after.get(i, [])
+        out_lines += after.get(i, [])     # also after a removed last key
     for (s, n), texts in appended.items():
         out_lines.append(f"[{s} {quoted_name(n)}]\n".encode())
         out_lines += texts
@@ -2187,16 +2191,14 @@ class Registry:
 
     def _set(self, sect, name, key, value):
         """Set (value None: remove) a key of a [file], [dir] or [source] -
-        written later (see flush); a removed key's line goes at once, with git."""
+        written later (see flush)."""
         store = self.store(sect)
         if value is None:
-            if key in store.get(name, {}):
-                if not self.dry_run:
-                    self.flush()      # what is pending first, while the key is still there
-                    git(["config", "-f", self.path, "--unset-all", f"{sect}.{name}.{key}"])
-                del store[name][key]
-            return
-        store.setdefault(name, {})[key] = value
+            if key not in store.get(name, {}):
+                return
+            del store[name][key]
+        else:
+            store.setdefault(name, {})[key] = value
         if not self.dry_run:
             self._pending[(sect, name, key)] = value
 
@@ -2309,7 +2311,9 @@ class Registry:
         for (sect, old), new in renames.items():
             git(["config", "-f", self.path, "--rename-section", f"{sect}.{old}", f"{sect}.{new}"])
         for (sect, name, k), v in pending.items():
-            git(["config", "-f", self.path, f"{sect}.{name}.{k}", v])
+            git(["config", "-f", self.path] + ([f"{sect}.{name}.{k}", v] if v is not None
+                                               else ["--unset-all", f"{sect}.{name}.{k}"]),
+                check=v is not None)
 
     def finish(self):
         """Fix line endings and stage the registry (or its removal when empty)."""
@@ -3707,7 +3711,9 @@ def pull_dir(repo, reg, st, args):
                       f"'git filesync restore -SW {arg}'{ways}")
     back = [m for m in local_mod if args.overwrite and m.new_blob == m.old_blob]
     dels = [m for m in st.dels if m.local != "missing"]
-    if not (st.mods or dels or st.adds or back) and st.new == st.old:
+    # (other patterns, also if they only drop files gone here already: synced-* go)
+    if not (st.mods or st.dels or st.adds or back) and st.new == st.old \
+            and not dlink.repatterned:
         print(f"{name}: {paint('up to date', 'green')}"
               + (" (adaptations kept)" if st.committed == "adapted" else ""))
         return None
@@ -3724,14 +3730,17 @@ def pull_dir(repo, reg, st, args):
             warn(f"{m.rel}: {w}")
 
     contents, notes, refused = {}, {}, []     # notes: rel -> what happened
+    kinds = {}                # rel -> 'new' | 'deleted' | 'renamed' | 'changed', for the summary
     conflicted, discarded = [], []
     # files the patterns no longer select (set changed them) go like those
     # deleted upstream, newly selected ones come like new ones upstream
-    gone = {m.rel: "deleted upstream" if dlink.selects(m.link.below) else
-            "no longer selected by the patterns" for m in st.dels}
+    base_files, up_files = src.tree_files(dlink.tree) or {}, src.tree_files(st.new_tree) or {}
+    gone = {m.rel: "no longer selected by the patterns" if m.link.below in up_files else
+            "deleted upstream" for m in st.dels}
     # deleted here and upstream: the deletion staged too, if it isn't yet
     deletes = [m.rel for m in st.dels if m.local == "missing"]
     notes.update((r, f"{gone[r]}, gone here already") for r in deletes)
+    kinds.update((r, "deleted") for r in deletes)
     adds = {m.link.below: m for m in st.adds}
     for m in dels:
         if m.local == "modified" and not args.overwrite:
@@ -3748,22 +3757,25 @@ def pull_dir(repo, reg, st, args):
                                                       True, rel=to.rel)
                 deletes.append(m.rel)
                 notes[to.rel] = f"renamed upstream from {m.rel}, adaptations merged"
+                kinds[to.rel] = "renamed"
                 if n:
                     conflicted.append(to.rel)
             elif args.force:
                 notes[m.rel] = f"{gone[m.rel]}, kept as a file of this repository"
+                kinds[m.rel] = "deleted"           # from the entry
             else:
                 refused.append((m, f"{gone[m.rel]}, but adapted here"))
             continue
         deletes.append(m.rel)
         notes[m.rel] = gone[m.rel] + (", local adaptations discarded"
                                       if m.local == "modified" else "")
+        kinds[m.rel] = "deleted"
     for m in adds.values():
-        new = "new upstream" if dlink.selects(m.link.below, base=True) else \
-            "now selected by the patterns"
+        new = "now selected by the patterns" if m.link.below in base_files else \
+            "new upstream"
         if m.local == "missing":
             contents[m.rel] = sync_content(repo, m, st.new, m.new_blob, m.new_path, False)[0]
-            notes[m.rel] = new
+            notes[m.rel], kinds[m.rel] = new, "new"
             continue
         content, modified, replaced = compare_existing(
             repo, src, m.rel, m.new_path, m.new_blob, repo.top / m.rel, args.overwrite)
@@ -3775,6 +3787,7 @@ def pull_dir(repo, reg, st, args):
         notes[m.rel] = f"{new}, replacing the file here" if replaced else \
             f"{new}, existing file kept, with local adaptations" if modified else \
             f"{new}, existing file"
+        kinds[m.rel] = "new"
         if replaced:
             discarded.append(m.rel)
     for m in st.mods + back:
@@ -3785,6 +3798,7 @@ def pull_dir(repo, reg, st, args):
         notes[m.rel] = (f"{n} merge conflict(s)" if n else "adaptations merged") if merged \
             else "restored, local adaptations discarded" if m in back else \
             "local adaptations discarded" if discard else "changed upstream"
+        kinds[m.rel] = "changed"
         if n:
             conflicted.append(m.rel)
     if refused:
@@ -3792,11 +3806,8 @@ def pull_dir(repo, reg, st, args):
                       + f"{refused[-1][0].rel}: {refused[-1][1]} - use 'git filesync pull "
                       f"--overwrite {arg}' to take what upstream has, or --force to keep "
                       "the files of this repository")
-    added, deleted = ("new upstream", "now selected"), ("deleted upstream", "no longer")
-    counts = [(sum(1 for v in notes.values() if v.startswith(added)), "new"),
-              (sum(1 for v in notes.values() if v.startswith(deleted)), "deleted"),
-              (sum(1 for v in notes.values() if not v.startswith(added + deleted)),
-               "changed")]
+    counts = [(sum(1 for k in kinds.values() if k == w), w)
+              for w in ("new", "deleted", "renamed", "changed")]
     summary = ", ".join(f"{n} {w}" for n, w in counts if n) or "no file changed"
     merged = [r for r, v in notes.items() if "merge" in v]
     if args.dry_run:
@@ -4896,13 +4907,30 @@ def keep_base(src, link):
         link.set("commit", commit)
 
 
+def shows(args, given, changes, what, everything):
+    """Whether set / source set only show (nothing to change given; --list:
+    all of them, everything); FsError for arguments that don't fit."""
+    if args.list and (given or changes):
+        raise FsError(f"--list shows all {everything}: give nothing else")
+    if not given and not args.list:
+        raise FsError(f"give {what}" + ("" if changes else " (or --list for all)"))
+    return not changes
+
+
+def source_words(s, url_opt):
+    """URL and branch of the [source] s as options of a command shown."""
+    q = shlex.quote
+    return ([url_opt, q(s["url"])] if s.get("url") else []) + \
+        (["-b", q(s["branch"])] if s.get("branch") else [])
+
+
 def set_command(repo, lk):
     """The set command for what the entry lk has - every aspect, also those
     not set (--no-tag), so that it serves as a template for others; entered
     again, it changes nothing."""
-    q, s = shlex.quote, lk.source
-    words = ["git", "filesync", "set", q(shown(repo, lk.rel) + ("/" if lk.is_dir else "")),
-             "--source", q(s.get("url", ""))] + (["-b", q(s["branch"])] if s.get("branch") else [])
+    q = shlex.quote
+    words = ["git", "filesync", "set", q(shown_entry(repo, lk))] + \
+        source_words(lk.source, "--source")
     words += ["--tag", q(lk.tag)] if lk.tag else ["--no-tag"]
     words += ["-p", q(lk.path or "/"),
               "--adaptable" if lk.adaptable else "--no-adaptable"]
@@ -4926,16 +4954,10 @@ def cmd_set(ctx, repo, args):
     changes = args.source or args.branch or args.tag or args.no_tag or args.path or \
         args.adaptable is not None or patterns
     reg = Registry(repo)
-    if args.list or not changes:
-        if args.list and (args.files or changes):
-            raise FsError("--list shows all entries: no paths, nothing to change")
-        if not args.files and not args.list:
-            raise FsError("give the linked files or directories (or --list for all)")
+    if shows(args, args.files, changes, "the linked files or directories", "entries"):
         for lk in reg.links() if args.list else select_links(repo, reg, args.files, whole=True):
             print(set_command(repo, lk))
         return EXIT_OK
-    if not args.files:
-        raise FsError("give the linked files or directories to change")
     reg.dry_run = args.dry_run
     links = select_links(repo, reg, args.files, whole=True)
     if args.path and len(links) != 1:
@@ -4949,6 +4971,9 @@ def cmd_set(ctx, repo, args):
                           "and a branch (and no tag)")
     would = "would: " if args.dry_run else ""
     changed = False
+    # another upstream path (the same one, also written differently: no change)
+    path = upstream_path(args.path) if args.path else None
+    new_path = path is not None and path != upstream_path(links[0].path)
     if args.source or args.branch:
         # the source the files are to use: URL and branch (like add)
         url = branch = None
@@ -4974,7 +4999,7 @@ def cmd_set(ctx, repo, args):
                 name = old
             name = name or reg.add_source(url_, branch_)
             for lk in lks:
-                if norm_url(url_) != norm_url(lk.url) and not args.path:
+                if norm_url(url_) != norm_url(lk.url) and not new_path:
                     keep_base(src, lk)
                 if lk.name != name:
                     lk.set("source", name)
@@ -4995,8 +5020,7 @@ def cmd_set(ctx, repo, args):
             print(f"{would}{lk.shown_rel}: " + (f"tag {args.tag}" if args.tag else
                                           f"follows branch {lk.source.get('branch')}"))
             changed = True
-    path = upstream_path(args.path) if args.path else None
-    if args.path and path != links[0].path:      # the same path: nothing to change
+    if new_path:
         changed = set_path(ctx, repo, links[0], path, would) or changed
     if args.adaptable is not None:
         for lk in links:
@@ -5079,8 +5103,10 @@ def set_patterns(ctx, lk, args, would):
     print("\n".join(would + line for line in lines))
     for k in keys:
         lk.set(k, join_patterns(new[k]))
-    for k in PATTERN_KEYS:        # only while they make a difference
-        if counts and any(counts) and new[k] != synced[k]:
+    # only while they make a difference (unknown without the base tree)
+    differs = any(counts) if counts else not lk.unsynced
+    for k in PATTERN_KEYS:
+        if differs and new[k] != synced[k]:
             if f"synced-{k}" not in lk.v:
                 lk.set(f"synced-{k}", join_patterns(synced[k]) or "")
         else:
@@ -5188,10 +5214,8 @@ def source_files(reg, name):
 
 def source_command(name, s):
     """The source set command for what the [source] s has (like set_command)."""
-    q = shlex.quote
-    return " ".join(["git", "filesync", "source", "set", q(name)]
-                    + (["--url", q(s["url"])] if s.get("url") else [])
-                    + (["-b", q(s["branch"])] if s.get("branch") else []))
+    return " ".join(["git", "filesync", "source", "set", shlex.quote(name)]
+                    + source_words(s, "--url"))
 
 
 def cmd_source(ctx, repo, args):
@@ -5210,17 +5234,11 @@ def cmd_source(ctx, repo, args):
                   f"{entries_text(used) or '0 files'})")
         return EXIT_OK
     changes = action == "set" and (args.url or args.branch)
-    if action == "set" and (args.list or not changes):
-        if args.list and (args.name or changes):
-            raise FsError("--list shows all sources: no name, nothing to change")
-        if not args.name and not args.list:
-            raise FsError("give the name of a source (or --list for all)")
-    elif not args.name:
-        raise FsError("give the name of a source")
+    show = action == "set" and shows(args, args.name, changes, "the name of a source", "sources")
     if args.name and args.name not in reg.sources:
         raise FsError(f"no source '{args.name}' in {REGISTRY}"
                       + (f" (known: {', '.join(sorted(reg.sources))})" if reg.sources else ""))
-    if action == "set" and not changes:
+    if show:
         for name in sorted(reg.sources) if args.list else [args.name]:
             print(source_command(name, reg.sources[name]))
         return EXIT_OK
