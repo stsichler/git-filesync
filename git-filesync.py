@@ -30,6 +30,8 @@ upstream repository:
         source = owner/lib
         path = lib             ; upstream directory (/: the root)
         exclude = test/ '*_test.c'   ; optional, like include: patterns
+        synced-exclude = test/ ; only after set changed exclude: the files
+                               ; are those of these patterns until pull
         commit = <upstream commit that last changed it>
         tree = <the upstream directory at that commit>
 
@@ -190,6 +192,9 @@ Advanced commands:
                                 for sources; only .git-filesync is changed
                                 (and staged), the synced version is kept
                                 where it still applies
+    set PATH...                 show it: the set command that sets what the
+                                entries have (entered again: no change)
+        --list                  the same for all entries
         --source URL|SOURCE     take the files from another upstream (fork,
                                 moved repository) or [source] SOURCE
         -b, --branch BRANCH     follow BRANCH (with --source URL: default
@@ -203,11 +208,13 @@ Advanced commands:
         -p, --path PATH         another upstream path (one file); its
                                 current version becomes the base, as for add
                                 (the file stays as it is); a [dir]: a new
-                                link then, compared by pull
+                                link then, compared by pull; the same path:
+                                no change
         --adaptable, --no-adaptable  allow local adaptations / not any more
-        --include, --exclude PATTERN  [dir]: new patterns (repeatable),
-                                applied at once: files they select now are
-                                fetched (staged), those left out stay
+        --include, --exclude PATTERN  [dir]: new patterns (repeatable); the
+                                files follow at the next pull: those they
+                                select now are fetched, those left out
+                                deleted (as if changed upstream)
         --no-include, --no-exclude  [dir]: remove the patterns
         -n, --dry-run           only show what would change
 
@@ -218,12 +225,13 @@ Advanced commands:
     source                      list the [source]s (-v: with URL, branch,
                                 entries)
     source rename OLD NEW       rename a [source] and all references to it
-    source set-url NAME URL     change the URL of a [source]; the synced
-                                versions are looked up there as for set
-                                --source
-    source set-branch NAME BRANCH  follow BRANCH, all files of the source
-                                (set-url, set-branch: the branch must exist
-                                upstream)
+    source set NAME OPTIONS     change a [source] (the branch must exist
+                                upstream); without options: show it, as
+                                the command that sets it (--list: all)
+        --url URL               another URL; the synced versions are looked
+                                up there as for set --source
+        -b, --branch BRANCH     follow BRANCH, all files of the source
+        -n, --dry-run           (also rename) only show what would change
     source map [URL|SOURCE [DIR]]  use the local checkout DIR instead of
                                 fetching URL (SOURCE: the URL of that
                                 [source]); its branch is used, unpushed
@@ -269,10 +277,11 @@ Advanced commands:
     Common options:
         --no-fetch              use the cached state, don't fetch (status,
                                 pull, diff/difftool, restore, add, set,
-                                source set-url/set-branch; restore and diff
-                                of local changes fetch anyway only if the
-                                cache lacks the branch); an upstream not in
-                                the cache yet is cloned anyway
+                                source set; restore, diff of local changes
+                                and set without --source, -b, --tag, -p
+                                fetch anyway only if the cache lacks the
+                                branch); an upstream not in the cache yet
+                                is cloned anyway
         --remote                ignore mappings (source map) this once, use
                                 the upstream URL (same commands; with
                                 --no-fetch: the cached state)
@@ -311,7 +320,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.22.0"
+__version__ = "0.23.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -335,7 +344,7 @@ HOOKS = {
         f"{REFS_VAR}_end"]),
     "post-merge": 'git filesync hook post-merge "$@" </dev/null || true',
 }
-# after set and edit, which change only .git-filesync
+# after set, source set and edit, which change only .git-filesync
 REGISTRY_STAGED = (f'{REGISTRY} staged (use "git filesync status" to see what changes, '
                    '"git filesync pull <file>..." to sync)')
 REGISTRY_HEADER = ("# git-filesync: files of this repository that are kept in sync with\n"
@@ -1300,11 +1309,13 @@ class Context:
 
     def __init__(self, args, repo=None):
         self.repo_top = repo.top if repo else None
-        # restore, and diff of local changes, only need the synced versions,
-        # which never change (a blob missing in the cache is fetched lazily):
-        # fetched only if the cache lacks the branch (lazy)
+        # restore, diff of local changes and set of what doesn't change the
+        # upstream version (the patterns: the base tree) only need the synced
+        # versions, which never change (a blob missing in the cache is fetched
+        # lazily): fetched only if the cache lacks the branch (lazy)
         offline = args.cmd in ("restore", "rm") or \
-            args.cmd in ("diff", "difftool") and not args.upstream
+            args.cmd in ("diff", "difftool") and not args.upstream or \
+            args.cmd == "set" and not (args.source or args.branch or args.tag or args.path)
         no_fetch = getattr(args, "no_fetch", False)
         self.remote = getattr(args, "remote", False)     # mappings ignored this once
         self.fetch, self.lazy = not (no_fetch or offline), offline and not no_fetch
@@ -2371,6 +2382,9 @@ def up_join(path, below):
     return f"{path}/{below}" if path else below
 
 
+PATTERN_KEYS = ("include", "exclude")
+
+
 def split_patterns(value):
     """The patterns of an include / exclude value: separated by blanks,
     quoted like in a shell ('*.c' "my file")."""
@@ -2412,6 +2426,19 @@ class DirLink(Link):
     blob = tree
     include = property(lambda self: split_patterns(self.v.get("include", "")))
     exclude = property(lambda self: split_patterns(self.v.get("exclude", "")))
+    # set changed the patterns since the sync (see synced_patterns)
+    repatterned = property(lambda self: any(f"synced-{k}" in self.v for k in PATTERN_KEYS))
+
+    def synced_patterns(self, k):
+        """The patterns (k: 'include' | 'exclude') the entry was synced with,
+        which select the files at its base: synced-<k>, which set keeps
+        while new ones select other files - until the next pull; else <k>."""
+        return split_patterns(self.v.get(f"synced-{k}", self.v.get(k, "")))
+
+    def drop_synced(self):
+        """The base now has the current patterns (pull, set -p)."""
+        for k in PATTERN_KEYS:
+            self.set(f"synced-{k}", None)
 
     @property
     def unsynced(self):
@@ -2427,15 +2454,24 @@ class DirLink(Link):
             raise FsError(f"{self.shown_rel}: {blocked_text(self.reg.repo, self.rel, blocked)}")
         return self.reg.repo.top / self.rel
 
-    def selects(self, below):
+    def selects(self, below, base=False):
         """Is the upstream file below (relative to the upstream directory)
-        one of the entry's, by its patterns? (like add DIR, see glob_regex)"""
+        one of the entry's, by its patterns (like add DIR, see glob_regex)?
+        base: by those it was synced with (see synced_patterns)."""
         if not hasattr(self, "_rx"):
-            self._rx = ([glob_regex(p) for p in self.include],
-                        [glob_regex(p) for p in self.exclude])
-        inc, exc = self._rx
+            self._rx = {}
+        if base not in self._rx:
+            self._rx[base] = [[glob_regex(p) for p in (self.synced_patterns(k) if base
+                                                      else getattr(self, k))]
+                              for k in PATTERN_KEYS]
+        inc, exc = self._rx[base]
         return (not inc or any(r.match(below) for r in inc)) and \
             not any(r.match(below) for r in exc)
+
+    def check_patterns(self):
+        """FsError if a pattern can't be read."""
+        self.selects("")
+        self.selects("", base=True)
 
     def member(self, below, blob=""):
         return Member(self, below, blob)
@@ -2888,10 +2924,11 @@ class DirState(FileState):
 
 def dir_base(src, dlink):
     """{path below: blob id} of the files of a [dir] entry at its base: the
-    upstream tree's files its patterns select; None if the tree isn't
-    there (or the entry has none)."""
+    upstream tree's files the patterns it was synced with select; None if
+    the tree isn't there (or the entry has none)."""
     files = src.tree_files(dlink.tree) if dlink.tree else None
-    return None if files is None else {b: o for b, o in files.items() if dlink.selects(b)}
+    return None if files is None else {b: o for b, o in files.items()
+                                       if dlink.selects(b, base=True)}
 
 
 def dir_members(repo, dlink, base, upstream):
@@ -2940,7 +2977,7 @@ def evaluate_dir(ctx, repo, dlink):
                   new_path=dlink.path, adaptable=dlink.adaptable, unsynced=dlink.unsynced)
     try:
         dlink.target
-        dlink.selects("")         # the patterns can be read
+        dlink.check_patterns()
     except FsError as e:
         st.error = str(e)
         return st
@@ -3016,8 +3053,12 @@ def upstream_state(st, note=True):
             what = "upstream branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
             return "older", f"{what} is {plural(behind, 'commit')} older than last sync"
         if st.has_old and not st.diverged:
-            return "pending", plural(commits_since(st), "commit") + files_note(st) \
-                if note else None
+            if not note:
+                return "pending", None
+            n, repat = commits_since(st), st.link.is_dir and st.link.repatterned
+            what = ([plural(n, "commit")] if n or not repat else []) + \
+                (["patterns changed"] if repat else [])
+            return "pending", ", ".join(what) + files_note(st)
         return "changed", "history diverged" if st.has_old else "previous sync point unknown"
     return None
 
@@ -3601,6 +3642,7 @@ def first_sync_dir(repo, st, args):
     # kept by the caller, for all files at once (see save_discarded)
     st.discards = ([p.rel for p in plan if p.replaced],
                    [p.rel for p in plan] if args.overwrite else [])
+    dlink.drop_synced()
     dlink.set("commit", commit)
     dlink.set("tree", tree)
     print(f"{name}: {paint('synced', 'green')} (first sync; {note})")
@@ -3683,15 +3725,20 @@ def pull_dir(repo, reg, st, args):
 
     contents, notes, refused = {}, {}, []     # notes: rel -> what happened
     conflicted, discarded = [], []
+    # files the patterns no longer select (set changed them) go like those
+    # deleted upstream, newly selected ones come like new ones upstream
+    gone = {m.rel: "deleted upstream" if dlink.selects(m.link.below) else
+            "no longer selected by the patterns" for m in st.dels}
     # deleted here and upstream: the deletion staged too, if it isn't yet
     deletes = [m.rel for m in st.dels if m.local == "missing"]
-    notes.update((r, "deleted upstream, gone here already") for r in deletes)
+    notes.update((r, f"{gone[r]}, gone here already") for r in deletes)
     adds = {m.link.below: m for m in st.adds}
     for m in dels:
         if m.local == "modified" and not args.overwrite:
             # adapted, and renamed upstream within the directory: the
             # adaptations move along, as for a linked file
-            moved = src.follow(st.old, st.tip, m.link.path) if st.has_old else None
+            moved = src.follow(st.old, st.tip, m.link.path) \
+                if st.has_old and gone[m.rel] == "deleted upstream" else None
             to = moved and moved[0] == "renamed" and next(
                 (a for a in adds.values() if a.link.path == moved[1] and a.local == "missing"),
                 None)
@@ -3704,28 +3751,30 @@ def pull_dir(repo, reg, st, args):
                 if n:
                     conflicted.append(to.rel)
             elif args.force:
-                notes[m.rel] = "deleted upstream, kept as a file of this repository"
+                notes[m.rel] = f"{gone[m.rel]}, kept as a file of this repository"
             else:
-                refused.append((m, "deleted upstream, but adapted here"))
+                refused.append((m, f"{gone[m.rel]}, but adapted here"))
             continue
         deletes.append(m.rel)
-        notes[m.rel] = "deleted upstream" + (", local adaptations discarded"
-                                             if m.local == "modified" else "")
+        notes[m.rel] = gone[m.rel] + (", local adaptations discarded"
+                                      if m.local == "modified" else "")
     for m in adds.values():
+        new = "new upstream" if dlink.selects(m.link.below, base=True) else \
+            "now selected by the patterns"
         if m.local == "missing":
             contents[m.rel] = sync_content(repo, m, st.new, m.new_blob, m.new_path, False)[0]
-            notes[m.rel] = "new upstream"
+            notes[m.rel] = new
             continue
         content, modified, replaced = compare_existing(
             repo, src, m.rel, m.new_path, m.new_blob, repo.top / m.rel, args.overwrite)
         if modified and not (args.force and st.adaptable):
-            refused.append((m, "new upstream, but another file is here"
+            refused.append((m, f"{new}, but another file is here"
                             + ("" if st.adaptable else " (not adaptable: only --overwrite)")))
             continue
         contents[m.rel] = None if content is None else repo.normalize(content, m.rel)
-        notes[m.rel] = "new upstream, replacing the file here" if replaced else \
-            "new upstream, existing file kept, with local adaptations" if modified else \
-            "new upstream, existing file"
+        notes[m.rel] = f"{new}, replacing the file here" if replaced else \
+            f"{new}, existing file kept, with local adaptations" if modified else \
+            f"{new}, existing file"
         if replaced:
             discarded.append(m.rel)
     for m in st.mods + back:
@@ -3743,9 +3792,10 @@ def pull_dir(repo, reg, st, args):
                       + f"{refused[-1][0].rel}: {refused[-1][1]} - use 'git filesync pull "
                       f"--overwrite {arg}' to take what upstream has, or --force to keep "
                       "the files of this repository")
-    counts = [(sum(1 for v in notes.values() if v.startswith("new upstream")), "new"),
-              (sum(1 for v in notes.values() if v.startswith("deleted upstream")), "deleted"),
-              (sum(1 for v in notes.values() if not v.startswith(("new", "deleted"))),
+    added, deleted = ("new upstream", "now selected"), ("deleted upstream", "no longer")
+    counts = [(sum(1 for v in notes.values() if v.startswith(added)), "new"),
+              (sum(1 for v in notes.values() if v.startswith(deleted)), "deleted"),
+              (sum(1 for v in notes.values() if not v.startswith(added + deleted)),
                "changed")]
     summary = ", ".join(f"{n} {w}" for n, w in counts if n) or "no file changed"
     merged = [r for r, v in notes.items() if "merge" in v]
@@ -3760,6 +3810,7 @@ def pull_dir(repo, reg, st, args):
         return None
     # kept by the caller, for all files at once (see save_discarded)
     st.discards = (discarded + deletes, discarded + deletes)
+    dlink.drop_synced()
     dlink.set("commit", st.new)
     # the directory at that commit (upstream may have changed only files
     # the patterns leave out since: the synced commit stays)
@@ -4204,8 +4255,8 @@ def add_ref(ctx, reg, args, hint=None):
         if args.branch and args.branch != s["branch"]:
             raise FsError(f"source '{args.source}' follows {s['branch']}, not {args.branch} - "
                           + (hint or "give the URL to link to another branch, or change the "
-                             f"source's branch with 'git filesync source set-branch "
-                             f"{args.source} {args.branch}'"))
+                             f"source's branch with 'git filesync source set "
+                             f"{args.source} -b {args.branch}'"))
         return s.get("url", ""), s["branch"], args.source
     return args.source, args.branch or ctx.default_branch(args.source), None
 
@@ -4845,21 +4896,46 @@ def keep_base(src, link):
         link.set("commit", commit)
 
 
+def set_command(repo, lk):
+    """The set command for what the entry lk has - every aspect, also those
+    not set (--no-tag), so that it serves as a template for others; entered
+    again, it changes nothing."""
+    q, s = shlex.quote, lk.source
+    words = ["git", "filesync", "set", q(shown(repo, lk.rel) + ("/" if lk.is_dir else "")),
+             "--source", q(s.get("url", ""))] + (["-b", q(s["branch"])] if s.get("branch") else [])
+    words += ["--tag", q(lk.tag)] if lk.tag else ["--no-tag"]
+    words += ["-p", q(lk.path or "/"),
+              "--adaptable" if lk.adaptable else "--no-adaptable"]
+    for k in PATTERN_KEYS if lk.is_dir else ():
+        words += [w for p in getattr(lk, k) for w in (f"--{k}", q(p))] or [f"--no-{k}"]
+    return " ".join(words)
+
+
 def cmd_set(ctx, repo, args):
     """Change the link of linked files - their source (URL and branch), tag,
-    upstream path or whether it is adaptable. A file uses the [source] with its URL and
-    branch: found, created, or - when all files of a source move - that
-    source changed; one left without files is removed. Only .git-filesync
-    is changed (and staged); the synced version (the base) is kept where it
-    still applies: for another branch or tag of the same upstream, and for
-    another upstream that has it (a fork, a moved repository); with another
-    path it is looked up like for add."""
+    upstream path, whether it is adaptable, a [dir] entry's patterns.
+    Without any of these: show them, as the set command that sets them. A
+    file uses the [source] with its URL and branch: found, created, or - when
+    all files of a source move - that source changed; one left without
+    files is removed. Only .git-filesync is changed (and staged); the synced
+    version (the base) is kept where it still applies: for another branch
+    or tag of the same upstream, and for another upstream that has it (a
+    fork, a moved repository); with another path it is looked up like for
+    add. Other patterns take effect at the next pull (see set_patterns)."""
     patterns = args.include or args.exclude or args.no_include or args.no_exclude
-    if not (args.source or args.branch or args.tag or args.no_tag or args.path
-            or args.adaptable is not None or patterns):
-        raise FsError("nothing to change: give --source, -b, --tag/--no-tag, -p, "
-                      "--adaptable/--no-adaptable or --include/--exclude")
+    changes = args.source or args.branch or args.tag or args.no_tag or args.path or \
+        args.adaptable is not None or patterns
     reg = Registry(repo)
+    if args.list or not changes:
+        if args.list and (args.files or changes):
+            raise FsError("--list shows all entries: no paths, nothing to change")
+        if not args.files and not args.list:
+            raise FsError("give the linked files or directories (or --list for all)")
+        for lk in reg.links() if args.list else select_links(repo, reg, args.files, whole=True):
+            print(set_command(repo, lk))
+        return EXIT_OK
+    if not args.files:
+        raise FsError("give the linked files or directories to change")
     reg.dry_run = args.dry_run
     links = select_links(repo, reg, args.files, whole=True)
     if args.path and len(links) != 1:
@@ -4890,7 +4966,7 @@ def cmd_set(ctx, repo, args):
             src.tip()
             if not name and set(source_files(reg, old)) <= {lk.rel for lk in lks}:
                 # all files of the source move to a new place: the source itself
-                # changes, keeping its name (like source set-url / set-branch)
+                # changes, keeping its name (like source set --url / -b)
                 for key, value in (("url", url_), ("branch", branch_)):
                     if reg.sources[old].get(key) != value:
                         print(f"{would}source {old}: {key} {reg.sources[old].get(key)} -> {value}")
@@ -4919,42 +4995,9 @@ def cmd_set(ctx, repo, args):
             print(f"{would}{lk.shown_rel}: " + (f"tag {args.tag}" if args.tag else
                                           f"follows branch {lk.source.get('branch')}"))
             changed = True
-    if args.path and links[0].is_dir:
-        # another upstream directory: its files aren't these; pull compares
-        # them, as for a new link (see first_sync_dir)
-        lk = links[0]
-        src = ctx.source(lk.url, lk.ref, lk.name, lk.line)
-        head = src.tip()
-        path = upstream_path(args.path)
-        if not src.is_dir(head, path):
-            raise FsError(f"no directory '{path or '/'}' in {src.label} at {src.short(head)}")
-        if path != lk.path:
-            print(f"{would}{lk.shown_rel}: path {up_join(lk.path, '') or '/'} -> "
-                  f"{up_join(path, '') or '/'}" + ("" if lk.unsynced else
-                                                   " (not synced yet: pull compares the files)"))
-            lk.set("path", path or "/")
-            lk.set("commit", None)
-            lk.set("tree", None)
-            changed = True
-    elif args.path:
-        lk = links[0]
-        src = ctx.source(lk.url, lk.ref, lk.name, lk.line)
-        head = src.tip()
-        path = upstream_path(args.path)
-        if lk.unsynced:           # no base yet: pull takes the path's version
-            if not src.blob_at(head, path):
-                raise FsError(f"no file '{path}' in {src.label} at {src.short(head)}")
-            commit, blob, modified = "", "", False
-        else:
-            commit, blob, _, modified, _ = find_base(repo, src, head, lk.rel, path, lk.target)
-        if (path, commit, blob) != (lk.path, lk.commit, lk.blob):
-            print(f"{would}{lk.rel}: path {lk.path} -> {path}"
-                  + (f", based on {src.short(commit)}" if commit else "")
-                  + (", with local modifications" if modified else ""))
-            for k, v in (("path", path), ("commit", commit), ("blob", blob)):
-                if v:
-                    lk.set(k, v)
-            changed = True
+    path = upstream_path(args.path) if args.path else None
+    if args.path and path != links[0].path:      # the same path: nothing to change
+        changed = set_path(ctx, repo, links[0], path, would) or changed
     if args.adaptable is not None:
         for lk in links:
             if lk.adaptable != args.adaptable:
@@ -4962,73 +5005,87 @@ def cmd_set(ctx, repo, args):
                 print(f"{would}{lk.shown_rel}: "
                       f"{'adaptable' if args.adaptable else 'not adaptable'}")
                 changed = True
-    staged = []
     if patterns:
         for lk in links:
-            files = set_patterns(ctx, repo, lk, args, would)
-            if files is not None:
-                staged += files
-                changed = True
+            changed = set_patterns(ctx, lk, args, would) or changed
     if not changed:
         print("nothing to change")
     elif not args.dry_run:
         reg.finish()
-        if staged:
-            print(f"{REGISTRY} and {plural(len(staged), 'file')} staged (use \"git filesync "
-                  "status\" to see what changes)")
-        else:
-            print(REGISTRY_STAGED)
+        print(REGISTRY_STAGED)
     return EXIT_OK
 
 
-def set_patterns(ctx, repo, lk, args, would):
-    """set --include / --exclude (--no-...) of a [dir] entry: the new
-    patterns apply at once, at its base - a file they select now is the
-    entry's, fetched like by add if it isn't there (an existing one must
-    be the synced version unless the entry is adaptable); one they leave
-    out stays, as a file of this repository. Returns the files written
-    (and staged), None if nothing changes."""
-    old = {"include": lk.include, "exclude": lk.exclude}
-    new = {k: [] if getattr(args, f"no_{k}") else getattr(args, k) or old[k] for k in old}
-    if new == old:
-        return None
-    src = None if lk.unsynced else ctx.source(lk.url, lk.ref, lk.name, lk.line)
-    before = None if lk.unsynced else dir_base(src, lk)
-    if src and before is None:
-        raise FsError(f"{lk.shown_rel}: synced tree {lk.tree[:12]} not found in {src.label}")
-    draft = DirLink(lk.reg, lk.rel, dict(lk.v, **{k: join_patterns(v) or "" for k, v in
-                                                   new.items()}))
-    after = {} if lk.unsynced else dir_base(src, draft)
-    plan, gone = [], sorted(set(before or {}) - set(after))
-    for below in sorted(set(after) - set(before or {})):
-        m = draft.member(below, after[below])
-        problem = path_problem(m.rel) or in_the_way(repo.top, m.rel)
-        if problem:
-            raise FsError(f"{m.rel}: {problem}")
-        plan.append(Planned(m.rel, m.path, lk.commit, m.blob, *compare_existing(
-            repo, src, m.rel, m.path, m.blob, repo.top / m.rel)))
-    modified = [p for p in plan if p.modified]
-    if modified and not lk.adaptable:
-        raise FsError(f"{lk.shown_rel}: {few(repo, modified)} "
-                      f"differ{'s' if len(modified) == 1 else ''} from the synced version - "
-                      "make the entry adaptable (--adaptable) to keep them as adaptations, "
-                      "or move them away first")
-    for k in old:
-        if new[k] != old[k]:
-            print(f"{would}{lk.shown_rel}: {k} " + (join_patterns(new[k]) or "(none)"))
-            if not args.dry_run:
-                lk.set(k, join_patterns(new[k]))
-    if plan:
-        print(f"{would}{lk.shown_rel}: now also {plan_note(plan)}")
-    if gone:
-        print(f"{would}{lk.shown_rel}: {plural(len(gone), 'file')} no longer linked "
-              "(kept as files of this repository)")
-    if args.dry_run or not plan:
-        return []
-    repo.check_plain(p.rel for p in plan)
-    write_synced(repo, {p.rel: None if p.content is None else repo.normalize(p.content, p.rel)
-                        for p in plan})
-    return [p.rel for p in plan]
+def set_path(ctx, repo, lk, path, would):
+    """set -p: another upstream path. A [dir] entry becomes a new link (its
+    files aren't those there: pull compares them, see first_sync_dir); a
+    file takes the path's current version as its base, as for add."""
+    src = ctx.source(lk.url, lk.ref, lk.name, lk.line)
+    head = src.tip()
+    if lk.is_dir:
+        if not src.is_dir(head, path):
+            raise FsError(f"no directory '{path or '/'}' in {src.label} at {src.short(head)}")
+        print(f"{would}{lk.shown_rel}: path {up_join(lk.path, '') or '/'} -> "
+              f"{up_join(path, '') or '/'}" + ("" if lk.unsynced else
+                                               " (not synced yet: pull compares the files)"))
+        lk.set("path", path or "/")
+        lk.set("commit", None)
+        lk.set("tree", None)
+        lk.drop_synced()
+        return True
+    if lk.unsynced:               # no base yet: pull takes the path's version
+        if not src.blob_at(head, path):
+            raise FsError(f"no file '{path}' in {src.label} at {src.short(head)}")
+        commit, blob, modified = "", "", False
+    else:
+        commit, blob, _, modified, _ = find_base(repo, src, head, lk.rel, path, lk.target)
+    print(f"{would}{lk.rel}: path {lk.path} -> {path}"
+          + (f", based on {src.short(commit)}" if commit else "")
+          + (", with local modifications" if modified else ""))
+    for k, v in (("path", path), ("commit", commit), ("blob", blob)):
+        if v:
+            lk.set(k, v)
+    return True
+
+
+def set_patterns(ctx, lk, args, would):
+    """set --include / --exclude (--no-...) of a [dir] entry: only the
+    registry changes; pull then applies them like a change upstream - files
+    they newly select fetched, those they no longer select deleted. Until
+    then the base keeps the patterns it was synced with, written to
+    synced-include / synced-exclude while the new ones select other files
+    of its tree (see DirLink.synced_patterns). Shows what the next pull does
+    with them. Returns whether something changes."""
+    new = {k: [] if getattr(args, f"no_{k}") else getattr(args, k) or getattr(lk, k)
+           for k in PATTERN_KEYS}
+    keys = [k for k in PATTERN_KEYS if new[k] != getattr(lk, k)]
+    if not keys:
+        return False
+    draft = DirLink(lk.reg, lk.rel, dict(lk.v, **{k: join_patterns(v) or ""
+                                                   for k, v in new.items()}))
+    draft.check_patterns()
+    synced = {k: lk.synced_patterns(k) for k in PATTERN_KEYS}
+    files = None if lk.unsynced else \
+        ctx.source(lk.url, lk.ref, lk.name, lk.line).tree_files(lk.tree)
+    counts = None
+    if files is not None:         # (without a base, pull compares all files)
+        before = {b for b in files if lk.selects(b, base=True)}
+        after = {b for b in files if draft.selects(b)}
+        counts = len(after - before), len(before - after)
+    lines = [f"{lk.shown_rel}: {k} {join_patterns(getattr(lk, k)) or '(none)'} -> "
+             f"{join_patterns(new[k]) or '(none)'}" for k in keys]
+    if counts:
+        lines[-1] += f" (at the next pull: {counts[0]} new, {counts[1]} deleted)"
+    print("\n".join(would + line for line in lines))
+    for k in keys:
+        lk.set(k, join_patterns(new[k]))
+    for k in PATTERN_KEYS:        # only while they make a difference
+        if counts and any(counts) and new[k] != synced[k]:
+            if f"synced-{k}" not in lk.v:
+                lk.set(f"synced-{k}", join_patterns(synced[k]) or "")
+        else:
+            lk.set(f"synced-{k}", None)
+    return True
 
 
 def shell():
@@ -5090,7 +5147,7 @@ def registry_problems(reg):
         if others:
             problems.append(f"{what} overlaps with the entry for {and_list(others)}")
         try:
-            DirLink(reg, rel).selects("")
+            DirLink(reg, rel).check_patterns()
         except FsError as e:
             problems.append(f"{what}: {e}")
     return problems
@@ -5129,6 +5186,14 @@ def source_files(reg, name):
     return reg.uses(name)
 
 
+def source_command(name, s):
+    """The source set command for what the [source] s has (like set_command)."""
+    q = shlex.quote
+    return " ".join(["git", "filesync", "source", "set", q(name)]
+                    + (["--url", q(s["url"])] if s.get("url") else [])
+                    + (["-b", q(s["branch"])] if s.get("branch") else []))
+
+
 def cmd_source(ctx, repo, args):
     """Like `git remote`: list, rename and change the [source]s - which
     add and set create as needed, and remove when no file uses them. Only
@@ -5144,44 +5209,57 @@ def cmd_source(ctx, repo, args):
             print(f"{name}\t{s.get('url', '')} ({s.get('branch') or 'branch missing'}, "
                   f"{entries_text(used) or '0 files'})")
         return EXIT_OK
-    if args.name not in reg.sources:
+    changes = action == "set" and (args.url or args.branch)
+    if action == "set" and (args.list or not changes):
+        if args.list and (args.name or changes):
+            raise FsError("--list shows all sources: no name, nothing to change")
+        if not args.name and not args.list:
+            raise FsError("give the name of a source (or --list for all)")
+    elif not args.name:
+        raise FsError("give the name of a source")
+    if args.name and args.name not in reg.sources:
         raise FsError(f"no source '{args.name}' in {REGISTRY}"
                       + (f" (known: {', '.join(sorted(reg.sources))})" if reg.sources else ""))
+    if action == "set" and not changes:
+        for name in sorted(reg.sources) if args.list else [args.name]:
+            print(source_command(name, reg.sources[name]))
+        return EXIT_OK
+    reg.dry_run = args.dry_run
+    would = "would: " if args.dry_run else ""
     s = reg.sources[args.name]
     if action == "rename":
         if args.value in reg.sources:
             raise FsError(f"source '{args.value}' already exists")
         if not args.value or "\n" in args.value:
             raise FsError("invalid source name")
+        if args.dry_run:
+            print(f"would rename {args.name} -> {args.value}")
+            return EXIT_OK
         reg.rename_source(args.name, args.value)
-        done = f"renamed {args.name} -> {args.value}"
-    else:
-        url, branch = s.get("url", ""), s.get("branch")
-        key = "url" if action == "set-url" else "branch"
-        if key == "url":
-            url = args.value
-        else:
-            branch = args.value
-        other = reg.find_source(url, branch, exclude=args.name)
-        if other:
-            raise FsError(f"source '{other}' already has this URL and branch {branch} - "
-                          f"move the files to it with 'git filesync set FILE... --source {other}'")
-        if url and branch:        # as for set: the branch must exist upstream
-            src = ctx.source(url, ("branch", branch), args.name)
-            src.tip()
-            if key == "url" and norm_url(url) != norm_url(s.get("url", "")):
-                for rel in source_files(reg, args.name):
-                    keep_base(src, reg.entry(rel))
-        old = s.get(key)
-        reg.set_source(args.name, key, args.value)
-        done = f"{args.name}: {key} {args.value}" + (f" (was {old})" if old and old != args.value
-                                                     else "")
-    reg.finish()
-    print(f"{paint(done, 'green')}; {REGISTRY} staged")
-    files = source_files(reg, args.value if action == "rename" else args.name)
-    if action != "rename" and files:
-        print(f'  (use "git filesync status" to see what changes for its '
-              f'{plural(len(files), "linked file")}, "git filesync pull <file>..." to sync them)')
+        reg.finish()
+        print(f"{paint(f'renamed {args.name} -> {args.value}', 'green')}; {REGISTRY} staged")
+        return EXIT_OK
+    url, branch = args.url or s.get("url", ""), args.branch or s.get("branch")
+    keys = [(k, v) for k, v in (("url", url), ("branch", branch)) if v != s.get(k)]
+    if not keys:
+        print("nothing to change")
+        return EXIT_OK
+    other = reg.find_source(url, branch, exclude=args.name)
+    if other:
+        raise FsError(f"source '{other}' already has this URL and branch {branch} - "
+                      f"move the files to it with 'git filesync set FILE... --source {other}'")
+    if url and branch:            # as for set: the branch must exist upstream
+        src = ctx.source(url, ("branch", branch), args.name)
+        src.tip()
+        if norm_url(url) != norm_url(s.get("url", "")):
+            for rel in source_files(reg, args.name):
+                keep_base(src, reg.entry(rel))
+    for k, v in keys:
+        print(f"{would}source {args.name}: {k} {s.get(k) or '(none)'} -> {v}")
+        reg.set_source(args.name, k, v)
+    if not args.dry_run:
+        reg.finish()
+        print(REGISTRY_STAGED)
     return EXIT_OK
 
 
@@ -5756,7 +5834,7 @@ def run(argv=None):
             p.add_argument("--prompt", action="store_const", const=True,
                            help="ask before each file even with difftool.prompt=false")
 
-    p = add_command(sub, "add", parents=[common], help="link a file (or all files of a directory) "
+    p = add_command(sub, "add", parents=[common], help="link a file (or a directory) "
                                                      "to the upstream repository")
     p.add_argument("source", metavar="URL|SOURCE", help="upstream URL or name of a [source] in "
                    + REGISTRY)
@@ -5785,8 +5863,11 @@ def run(argv=None):
                    help="local adaptations allowed (default: the file must stay an exact copy)")
 
     p = add_command(sub, "set", parents=[common], help="change the link of linked files: source, "
-                                                     "tag, upstream path, adaptable")
-    p.add_argument("files", nargs="+", metavar="PATH", help="linked files or directories")
+                                                     "tag, path, adaptable, patterns (without "
+                                                     "options: show it)")
+    p.add_argument("files", nargs="*", metavar="PATH", help="linked files or directories")
+    p.add_argument("--list", action="store_true",
+                   help="show the set command for each entry, one per line")
     p.add_argument("--source", metavar="URL|SOURCE",
                    help="take the files from another upstream (a fork, a moved repository), "
                         "or the [source] SOURCE; the synced version is kept")
@@ -5810,7 +5891,7 @@ def run(argv=None):
         g = p.add_mutually_exclusive_group()
         g.add_argument(f"--{k}", metavar="PATTERN", action="append",
                        help=f"linked directory: {what} (repeatable; replaces the patterns; "
-                            "applies at once)")
+                            "the files follow at the next pull)")
         g.add_argument(f"--no-{k}", action="store_true", help=f"linked directory: no {k} "
                                                                "patterns")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
@@ -5848,16 +5929,21 @@ def run(argv=None):
     p.add_argument("-v", "--verbose", action="store_true",
                    help="list with URL, branch and file count")
     actions = p.add_subparsers(dest="action", metavar="ACTION")
-    for name, arg, hlp in (("rename", "NEW", "rename a source and all references to it"),
-                           ("set-url", "URL", "change the URL of a source"),
-                           ("set-branch", "BRANCH", "follow BRANCH - for all files of the "
-                                                    "source; pinned ones look for newer tags "
-                                                    "(or those of a pattern) on it")):
-        # set-url / set-branch check the branch upstream
-        a = add_command(actions, name, parents=[colorp if name == "rename" else common], help=hlp)
-        a.add_argument("name", metavar="NAME" if name != "rename" else "OLD",
-                       help="key of the [source]")
-        a.add_argument("value", metavar=arg)
+    a = add_command(actions, "rename", parents=[colorp],
+                    help="rename a source and all references to it")
+    a.add_argument("name", metavar="OLD", help="key of the [source]")
+    a.add_argument("value", metavar="NEW")
+    a.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
+    # checks the branch upstream
+    a = add_command(actions, "set", parents=[common],
+                    help="change the URL or branch of a source (without options: show them)")
+    a.add_argument("name", nargs="?", metavar="NAME", help="key of the [source]")
+    a.add_argument("--url", help="another URL, e.g. after upstream moved")
+    a.add_argument("-b", "--branch", help="follow BRANCH - for all files of the source; pinned "
+                                          "ones look for newer tags (or those of a pattern) on it")
+    a.add_argument("--list", action="store_true",
+                   help="show the command for each source, one per line")
+    a.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
     a = add_command(actions, "map", parents=[colorp],
                     help="use a local checkout for an upstream URL (this repo's config; "
                          "--global for all repos)")

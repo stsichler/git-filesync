@@ -172,11 +172,20 @@ shows the entry in one line, with the number of files concerned:
 names the files:
 
 - a file **missing** here but still upstream (gone upstream too: fine);
-- a file **adapted here and deleted upstream** – `--overwrite` deletes it,
-  `--force` keeps it as a file of this repository;
+- a file **adapted here and deleted upstream** (or no longer selected by
+  the patterns) – `--overwrite` deletes it, `--force` keeps it as a file of
+  this repository;
 - a file **new upstream** where a different one of this repository is –
   `--overwrite` replaces it, `--force` keeps it as an adaptation (an
   adaptable entry only).
+
+Other patterns ([`set --include` / `--exclude`](#set)) change only
+`.git-filesync`; the next `pull` applies them like a change upstream:
+files they now select are fetched, those they no longer select deleted.
+Until then `status` shows the entry as pending (`patterns changed; files: 2
+new`), and its files are still those of the old patterns, which the entry
+keeps in `synced-include` / `synced-exclude` (only while they select other
+files; `pull` removes them).
 
 Entries don't overlap: no `[file]` or other `[dir]` inside a `[dir]`.
 Commands that change an entry – `pull`, `set`, `rm`, `unlink`, `mv` – take
@@ -203,7 +212,7 @@ Basic commands – what you need day to day:
 
 | Command | Purpose |
 |---|---|
-| [`set PATH… OPTIONS`](#set) | change the link of linked files: source, tag, upstream path, adaptable, patterns |
+| [`set PATH… [OPTIONS]`](#set) | change (or show) the link of linked files: source, tag, upstream path, adaptable, patterns |
 | [`edit`](#edit) | edit `.git-filesync` in the editor |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL or branch |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
@@ -222,6 +231,11 @@ and your own changes in one commit. `pull` and `add` prepare a [proposed
 commit message](#proposed-commit-messages) that a plain `git commit`
 offers. The reading commands (`status`, `diff`, `difftool`, listing
 sources, the hooks) change nothing in the repository.
+
+**`-n` / `--dry-run`** is there for every command that stages something
+or deletes files – except `restore` (like `git restore`), `edit` and
+`hooks`. It leaves out only the writing: it reads, checks and accesses
+upstream as without it, refuses the same, and shows what would change.
 
 Without a command, `status` runs. `PATH` is a file or a directory (all
 linked files below it), relative to the current directory, as are the
@@ -252,7 +266,7 @@ objects after a while (normally two weeks).
 
 | Option | Commands | Effect |
 |---|---|---|
-| `--no-fetch` | `status`, `pull`, `diff`/`difftool`, `restore`, `add`, `set`, `source set-url`/`set-branch` | don't fetch, use the cached state (offline); an upstream not in the [cache](#cache) yet is cloned anyway. `restore` and `diff` of local changes fetch only if the cache lacks the branch, even without it |
+| `--no-fetch` | `status`, `pull`, `diff`/`difftool`, `restore`, `add`, `set`, `source set` | don't fetch, use the cached state (offline); an upstream not in the [cache](#cache) yet is cloned anyway. `restore`, `diff` of local changes and `set` without `--source`, `-b`, `--tag`, `-p` fetch only if the cache lacks the branch, even without it |
 | `--remote` | as `--no-fetch` | ignore [mappings](#source-map) this once and use the upstream URL; the mapping stays. With `--no-fetch`: the cached state |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
@@ -607,8 +621,19 @@ repository in it. `-n` / `--dry-run` only shows what would be moved.
 ### `set`
 
 `set PATH… OPTIONS` – change the link of linked files: source, tag,
-upstream path, adaptable. Only `.git-filesync` changes (staged); `status`
-then shows what is to sync, and `pull` syncs.
+upstream path, adaptable, patterns. Only `.git-filesync` changes (staged);
+`status` then shows what is to sync, and `pull` syncs.
+
+`set PATH…` without options shows the links as the `set` command that sets
+them, one line per entry – every aspect, also those not set (`--no-tag`),
+so it serves as a template for other entries. Entered again, it changes
+nothing. `set --list` shows all entries. The quoting is that of a POSIX
+shell (also Git Bash, mostly PowerShell; not cmd.exe).
+
+```
+$ git filesync set third_party/lib
+git filesync set third_party/lib/ --source https://github.com/owner/lib.git -b main --no-tag -p lib --no-adaptable --no-include --exclude test/ --exclude '*_test.c'
+```
 
 | Option | Effect |
 |---|---|
@@ -616,15 +641,16 @@ then shows what is to sync, and `pull` syncs.
 | `-b`, `--branch BRANCH` | follow BRANCH (with `--source URL`: of that upstream; default: its default branch) |
 | `--tag TAG` | [pin](#pinning-to-a-tag) the files to TAG or a [pattern](#tag-patterns); a tag that doesn't exist is refused |
 | `--no-tag` | follow the source's branch again |
-| `-p`, `--path PATH` | another upstream path (one file or directory) |
+| `-p`, `--path PATH` | another upstream path (one file or directory); the same path changes nothing |
 | `--adaptable`, `--no-adaptable` | allow [local adaptations](#exact-copies-and-adaptable-files), or not any more (the default) |
-| `--include PATTERN`, `--exclude PATTERN` | [linked directory](#linked-directories): new patterns (repeatable; they replace the old ones) |
+| `--include PATTERN`, `--exclude PATTERN` | [linked directory](#linked-directories): new patterns (repeatable; they replace the old ones); the files follow at the next `pull` |
 | `--no-include`, `--no-exclude` | linked directory: remove the patterns |
+| `--list` | show all entries (see above) |
 | `-n`, `--dry-run` | only show what would change |
 
 URL and branch select the source, as for [`add`](#add): the one with that
 URL and branch, created if needed – or, if all files of a source move, that
-source itself changes (as with [`source set-url` / `set-branch`](#source)).
+source itself changes (as with [`source set`](#source)).
 A source left without files is removed. A `--tag` not on the branch gives a
 warning, a pattern without a match there an error; both name the branches
 that have it.
@@ -644,9 +670,13 @@ stay adaptations:
   them.) A linked directory with another path becomes a new link: `pull`
   compares its files, as `add` does.
 
-New patterns apply at once, at the base: a file they select now is fetched
-and staged (an existing one must be the synced version, unless the entry
-is adaptable); one they leave out stays as a file of this repository.
+New patterns take effect at the next `pull`, like a change upstream (see
+[Linked directories](#linked-directories)). `set` says what that will do,
+with `-n` too:
+
+```text
+third_party/lib/: exclude test/ -> (none) (at the next pull: 12 new, 0 deleted)
+```
 
 ```sh
 git filesync set src/foo.c --adaptable
@@ -680,8 +710,11 @@ to its last key, so comments after it stay.
 |---|---|
 | `source` | list the source names (`-v`: with URL, branch and number of entries) |
 | `source rename OLD NEW` | rename a source and every reference to it |
-| `source set-url NAME URL` | change the URL, e.g. after upstream moved; the synced versions are looked up there as for [`set --source`](#set) |
-| `source set-branch NAME BRANCH` | follow BRANCH, for all files of the source; for [pinned](#pinning-to-a-tag) ones where newer tags are looked for |
+| `source set NAME --url URL` | change the URL, e.g. after upstream moved; the synced versions are looked up there as for [`set --source`](#set) |
+| `source set NAME -b BRANCH` | follow BRANCH, for all files of the source; for [pinned](#pinning-to-a-tag) ones where newer tags are looked for |
+| `source set NAME` | show the source as the command that sets it, like [`set`](#set) (`--list`: all sources) |
+
+`rename` and `source set` take `-n` / `--dry-run`.
 
 ```
 $ git filesync source -v
@@ -689,7 +722,7 @@ owner/lib	https://github.com/owner/lib.git (main, 3 files)
 owner/lib-dev	https://github.com/owner/lib.git (dev, 1 file)
 ```
 
-`set-url` and `set-branch` refuse a branch that doesn't exist upstream, and
+`source set` refuses a branch that doesn't exist upstream, and
 a change that would make two sources identical – move the files with
 [`set`](#set) instead.
 

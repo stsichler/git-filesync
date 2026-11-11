@@ -209,7 +209,7 @@ OUT=$(git filesync add "$URL" src/lib.c -p lib.c 2>&1)
 check "--help: basic and advanced commands" \
   "$(git filesync -h | grep -E '^(basic commands|advanced commands):$|^  (status|mv|set|hooks?) ' | cut -c1-8 | oneline)" \
   "basic co   status   mv     advanced   set      hooks  "
-check "command help repeats the summary" "$(git filesync add -h | grep -c '^Link a file (or all files of a directory) to the upstream repository\.$')" "1"
+check "command help repeats the summary" "$(git filesync add -h | grep -c '^Link a file (or a directory) to the upstream repository\.$')" "1"
 check "add stages, like git add" "$(git status --porcelain | oneline)" "A  .git-filesync A  src/lib.c "
 check "add: says how to commit" "$(echo "$OUT" | grep -cxE '    git commit|\(it offers the proposed commit message; a copy stays in \.git/FILESYNC_MSG\)')" "2"
 check "add: copy of the proposed message" "$(cat .git/FILESYNC_MSG)" "$(cat .git/SQUASH_MSG)"
@@ -1341,8 +1341,9 @@ check "set --tag: a missing tag is refused" "$(rc git filesync set t.c --tag v9)
 check "set: --tag and --no-tag exclude each other" "$(rc git filesync set t.c --tag v2 --no-tag)" "2"
 git filesync set t.c --no-tag >/dev/null
 check "set --no-tag: follows the branch again" "$(git config -f .git-filesync file.t.c.tag)|$(st)" "|"
-check "source set-branch needs the branch" "$(rc git filesync source set-branch "$SRC9")" "2"
+check "source set -b needs the branch" "$(rc git filesync source set "$SRC9" -b)" "2"
 check "source set-tag is gone" "$(rc git filesync source set-tag "$SRC9" v2)" "2"
+check "source set-url / set-branch are gone" "$(rc git filesync source set-url "$SRC9" x)$(rc git filesync source set-branch "$SRC9" main)" "22"
 git commit -qm "follow main"
 
 # a tag in a [source] (before 0.14) is an error, with a hint
@@ -1358,7 +1359,7 @@ section "14. source: list, rename and change sources"
 
 check "source: lists the keys" "$(git filesync source)" "$SRC9"
 check "source -v" "$(git filesync source -v)" "$(printf '%s\t%s (main, 1 file)' "$SRC9" "$URL9")"
-check "source: unknown name" "$(rc git filesync source set-url nope file:///x)" "2"
+check "source: unknown name" "$(rc git filesync source set nope --url file:///x)" "2"
 
 git filesync source rename "$SRC9" lib9 >/dev/null
 check "rename: section renamed" "$(git config -f .git-filesync source.lib9.url)" "$URL9"
@@ -1367,9 +1368,17 @@ check "rename: old section gone" "$(git config -f .git-filesync --get-regexp "^s
 check "rename: status works" "$(st)" ""
 git commit -qm "rename source"
 
-git filesync source set-url lib9 "$URL9/" >/dev/null
-check "set-url" "$(git config -f .git-filesync source.lib9.url)" "$URL9/"
-check "set-url: status works" "$(st)" ""
+git filesync source set lib9 --url "$URL9/" >/dev/null
+check "source set --url" "$(git config -f .git-filesync source.lib9.url)" "$URL9/"
+check "source set --url: status works" "$(st)" ""
+check "source set NAME: shows it" "$(git filesync source set lib9)" "git filesync source set lib9 --url $URL9/ -b main"
+check "source set: the command again changes nothing" "$(eval "$(git filesync source set lib9)")" "nothing to change"
+check "source set --list" "$(git filesync source set --list | cut -d' ' -f5 | oneline)" "lib9 "
+check "source set: no name" "$(rc git filesync source set)" "2"
+check "source set -n" "$(git filesync source set -n lib9 --url "$URL9")-$(git config -f .git-filesync source.lib9.url)" \
+  "would: source lib9: url $URL9/ -> $URL9-$URL9/"
+check "source rename -n" "$(git filesync source rename -n lib9 x)-$(git config -f .git-filesync source.lib9.url)" \
+  "would rename lib9 -> x-$URL9/"
 
 # set -b: another branch of the same upstream for some files - they move to
 # the source for URL and branch (created); a source left without files is
@@ -1382,7 +1391,7 @@ SRCD=$(git config -f .git-filesync file.u.c.source)
 check "set -b: a new source for the branch" \
   "$(git config -f .git-filesync source.$SRCD.branch) $(git config -f .git-filesync source.$SRCD.url) $(git config -f .git-filesync file.t.c.source)" "dev $URL9/ lib9"
 check "set -b: a missing branch is refused" "$(rc git filesync set u.c -b nope)" "2"
-check "set-branch: duplicate refused" "$(rc git filesync source set-branch "$SRCD" main)" "2"
+check "source set -b: duplicate refused" "$(rc git filesync source set "$SRCD" -b main)" "2"
 check "rename: existing name refused" "$(rc git filesync source rename "$SRCD" lib9)" "2"
 check "set -b back: joins the source again, the empty one goes" \
   "$(git filesync set u.c -b main -n)" "would: u.c: source $SRCD -> lib9"
@@ -1655,16 +1664,16 @@ check "branch: only its line, merged side branch ignored" \
   "$(git filesync status -v | grep -c '(tag v1.0 on main, newest rel-2 = v2.0-rc1, adaptable)')" "3"
 check "pull: hint, tags on one commit" "$(git filesync pull --all 2>&1 | grep -c "^hint: 3 files pinned \
 to tag v1.0; the newest tag on branch main is rel-2 = v2.0-rc1 (use 'git filesync set --tag rel-2 ")" "1"
-git filesync source set-branch "$SRC12" maint >/dev/null
+git filesync source set "$SRC12" -b maint >/dev/null
 check "branch maint" "$(git filesync status -v | grep -c '(tag v1.0 on maint, newest v1.0.1, adaptable)')" "3"
 git filesync set a.c --tag v1.0.1 >/dev/null
 check "newest tag pinned: no newer" "$(git filesync status -v a.c | grep -c newest)" "0"
-git filesync source set-branch "$SRC12" main >/dev/null
+git filesync source set "$SRC12" -b main >/dev/null
 check "tag not on the branch: warning, naming its branch" \
   "$(git filesync status -v 2>&1 | grep -c "tag v1.0.1 is not on branch 'main' .* (it is on maint; -b selects another branch)")" "1"
 check "tag not on the branch: no error" "$(rc git filesync status)" "0"
-check "source set-branch: a missing branch refused" \
-  "$(git filesync source set-branch "$SRC12" nope 2>&1 | grep -c "^error: branch 'nope' not found")-$(rc git filesync source set-branch "$SRC12" nope)" "1-2"
+check "source set -b: a missing branch refused" \
+  "$(git filesync source set "$SRC12" -b nope 2>&1 | grep -c "^error: branch 'nope' not found")-$(rc git filesync source set "$SRC12" -b nope)" "1-2"
 git config -f .git-filesync "source.$SRC12.branch" nope     # as if edited by hand
 check "a missing branch of pinned files: an error" \
   "$(git filesync status 2>&1 | grep -c "^error: .*branch 'nope' not found")-$(rc git filesync status)" "3-2"
@@ -1681,7 +1690,7 @@ git filesync source map "$URL12" --unset >/dev/null
 (cd ../co12 && git tag -d local-3 >/dev/null)
 
 # pull -b / --tag sync to another branch or tag once; the links keep their
-# own (switching them: set -b/--tag, source set-branch/set-tag)
+# own (switching them: set -b/--tag, source set -b)
 sedi 's/^1$/1-local/' a.c
 git commit -qam adapt
 OUT=$(pullc --tag v1.1 a.c 2>&1)
@@ -1822,7 +1831,14 @@ addc "$URL13" b.c
 SRC13=$(git config -f .git-filesync file.a.c.source)
 COMMIT13=$(git config -f .git-filesync file.a.c.commit)
 
-check "set: nothing to change" "$(rc git filesync set a.c)" "2"
+check "set FILE: shows the command" "$(git filesync set a.c)" \
+  "git filesync set a.c --source $URL13 -b main --no-tag -p a.c --no-adaptable"
+check "set FILE: the command again changes nothing" "$(eval "$(git filesync set a.c)")" "nothing to change"
+check "set --list: all entries" "$(git filesync set --list | cut -d' ' -f4 | oneline)" "a.c b.c "
+check "set: changes need paths" "$(rc git filesync set --adaptable)" "2"
+check "set: nothing given" "$(rc git filesync set)" "2"
+check "set --list with a path: refused" "$(rc git filesync set --list a.c)" "2"
+check "set -p, the same path: nothing to change" "$(git filesync set a.c -p a.c)" "nothing to change"
 check "set --adaptable" "$(git filesync set a.c --adaptable | head -1)" "a.c: adaptable"
 check "set --adaptable: entry" "$(git config -f .git-filesync file.a.c.adaptable)" "true"
 check "set: only staged" "$(git status --porcelain | oneline) $(git log -1 --format=%s | cut -c1-16)" "M  .git-filesync  [filesync] Add b"
@@ -1843,9 +1859,9 @@ quiet git filesync set b.c -p b.c
 check "set -p back: matching version found" "$(st b.c) $(git config -f .git-filesync file.b.c.path)" " b.c"
 check "set -p back: entry as committed" "$(git status --porcelain)" ""
 
-# source set-url looks up the synced versions there, as set --source does
-quiet git filesync source set-url "$SRC13" "$TURL/m13copy.git"
-check "source set-url: commit of the copy" "$(git config -f .git-filesync file.a.c.commit)" \
+# source set --url looks up the synced versions there, as set --source does
+quiet git filesync source set "$SRC13" --url "$TURL/m13copy.git"
+check "source set --url: commit of the copy" "$(git config -f .git-filesync file.a.c.commit)" \
   "$(git -C ../m13copy rev-parse HEAD)"
 git reset -q --hard
 
@@ -2636,16 +2652,53 @@ check "diff: files of the entry" "$(git filesync diff -- --name-only | oneline)"
 check "diff FILE of a [dir]" "$(git filesync diff vendor/sub -- --name-only | oneline)" "vendor/sub/new.c "
 git checkout -q vendor/sub/new.c vendor/own.txt
 
-# set --include / --exclude: applies at once, at the base
+# set shows an entry as the command that sets it; entered again, no change
+check "set DIR: shows the command" "$(git filesync set vendor)" \
+  "git filesync set vendor/ --source $URL27 -b main --no-tag -p lib --adaptable --no-include --exclude t/"
+check "set DIR: the command again changes nothing" "$(eval "$(git filesync set vendor)")" "nothing to change"
+check "set -p, the same path: nothing to change" "$(git filesync set vendor -p lib)" "nothing to change"
+
+# set --include / --exclude: only the registry - the files follow at the next
+# pull, as for a change upstream; until then the base keeps the old patterns
+check "set -n --include" "$(git filesync set -n --include sub/ vendor)" \
+  "would: vendor/: include (none) -> sub/ (at the next pull: 0 new, 1 deleted)"
+check "set -n: nothing changed" "$(git config -f .git-filesync dir.vendor.include || echo none)" "none"
+check "set --no-exclude" "$(git filesync set --no-exclude vendor | head -1)" \
+  "vendor/: exclude t/ -> (none) (at the next pull: 1 new, 0 deleted)"
+check "set --no-exclude: only the registry staged" "$(git diff --cached --name-only | oneline)" ".git-filesync "
+check "set --no-exclude: the old patterns kept" "$(git config -f .git-filesync dir.vendor.exclude || \
+  echo none) $(git config -f .git-filesync dir.vendor.synced-exclude)" "none t/"
+check "set --no-exclude: pending" "$(git filesync status | grep pending: | sed 's/[[:space:]]*pending:[[:space:]]*//')" \
+  "vendor/  (patterns changed; files: 1 new)"
+check "set the old patterns again: no synced-exclude" "$(git filesync set --exclude t/ vendor | head -1) \
+$(git config -f .git-filesync dir.vendor.synced-exclude || echo none) $(st)" \
+  "vendor/: exclude (none) -> t/ (at the next pull: 0 new, 0 deleted) none "
+quiet git filesync set --include sub/ vendor
+check "set --include, none before: synced-include empty" "$(grep -c '^	synced-include = ""$' .git-filesync)" "1"
+check "set --include: pending" "$(git filesync status | grep pending: | sed 's/[[:space:]]*pending:[[:space:]]*//')" \
+  "vendor/  (patterns changed; files: 1 deleted)"
+quiet git filesync set --no-include vendor
+check "set --no-include: back to the synced patterns" "$(grep -c synced- .git-filesync)" "0"
 quiet git filesync set --no-exclude vendor
-check "set --no-exclude: the test files fetched and staged" "$(git diff --cached --name-only | oneline)" \
-  ".git-filesync vendor/t/x_test.c "
-check "set --no-exclude: registry" "$(git config -f .git-filesync dir.vendor.exclude || echo none)" "none"
-git commit -qm tests
+git commit -qm "with tests"
+check "pull: newly selected files fetched" "$(pullc vendor | head -1)" "vendor/: synced (1 new)"
+check "pull: the old patterns gone, the file there" \
+  "$(git config -f .git-filesync dir.vendor.synced-exclude || echo none) $(head -1 vendor/t/x_test.c)" "none t"
+check "pull: message" "$(git log -1 --format=%B | grep -c '^- vendor/t/x_test.c (now selected by the patterns)$')" "1"
+
+# files no longer selected: deleted by pull, as if deleted upstream - an
+# adapted one is refused, --force keeps it as a file of this repository
+echo mine >> vendor/t/x_test.c
+git commit -qam "adapt a test"
 quiet git filesync set --exclude 't/' --exclude '*_test.c' vendor
 check "set --exclude: patterns in one line" "$(git config -f .git-filesync dir.vendor.exclude)" "t/ *_test.c"
-check "set --exclude: files left out stay" "$(cat vendor/t/x_test.c | head -1)-$(st)" "t-"
 git commit -qm "no tests"
+check "pull: an adapted file no longer selected is refused" "$(git filesync pull vendor 2>&1 | \
+  grep -c '^error: vendor/t/x_test.c: no longer selected by the patterns, but adapted here - use ')" "1"
+check "pull --force: kept as a file of this repository" \
+  "$(pullc --force vendor | head -1)-$(tail -1 vendor/t/x_test.c)-$(st)" "vendor/: synced (1 deleted)-mine-"
+check "pull --force: the old patterns gone" "$(git config -f .git-filesync dir.vendor.synced-exclude || echo none)" "none"
+check "set --list: all entries" "$(git filesync set --list | cut -d' ' -f4)" "vendor/"
 
 # mv: the whole directory, own files too; unlink and rm
 quiet git filesync mv vendor third && git commit -qm mv
