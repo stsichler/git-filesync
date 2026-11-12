@@ -86,13 +86,11 @@ committed like any other file, in git-config format:
   changed it (not the branch tip at sync time). So commits that don't touch
   the file don't matter, pushed or not.
 - `pull --all` takes only **plain updates**: the recorded commit is in the
-  history of the branch head or tag to sync to. It leaves out, and names,
-  files whose branch went back (`older`), whose history diverged (synced
-  from another branch or a rebased commit, also with the same version:
-  `diverged … same version`), and those whose recorded commit the source
-  doesn't have (`diverged (previous sync point unknown)`: the source is
-  behind, or upstream history was rewritten). git-filesync doesn't guess:
-  `pull FILE` syncs them to the source's current version.
+  history of the branch head or tag to sync to. A branch that went back
+  (`older`), a diverged history (another branch, a rebased commit) or a
+  commit the source doesn't have (it is behind, or history was rewritten)
+  isn't guessed at: `pull --all` leaves such files out, `pull FILE` syncs
+  them (see [`pull`](#pull)).
 - An entry **without** `commit` and `blob` (`tree`) is a **new link**: `status`
   shows it as `new`, and `pull` does its first sync exactly as
   [`add`](#add) would. This links many files at once: write their entries
@@ -371,12 +369,30 @@ Upstream changes since 3f2a9c1 (2026-09-12):
 - Add support for chunked transfer (a1b2c3d, 2026-10-28)
 ```
 
-A file that can't be synced is reported and left out; the others are still
-synced. In scripts and CI: `git filesync pull --all && git commit --no-edit`.
+What `pull` does with a file depends on its state (code of `status -s`):
+
+| State | `pull PATH…` | `pull --all` |
+|---|---|---|
+| up to date | nothing | nothing |
+| pending (`P`), new link (`N`), renamed upstream (`R`) | syncs | syncs |
+| older than last sync (`O`) | goes back | left out |
+| history diverged (`D`), also with the same version or the previous sync point unknown | syncs | left out |
+| deleted upstream (`X`) | error: `unlink` or `rm` it | error |
+| missing | error: `restore` or `unlink` it | error; nothing to sync: left out |
+| modified, but not adaptable | error: `--overwrite`, `restore -SW` or `set --adaptable` | error; nothing to sync: left out |
+| uncommitted changes (adaptable) | something to sync: error – commit, stash or discard them, as for `git pull` | the same |
+
+`pull --all` takes only plain updates along the history of the branch or
+tag, and names each file it leaves out with the reason (`warning: a.c:
+older than last sync - left out`). With `--commit`,
+`-b` or `--tag`, `--all` takes every file as if named. Files left out
+don't change the exit code; an error makes it 2, conflicts 1, and the
+other files are still synced. In scripts and CI: `git filesync pull --all
+&& git commit --no-edit`.
 
 | Option | Effect |
 |---|---|
-| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths. Only plain updates along the history; files left out that need attention are named, each with the reason: `warning: a.c: missing - left out (see 'git filesync status')` (or `modified, but not adaptable`, `older than last sync`, `history diverged`, `previous sync point not found`) |
+| `--all` | all linked files, see the table above; not together with paths |
 | `--commit REV` | sync to this revision once – a branch, tag or commit id, also backwards (the message then lists what is reverted); the file keeps its branch or tag |
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH once (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG once |
@@ -389,10 +405,6 @@ synced. In scripts and CI: `git filesync pull --all && git commit --no-edit`.
   base: the last synced version). On conflicts the file gets the usual
   conflict markers and stays unstaged, and `pull` exits with 1: resolve
   them, `git add` the files, then `git commit`.
-- **Uncommitted changes:** like `git pull`, `pull` refuses such a file –
-  commit, stash (`git stash`) or discard (`git restore`) them first.
-- **Missing files** are refused – `restore` them first, or `unlink` them.
-  `pull --all` leaves them out and says so.
 - **Renamed upstream:** `pull` follows the file, see [Files renamed or
   deleted upstream](#files-renamed-or-deleted-upstream).
 - **Linked directories:** `pull` syncs all their files or none, see
