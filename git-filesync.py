@@ -90,7 +90,9 @@ Basic commands:
                                 --commit, -b, --tag: all files); names
                                 those left out that need attention
                                 (missing; modified, but not adaptable;
-                                previous sync point unknown: pull FILE)
+                                not a plain update along the history:
+                                older, diverged, previous sync point
+                                unknown - pull FILE)
         -b, --branch BRANCH     sync to the head of BRANCH, once: the files
                                 keep following their own branch or tag
                                 (to switch: set -b/--tag)
@@ -963,13 +965,15 @@ class Source:
     def prefetch(self, links):
         """Ask at once what evaluate() needs for these links of this source:
         their paths at the tip, whether their synced commits exist (and, in
-        a local checkout, are published), the checkout's HEAD versions."""
+        a local checkout, are published) and are in the history of the tip,
+        the checkout's HEAD versions."""
         tip = self.resolve()
         if not tip:
             return
         paths = [lk.path for lk in links]
         self.blobs_at(tip, paths)
         self.commits_exist(lk.commit for lk in links)
+        self.ancestors_of(tip, (lk.commit for lk in links))
         if self.local:
             self.published(lk.commit for lk in links if self.resolve(lk.commit) == lk.commit)
             if not self.ref.startswith("refs/tags/"):
@@ -1061,6 +1065,21 @@ class Source:
                                                         "--format=%cs", r], check=False)).strip()
             return
         self._memo.update((("date", r), x) for r, x in zip(revs, lines))
+
+    def ancestors_of(self, tip, commits):
+        """Find out at once which of these existing commits are in the
+        history of tip (see is_ancestor): those not listed by
+        `rev-list C... --not tip`."""
+        commits = [c for c in dict.fromkeys(commits) if ("ancestor", c, tip) not in self._memo
+                   and self.resolve(c) == c]
+        if not commits:
+            return
+        p = self.git(["rev-list"] + commits + ["--not", tip], check=False)
+        if p.returncode:
+            return                # is_ancestor() asks one by one
+        off = set(out(p).split())
+        for c in commits:
+            self._memo[("ancestor", c, tip)] = c not in off
 
     def is_ancestor(self, a, b):
         key = ("ancestor", a, b)
@@ -2629,6 +2648,13 @@ class FileState:
         return self.local == "missing" and not self.error and not self.unsynced
 
     @property
+    def off_track(self):
+        """Not a plain update along the history of the branch or tag: older
+        than the last sync, history diverged, or the previous sync point
+        unknown. pull --all leaves it out; only pull FILE syncs it."""
+        return self.lost_old or bool(self.behind_args) or self.diverged
+
+    @property
     def attention(self):
         """Something to report (status --exit-code, hooks)."""
         return bool(self.error or self.pending or self.violation or self.missing)
@@ -2853,7 +2879,7 @@ def evaluate(ctx, repo, link):
     track_history(repo, st, src, tip, link.path, path,
                   st.has_old and st.new_blob == st.old_blob and path == link.path)
     st.changed = st.new_blob != st.old_blob
-    st.pending = st.changed or bool(st.moved) or st.lost_old
+    st.pending = st.changed or bool(st.moved) or st.off_track
     checkout_warnings(st, src, ref, path, lambda: src.blob_at("HEAD", path) != st.new_blob)
     return st
 
@@ -2863,7 +2889,10 @@ def track_history(repo, st, src, tip, old_path, path, unchanged):
     tip that changed path - and where it is relative to the synced one:
     behind it, how many commits after it, diverged; or the synced commit
     unknown upstream (lost_old). unchanged: the same version as synced, no
-    history to look at."""
+    history to look at - if the synced commit is in the history of tip; if
+    not (on another branch, rebased away), the history diverged also with
+    the same version."""
+    unchanged = unchanged and src.is_ancestor(st.old, tip)
     st.new = st.old if unchanged else src.last_change(tip, path or ".")
     if st.has_old:
         if st.new == st.old:
@@ -3033,7 +3062,7 @@ def evaluate_dir(ctx, repo, dlink):
     for m in st.members:
         m.new = st.new
         m.changed = m.new_blob != m.old_blob
-    st.pending = st.changed or st.lost_old
+    st.pending = st.changed or st.off_track
     checkout_warnings(st, src, ref, path, lambda: src.tree_at("HEAD", path) != st.new_tree)
     return st
 
@@ -3051,7 +3080,7 @@ def upstream_state(st, note=True):
             return "deleted", f"upstream, by {st.src.short(commit)}"
         n = commits_since(st)
         return "renamed", f"{st.link.path} -> {path}" + (f", {plural(n, 'commit')}" if n else "")
-    if st.changed or not st.has_old:
+    if st.changed or st.off_track:
         behind = commits_behind(st)
         if behind:
             what = "upstream branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
@@ -3063,7 +3092,9 @@ def upstream_state(st, note=True):
             what = ([plural(n, "commit")] if n or not repat else []) + \
                 (["patterns changed"] if repat else [])
             return "pending", ", ".join(what) + files_note(st)
-        return "changed", "history diverged" if st.has_old else "previous sync point unknown"
+        if not st.has_old:
+            return "diverged", "previous sync point unknown"
+        return "diverged", "history diverged" + ("" if st.changed else ", same version")
     return None
 
 
@@ -3101,7 +3132,8 @@ def describe(st):
     up = upstream_state(st)
     if up:
         label, note = up
-        parts.append((f"{note}" if label == "older" else f"upstream {label} ({note})", "yellow"))
+        parts.append((note if label in ("older", "diverged") else f"upstream {label} ({note})",
+                      "yellow"))
     if st.violation:
         parts.append((violation_text(st), "boldred"))
     if st.missing:
@@ -3124,7 +3156,7 @@ def short_code(st):
     if st.error:
         return "E  "
     up = upstream_state(st, note=False)
-    x = {"pending": "P", "older": "O", "changed": "D", "new": "N", "renamed": "R",
+    x = {"pending": "P", "older": "O", "diverged": "D", "new": "N", "renamed": "R",
          "deleted": "X"}[up[0]] if up else " "
     y = "M" if st.committed == "adapted" else " "     # like git's index column
     z = "D" if st.missing else {"modified": "M", "added": "?"}.get(st.worktree, " ")
@@ -3213,10 +3245,12 @@ def print_long(repo, sts, verbose):
     for st in ok:
         up = upstream_state(st)
         if up:
-            up_rows.append((up[0], st, up[1], "dim"))
+            up_rows.append((up[0], st, up[1], "yellow" if st.off_track else "dim"))
     section("Upstream changes to sync:",
             ['use "git filesync diff --upstream <file>..." to see what pull would bring',
              'use "git filesync pull <file>..." to sync']
+            + (['"git filesync pull --all" leaves out older and diverged ones: sync them by name']
+               if any(r[1].off_track for r in up_rows) else [])
             + (['use "git filesync unlink <file>..." to keep files deleted upstream']
                if any(r[0] == "deleted" for r in up_rows) else []),
             up_rows, "yellow")
@@ -3939,7 +3973,7 @@ def cmd_pull(ctx, repo, args):
     # contents only of the files to sync (in the blobless cache, each one
     # may have to be fetched)
     sync = [st for st in ok if (st.pending or args.overwrite)
-            and not (args.all and not once and st.lost_old)]
+            and not (args.all and not once and st.off_track)]
     files = [m for st in sync for m in (st.members if st.link.is_dir else [st])]
     for src in {id(st.src): st.src for st in ok}.values():
         src.read_blobs(b for st in files if st.src is src for b in (st.old_blob, st.new_blob))
@@ -3961,11 +3995,14 @@ def cmd_pull(ctx, repo, args):
         if st.newest and not once:
             newest.setdefault((link.name, link.tag), (link.tag, link.line, st.newest, []))[3] \
                 .append(link.rel)
-        # missing, modified but not adaptable, or the previous sync point
-        # unknown: only by name (or once to a given revision)
-        if args.all and not once and (not st.pending or st.lost_old):
+        # missing, modified but not adaptable, or not a plain update along
+        # the history (older, diverged, the previous sync point unknown):
+        # only by name (or once to a given revision)
+        if args.all and not once and (not st.pending or st.off_track):
             why = "missing" if st.missing else "previous sync point not found" \
-                if st.lost_old else "modified, but not adaptable" if st.violation else None
+                if st.lost_old else "older than last sync" if st.behind_args \
+                else "history diverged" if st.diverged \
+                else "modified, but not adaptable" if st.violation else None
             if why:           # as in git-assetsync
                 warn(f"{st.rel}: {why} - left out (see 'git filesync status')")
                 left_out = True
@@ -5434,11 +5471,12 @@ def hook_reminders(ctx, repo):
     for st in attention:
         print(f"filesync: {paint(st.rel, 'yellow', 'err')}: {render(describe(st), 'err')}",
               file=sys.stderr)
-    if any(st.pending and not st.lost_old for st in attention):
+    if any(st.pending and not st.off_track for st in attention):
         print("filesync: run 'git filesync pull <file>' to sync", file=sys.stderr)
-    if any(st.lost_old for st in attention):
-        print("filesync: see 'git filesync status' for a previous sync point not found "
-              "(pull --all leaves such files alone)", file=sys.stderr)
+    if any(st.off_track for st in attention):
+        print("filesync: see 'git filesync status' for files older than last sync, with a "
+              "history diverged or the previous sync point not found (pull --all leaves "
+              "them alone)", file=sys.stderr)
     if any(st.violation for st in attention):
         print("filesync: see 'git filesync status' and 'git filesync diff <file>' "
               "for changes not allowed", file=sys.stderr)

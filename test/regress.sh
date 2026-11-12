@@ -578,6 +578,8 @@ check "mapped: pull does not take other branch" "$(cat sB/x.c)" "v1b"
 
 (cd coB && git checkout -q main && git reset -q --hard v1)              # branch moved back
 check "mapped: older branch state detected" "$(cd sB && st)" "O"
+check "mapped: pull --all leaves an older version out" \
+  "$(cd sB && git filesync pull --all 2>&1 | grep -c 'x.c: older than last sync - left out')-$(cat sB/x.c)" "1-v1b"
 (cd sB && quiet pullc x.c)
 check "mapped: synced back to older state" "$(cat sB/x.c)" "v1"
 check "mapped: revert listed in message" "$(git -C sB log -1 --format=%B | grep -c '^- v1b')" "1"
@@ -2454,6 +2456,59 @@ check "checkout behind: pull --all doesn't go back" \
   "$(git filesync pull --all >/dev/null 2>&1; cat a.c)-$(git status --porcelain)" "a2-"
 check "checkout behind: --remote finds it" "$(git filesync status --remote -s 2>&1)" ""
 git filesync source map "$TURL/m25" --unset >/dev/null
+
+# synced from an unpushed commit, which a rebase then replaced: it is still
+# in the checkout, but not in the history of the branch - diverged
+cd "$T"
+git init -q --bare m25r.git && git -C m25r.git symbolic-ref HEAD refs/heads/main
+git clone -q m25r.git co25r 2>/dev/null
+(cd co25r && git checkout -q -b main && echo o > o.txt && git add . && git commit -qm init \
+  && git push -q origin main && echo f > f.txt && git add . && git commit -qm "f, unpushed")
+new_repo s25r
+git filesync source map "$TURL/m25r.git" "$T/co25r" >/dev/null
+addc "$TURL/m25r.git" f.txt
+git clone -q ../m25r.git "$T/o25r" && (cd "$T/o25r" && echo p > p.txt && git add . && git commit -qm other \
+  && git push -q origin main)
+(cd ../co25r && git pull -q --rebase origin main && git push -q origin main)
+check "rebased away: diverged" "$(st f.txt)" "D"
+check "rebased away: no 'not pushed' warning" "$(git filesync status 2>&1 | grep -c 'not pushed')" "0"
+check "rebased away: pull --all leaves it out" \
+  "$(git filesync pull --all 2>&1 | grep -c 'f.txt: history diverged - left out')-$(git status --porcelain)" "1-"
+check "rebased away: pull FILE takes the new commit" \
+  "$(rc pullc f.txt)-$(git config -f .git-filesync file.f.txt.commit)-$(st f.txt)" \
+  "0-$(git -C ../co25r rev-parse HEAD)-"
+
+# synced from a branch the followed one doesn't contain (here a local one),
+# the same version on main: diverged too, only by name or once to a target
+(cd ../co25r && git checkout -q -b wip && echo w > f.txt && git commit -qam wip && git checkout -q main)
+git config -f .git-filesync file.f.txt.commit "$(git -C ../co25r rev-parse wip)"
+git config -f .git-filesync file.f.txt.blob "$(git -C ../co25r rev-parse wip:f.txt)"
+echo w > f.txt && git commit -qam "synced from wip"
+(cd ../co25r && echo w > f.txt && git commit -qam "w on main" && git push -q origin main)
+check "same version off the branch: diverged" \
+  "$(git filesync status 2>&1 | grep -c 'diverged: *f.txt  (history diverged, same version)')-$(st f.txt)" "1-D"
+check "same version off the branch: status says pull --all leaves it out" \
+  "$(git filesync status 2>&1 | grep -c 'pull --all" leaves out older and diverged ones')" "1"
+check "same version off the branch: no 'not pushed' warning" \
+  "$(git filesync status 2>&1 | grep -c 'not pushed')" "0"
+check "same version off the branch: the hook doesn't say pull" \
+  "$(OUT=$(git filesync hook post-merge 2>&1); echo "$OUT" | grep -c "run 'git filesync pull")-$(echo "$OUT" | grep -c 'pull --all leaves them alone')" "0-1"
+check "same version off the branch: pull --all leaves it out" \
+  "$(git filesync pull --all 2>&1 | grep -c 'f.txt: history diverged - left out')-$(git status --porcelain)" "1-"
+check "same version off the branch: pull --all -b once takes it" \
+  "$(rc pullc --all -b main)-$(git config -f .git-filesync file.f.txt.commit)-$(st f.txt)" \
+  "0-$(git -C ../co25r rev-parse main)-"
+
+# another version on each side
+(cd ../co25r && git checkout -q wip && echo w2 > f.txt && git commit -qam w2 && git checkout -q main \
+  && echo m > f.txt && git commit -qam m && git push -q origin main)
+git config -f .git-filesync file.f.txt.commit "$(git -C ../co25r rev-parse wip)"
+git config -f .git-filesync file.f.txt.blob "$(git -C ../co25r rev-parse wip:f.txt)"
+echo w2 > f.txt && git commit -qam "synced from wip again"
+check "diverged: pull --all leaves it out" \
+  "$(git filesync pull --all 2>&1 | grep -c 'f.txt: history diverged - left out')-$(cat f.txt)" "1-w2"
+check "diverged: pull FILE syncs it" "$(rc pullc f.txt)-$(cat f.txt)-$(st f.txt)" "0-m-"
+cd "$T/s25"
 
 # the first sync of a new link warns as any pull (here: from an unpushed
 # commit of a mapped checkout)

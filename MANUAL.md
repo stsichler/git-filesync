@@ -85,12 +85,14 @@ committed like any other file, in git-config format:
   version of the upstream file, `commit` the upstream commit that last
   changed it (not the branch tip at sync time). So commits that don't touch
   the file don't matter, pushed or not.
-- If the source doesn't have the recorded commit, either it is behind (a
-  [mapped checkout](#source-map) not updated, or not fetched) or upstream
-  history was rewritten. git-filesync doesn't guess: `status` shows the
-  file as `changed (previous sync point unknown)` and names both ways on,
-  `pull --all` leaves it alone, and `pull FILE` syncs it to the source's
-  current version.
+- `pull --all` takes only **plain updates**: the recorded commit is in the
+  history of the branch head or tag to sync to. It leaves out, and names,
+  files whose branch went back (`older`), whose history diverged (synced
+  from another branch or a rebased commit, also with the same version:
+  `diverged … same version`), and those whose recorded commit the source
+  doesn't have (`diverged (previous sync point unknown)`: the source is
+  behind, or upstream history was rewritten). git-filesync doesn't guess:
+  `pull FILE` syncs them to the source's current version.
 - An entry **without** `commit` and `blob` (`tree`) is a **new link**: `status`
   shows it as `new`, and `pull` does its first sync exactly as
   [`add`](#add) would. This links many files at once: write their entries
@@ -328,7 +330,7 @@ with something to report:
 
 | Column | Meaning |
 |---|---|
-| 1 – upstream | `P` pending, `O` upstream older than last sync, `D` history diverged or previous sync point unknown, `R` renamed upstream, `X` deleted upstream, `N` new link, `E` error |
+| 1 – upstream | `P` pending, `O` upstream older than last sync, `D` history diverged (or previous sync point unknown), `R` renamed upstream, `X` deleted upstream, `N` new link, `E` error |
 | 2 – committed | `M` adapted |
 | 3 – working tree | `M` modified, `D` missing (marked `(missing!)`), `?` not committed yet |
 
@@ -374,7 +376,7 @@ synced. In scripts and CI: `git filesync pull --all && git commit --no-edit`.
 
 | Option | Effect |
 |---|---|
-| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths. Files left out that need attention are named, each with the reason: `warning: a.c: missing - left out (see 'git filesync status')` (or `modified, but not adaptable`, `previous sync point not found`) |
+| `--all` | all linked files with something to sync (with `--commit`, `-b` or `--tag`: all linked files); not together with paths. Only plain updates along the history; files left out that need attention are named, each with the reason: `warning: a.c: missing - left out (see 'git filesync status')` (or `modified, but not adaptable`, `older than last sync`, `history diverged`, `previous sync point not found`) |
 | `--commit REV` | sync to this revision once – a branch, tag or commit id, also backwards (the message then lists what is reverted); the file keeps its branch or tag |
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH once (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG once |
@@ -658,7 +660,9 @@ that have it.
 The base (`commit` / `blob`) is kept where it still applies, so adaptations
 stay adaptations:
 
-- **another tag or branch** of the same upstream: kept;
+- **another tag or branch** of the same upstream: kept; if the new one
+  doesn't contain it, the file counts as `diverged` (also with the same
+  version) until `pull FILE` moves it there – `pull --all` leaves it out;
 - **another upstream**: kept if it has that version (the recorded commit,
   or else the newest commit on its branch with the same file); otherwise a
   warning: the previous sync point counts as unknown, and `pull FILE`
