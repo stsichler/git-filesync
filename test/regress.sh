@@ -541,6 +541,26 @@ check "map SOURCE --unset" "$(git -C sB config --local --get-regexp '^filesync\.
 check "map: mistyped source name refused" "$(cd sB && rc git filesync source map no-such-source "$T/coB")" "2"
 check "map: nothing written for it" "$(git -C sB config --local --get-regexp '^filesync\.' | lines)" "0"
 
+# a link on the way stays in the mapping, absolute or relative (junction on
+# Windows, symlink elsewhere): the path as given, not resolved
+LNB=
+if command -v cygpath >/dev/null; then
+  cmd //c mklink //J "$(cygpath -w "$T/lnB")" "$(cygpath -w "$T/coB")" >/dev/null && LNB=1
+elif ln -s "$T/coB" "$T/lnB" 2>/dev/null; then
+  LNB=1
+fi
+if [ -n "$LNB" ]; then
+  check "map: a link in the path kept" \
+    "$(cd sB && git filesync source map "$URL3" "$T/lnB" | grep -c 'lnB$')" "1"
+  check "map: through the link, the checkout used" "$(cd sB && st)" ""
+  check "map: a link in a relative path kept" \
+    "$(cd sB && git filesync source map "$URL3" ../x/../lnB/. | grep -c '[/\\]lnB$')" "1"
+  (cd sB && git filesync source map "$URL3" --unset >/dev/null)
+  if command -v cygpath >/dev/null; then cmd //c rmdir "$(cygpath -w "$T/lnB")"; else rm "$T/lnB"; fi
+else
+  echo "skipped: no symlinks here"
+fi
+
 # A mapped repository follows the link's branch in the checkout (refs/heads/main),
 # not whatever is checked out there.
 (cd sB && git filesync source map "$URL3" "$T/coB" >/dev/null)

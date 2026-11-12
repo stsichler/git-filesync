@@ -5353,7 +5353,9 @@ def cmd_map(args, repo):
             print(f"now using [{rest[-1][0]}] {rest[-1][3]}")
         return EXIT_OK
     base = repo.base if repo else Path.cwd()
-    d = (base / os.path.expanduser(args.dir)).resolve()
+    # as given, only made absolute: a junction, subst or network drive, or
+    # symlink on the way stays ('..' by name, as Windows does)
+    d = Path(os.path.abspath(base / os.path.expanduser(args.dir)))
     if not is_repository(d):
         raise FsError(f"{d} is not a Git repository")
     for k in matching:

@@ -749,6 +749,9 @@ Something that looks like a URL (`scheme://…`, `host:path`) is always taken
 as one; an argument that is neither a URL, nor a source, nor an existing
 path is refused. A repository's own mapping beats a global one, so
 repositories can point to different checkouts of the same upstream.
+DIR is kept as given, only made absolute: a junction, symlink or drive
+letter on the way stays. A relative DIR counts from the real current
+directory; reached through a junction, give DIR absolute.
 
 A mapped source uses **its branch as it is in the checkout** (pinned files:
 the tag there) – the local branch, unpushed commits included, whatever is
