@@ -779,6 +779,9 @@ sedi 's/^a$/A-local/' src/foo.c
 git commit -qm 'adapt a' src/foo.c
 quiet pullc --overwrite src/foo.c
 check "--overwrite discards in an adaptable file" "$(git filesync diff)" ""
+sedi 's/^a$/A-local/' src/foo.c
+git commit -qm 'adapt a again' src/foo.c
+check "pull --all --overwrite: an up-to-date file too" "$(rc pullc --all --overwrite)-$(git filesync diff)" "0-"
 
 
 # =============================================================================
@@ -1725,6 +1728,10 @@ check "pull --tag: hint how to stay" \
   "$(echo "$OUT" | grep -c "^hint: .*to stay on tag v1.1, use 'git filesync set <file>... --tag v1.1'$")" "1"
 check "pull --tag: all committed" "$(git status --porcelain)" ""
 check "after pull --tag: the link's tag is older" "$(st a.c)" "OM"
+check "pull --tag: the hint says pull FILE goes back" \
+  "$(echo "$OUT" | grep -c "so 'git filesync pull <file>...' goes back")" "1"
+check "after pull --tag: pull --all doesn't go back" \
+  "$(git filesync pull --all 2>&1 | grep -c 'a.c: older than last sync - left out')-$(git status --porcelain)" "1-"
 quiet pullc a.c
 check "plain pull: back to the link's tag" "$(oneline < a.c)" "1-local 2 3 4 5 "
 
@@ -2434,7 +2441,7 @@ check "sync point unknown: the hint names both causes" \
   "$(git filesync status 2>&1 | grep -c "a.c: previous sync point [0-9a-f]* not found in .* - not on the server (history rewritten there, synced from an unpushed commit or another upstream): 'git filesync pull a.c' syncs to its current version")" "1"
 OUT=$(git filesync hook post-merge 2>&1)
 check "sync point unknown: the hooks don't say pull" \
-  "$(echo "$OUT" | grep -c "run 'git filesync pull")-$(echo "$OUT" | grep -c 'previous sync point not found')" "0-1"
+  "$(echo "$OUT" | grep -c "run 'git filesync pull")-$(echo "$OUT" | grep -c "'pull --all' leaves out older and diverged files")" "0-1"
 check "sync point unknown: pull --all leaves it out, says so" \
   "$(git filesync pull --all 2>&1 | grep -c ": previous sync point not found - left out (see 'git filesync status')$")-$(git status --porcelain)" \
   "2-"
@@ -2492,7 +2499,7 @@ check "same version off the branch: status says pull --all leaves it out" \
 check "same version off the branch: no 'not pushed' warning" \
   "$(git filesync status 2>&1 | grep -c 'not pushed')" "0"
 check "same version off the branch: the hook doesn't say pull" \
-  "$(OUT=$(git filesync hook post-merge 2>&1); echo "$OUT" | grep -c "run 'git filesync pull")-$(echo "$OUT" | grep -c 'pull --all leaves them alone')" "0-1"
+  "$(OUT=$(git filesync hook post-merge 2>&1); echo "$OUT" | grep -c "run 'git filesync pull")-$(echo "$OUT" | grep -c "'pull --all' leaves out older and diverged files: pull them by name")" "0-1"
 check "same version off the branch: pull --all leaves it out" \
   "$(git filesync pull --all 2>&1 | grep -c 'f.txt: history diverged - left out')-$(git status --porcelain)" "1-"
 check "same version off the branch: pull --all -b once takes it" \

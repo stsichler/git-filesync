@@ -1070,8 +1070,8 @@ class Source:
         """Find out at once which of these existing commits are in the
         history of tip (see is_ancestor): those not listed by
         `rev-list C... --not tip`."""
-        commits = [c for c in dict.fromkeys(commits) if ("ancestor", c, tip) not in self._memo
-                   and self.resolve(c) == c]
+        commits = [c for c in dict.fromkeys(commits) if re.fullmatch(r"[0-9a-f]{40,64}", c)
+                   and ("ancestor", c, tip) not in self._memo and self.resolve(c) == c]
         if not commits:
             return
         p = self.git(["rev-list"] + commits + ["--not", tip], check=False)
@@ -3081,10 +3081,13 @@ def upstream_state(st, note=True):
         n = commits_since(st)
         return "renamed", f"{st.link.path} -> {path}" + (f", {plural(n, 'commit')}" if n else "")
     if st.changed or st.off_track:
-        behind = commits_behind(st)
-        if behind:
+        if st.behind_args:
+            if not note:
+                return "older", None
             what = "upstream branch" if st.link.ref[0] == "branch" else f"tag {st.link.ref[1]}"
-            return "older", f"{what} is {plural(behind, 'commit')} older than last sync"
+            behind = commits_behind(st)
+            return "older", f"{what} is {plural(behind, 'commit') + ' ' if behind else ''}" \
+                "older than last sync"
         if st.has_old and not st.diverged:
             if not note:
                 return "pending", None
@@ -3972,7 +3975,7 @@ def cmd_pull(ctx, repo, args):
     ok = [st for st in states if st.src and not st.error]
     # contents only of the files to sync (in the blobless cache, each one
     # may have to be fetched)
-    sync = [st for st in ok if (st.pending or args.overwrite)
+    sync = [st for st in ok if (st.pending or args.overwrite and st.local == "modified")
             and not (args.all and not once and st.off_track)]
     files = [m for st in sync for m in (st.members if st.link.is_dir else [st])]
     for src in {id(st.src): st.src for st in ok}.values():
@@ -3998,7 +4001,8 @@ def cmd_pull(ctx, repo, args):
         # missing, modified but not adaptable, or not a plain update along
         # the history (older, diverged, the previous sync point unknown):
         # only by name (or once to a given revision)
-        if args.all and not once and (not st.pending or st.off_track):
+        if args.all and not once and (st.off_track or not (
+                st.pending or args.overwrite and st.local == "modified")):
             why = "missing" if st.missing else "previous sync point not found" \
                 if st.lost_old else "older than last sync" if st.behind_args \
                 else "history diverged" if st.diverged \
@@ -4044,8 +4048,8 @@ def cmd_pull(ctx, repo, args):
     if moved and not args.dry_run and not args.commit:
         opt = f"--tag {args.tag}" if args.tag else f"-b {args.branch}"
         how = f"'git filesync set <file>... {opt}'"
-        print(f"hint: the links still follow their own branch or tag, so a plain pull goes "
-              f"back; to stay on {once_text(args)}, use {how}")
+        print(f"hint: the links still follow their own branch or tag, so 'git filesync pull "
+              f"<file>...' goes back; to stay on {once_text(args)}, use {how}")
     if args.all and not done and not left_out and rc == EXIT_OK:
         print(paint("everything up to date", "green"))
     for _, (tag, line, new, rels) in sorted(newest.items()):
@@ -5474,9 +5478,8 @@ def hook_reminders(ctx, repo):
     if any(st.pending and not st.off_track for st in attention):
         print("filesync: run 'git filesync pull <file>' to sync", file=sys.stderr)
     if any(st.off_track for st in attention):
-        print("filesync: see 'git filesync status' for files older than last sync, with a "
-              "history diverged or the previous sync point not found (pull --all leaves "
-              "them alone)", file=sys.stderr)
+        print("filesync: 'pull --all' leaves out older and diverged files: pull them by name",
+              file=sys.stderr)
     if any(st.violation for st in attention):
         print("filesync: see 'git filesync status' and 'git filesync diff <file>' "
               "for changes not allowed", file=sys.stderr)

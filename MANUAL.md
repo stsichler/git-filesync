@@ -408,11 +408,11 @@ before switching to it. Like `git pull <remote> <branch>`, this doesn't
 change what the files follow; `pull` ends with a hint:
 
 ```
-hint: the links still follow their own branch or tag, so a plain pull goes back; to stay on tag v1.3.0, use 'git filesync set --tag v1.3.0 <file>...'
+hint: the links still follow their own branch or tag, so 'git filesync pull <file>...' goes back; to stay on tag v1.3.0, use 'git filesync set --tag v1.3.0 <file>...'
 ```
 
-`status` then shows the files as `older` or `pending`, and a plain `pull`
-syncs them back. To switch for good, use [`set -b` / `--tag`](#set), then
+`status` then shows the files as `older`, `diverged` or `pending`, and
+`pull FILE` syncs them back. To switch for good, use [`set -b` / `--tag`](#set), then
 `pull`. With `--all`, every file is synced, also those up to date. A
 commit id (`--commit`) belongs to one upstream repository, so files of
 other ones get an error.
@@ -661,8 +661,8 @@ The base (`commit` / `blob`) is kept where it still applies, so adaptations
 stay adaptations:
 
 - **another tag or branch** of the same upstream: kept; if the new one
-  doesn't contain it, the file counts as `diverged` (also with the same
-  version) until `pull FILE` moves it there – `pull --all` leaves it out;
+  doesn't contain it, the file counts as `older` or `diverged` (also with
+  the same version) until `pull FILE` moves it there – `pull --all` leaves it out;
 - **another upstream**: kept if it has that version (the recorded commit,
   or else the newest commit on its branch with the same file); otherwise a
   warning: the previous sync point counts as unknown, and `pull FILE`
