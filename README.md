@@ -116,7 +116,7 @@ Alternatively (Linux/macOS) put an executable copy named `git-filesync` on
 your `PATH`. Check with `git filesync --version`; to update, download the
 script again (the [releases](https://github.com/stsichler/git-filesync/releases)
 list the changes). You can also point the alias at a clone of this
-repository (`main`, or a tag like `v0.23.0`), or [ship git-filesync with
+repository (`main`, or a tag like `v0.23.1`), or [ship git-filesync with
 your repository](MANUAL.md#shipping-git-filesync-with-your-repository).
 
 ## Quick start
