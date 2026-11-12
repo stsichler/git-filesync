@@ -2711,8 +2711,14 @@ check "pull: message" "$(git log -1 --format=%B | grep -c '^- vendor/t/x_test.c 
 # adapted one is refused, --force keeps it as a file of this repository
 echo mine >> vendor/t/x_test.c
 git commit -qam "adapt a test"
+quiet git filesync set --exclude 'a b' --exclude "it's" --exclude '#x' vendor
+check "set --exclude: patterns shell-quoted" "$(git config -f .git-filesync dir.vendor.exclude)" \
+  "'a b' 'it'\"'\"'s' '#x'"
+check "set --exclude: quoted patterns read back" "$(git filesync set vendor | grep -o -- "--exclude .*")" \
+  "--exclude 'a b' --exclude 'it'\"'\"'s' --exclude '#x'"
+git reset -q && git checkout -q .git-filesync
 quiet git filesync set --exclude 't/' --exclude '*_test.c' vendor
-check "set --exclude: patterns in one line" "$(git config -f .git-filesync dir.vendor.exclude)" "t/ *_test.c"
+check "set --exclude: patterns in one line" "$(git config -f .git-filesync dir.vendor.exclude)" "t/ '*_test.c'"
 git commit -qm "no tests"
 check "pull: an adapted file no longer selected is refused" "$(git filesync pull vendor 2>&1 | \
   grep -c '^error: vendor/t/x_test.c: no longer selected by the patterns, but adapted here - use ')" "1"
@@ -2720,6 +2726,20 @@ check "pull --force: kept as a file of this repository" \
   "$(pullc --force vendor | head -1)-$(tail -1 vendor/t/x_test.c)-$(st)" "vendor/: synced (1 deleted)-mine-"
 check "pull --force: the old patterns gone" "$(git config -f .git-filesync dir.vendor.synced-exclude || echo none)" "none"
 check "set --list: all entries" "$(git filesync set --list | cut -d' ' -f4)" "vendor/"
+
+# quoted patterns select files as they read: names with a blank, ' and #
+cd "$T"
+git init -q m27q
+(cd m27q && mkdir lib && for f in 'a b' "it's" '#x' keep; do echo 1 > "lib/$f"; done \
+  && git add . && git commit -qm init)
+new_repo s27q
+git filesync source map file:///nowhere/m27q.git "$T/m27q" >/dev/null
+addc file:///nowhere/m27q.git q -p lib --exclude 'a b' --exclude "it's" --exclude '#x'
+check "quoted patterns: add" "$(git ls-files q | oneline)" "q/keep "
+(cd ../m27q && for f in 'a b' "it's" '#x' keep; do echo 2 > "lib/$f"; done && git commit -qam two)
+check "quoted patterns: pull, as read from the registry" \
+  "$(pullc q | head -1) $(git ls-files q | oneline)$(cat q/keep)" "q/: synced (1 changed) q/keep 2"
+cd "$T/s27"
 
 # mv: the whole directory, own files too; unlink and rm
 quiet git filesync mv vendor third && git commit -qm mv

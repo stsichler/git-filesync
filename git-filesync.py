@@ -320,7 +320,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.23.0"
+__version__ = "0.23.1"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -2399,9 +2399,9 @@ def split_patterns(value):
 
 
 def join_patterns(patterns):
-    """The value of include / exclude for these patterns (see split_patterns)."""
-    return " ".join(p if re.fullmatch(r"[\w./*?\[\]!@+-]+", p) else shlex.quote(p)
-                    for p in patterns) or None
+    """The value of include / exclude for these patterns (see split_patterns):
+    like shlex.join (Python 3.8+), as in git-assetsync."""
+    return " ".join(shlex.quote(p) for p in patterns) or None
 
 
 class DirLink(Link):
