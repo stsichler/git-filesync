@@ -2410,7 +2410,8 @@ PATTERN_KEYS = ("include", "exclude")
 
 def split_patterns(value):
     """The patterns of an include / exclude value: separated by blanks,
-    quoted like in a shell ('*.c' "my file")."""
+    quoted like in a shell ('*.c' 'my file'; git config itself removes
+    "..." before)."""
     try:
         return shlex.split(value)
     except ValueError as e:

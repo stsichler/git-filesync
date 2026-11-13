@@ -81,6 +81,8 @@ committed like any other file, in git-config format:
   tag matching a pattern).
 - A `[dir]` is a [linked directory](#linked-directories); it takes `tag`
   and `adaptable` like a `[file]`, its base is `commit` and `tree`.
+- `include` / `exclude` are words separated by blanks, quoted as in a
+  shell with `'…'` where needed – git config itself removes `"…"`.
 - `commit` and `blob` are maintained by the tool: `blob` is the synced
   version of the upstream file, `commit` the upstream commit that last
   changed it (not the branch tip at sync time). So commits that don't touch
