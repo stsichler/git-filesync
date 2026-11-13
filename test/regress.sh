@@ -3001,6 +3001,34 @@ check "pull -W, new link already upstream's: unchanged" \
 git checkout -q -- .git-filesync && rm -f h
 
 
+# a pull staged, not committed yet, is no local change: compared with the base in HEAD
+cd "$T/s28"
+(cd ../m28 && echo c > f && git commit -qam 4 && echo d > f && git commit -qam 5 \
+  && echo 1c > d/one && git commit -qam 6)
+C4=$(git -C ../m28 rev-parse HEAD~2)
+quiet git filesync pull --commit "$C4" f
+check "staged pull: no violation" "$(git filesync status -s f)" "P M f"
+check "pull again without a commit" "$(rc git filesync pull f)-$(git show :f)" "0-d"
+check "staged pull: status --exit-code" "$(rc git filesync status --exit-code f)" "0"
+check "pull again: both parts in the proposed message" "$(grep -c '^\[filesync\] Sync f ' .git/SQUASH_MSG)" "2"
+OUT=$(git filesync pull --overwrite --commit "$C4" f 2>&1)
+check "pull --overwrite of a staged pull: nothing discarded" \
+  "$(echo "$OUT" | grep -c discarded)-$(grep -c 'were discarded' .git/FILESYNC_MSG)" "0-0"
+git commit -q --no-edit
+quiet git filesync pull d
+check "staged pull [dir]: no violation" "$(git filesync status -s d | grep -c 'not adaptable')" "0"
+check "staged pull [dir]: up to date" "$(git filesync pull d 2>&1)" "d/: up to date"
+git commit -q --no-edit
+(cd ../m28 && echo 1d > d/one && git commit -qam 7 && echo 1e > d/one && git commit -qam 8)
+quiet git filesync pull d
+check "staged pull [dir], pull --overwrite --commit: no adaptations discarded" \
+  "$(rc git filesync pull --overwrite --commit "$(git -C ../m28 rev-parse HEAD~)" d)-$(git show :d/one)-$(grep -c discarded .git/FILESYNC_MSG)" "0-1d-0"
+git commit -q --no-edit
+echo own > k && git add k && git commit -qm k
+quiet git filesync add --overwrite file:///nowhere/m28.git k -p f
+check "add --overwrite of a committed file: no violation" "$(rc git filesync status --exit-code k)" "0"
+git commit -q --no-edit
+
 # =============================================================================
 section "Upstream repositories untouched"
 check "no writes outside the repository git-filesync runs in" \

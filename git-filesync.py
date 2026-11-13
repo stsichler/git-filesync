@@ -326,7 +326,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.23.3"
+__version__ = "0.23.4"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -1557,6 +1557,7 @@ class Repo:
         self._wt = {}             # rel -> blob id of the working file (worktree_blobs)
         self._ids = {}            # (rel, content hash, size) -> blob id (blob_ids)
         self._staged = None       # paths staged differently from HEAD (staged)
+        self.head_reg = None      # .git-filesync as in HEAD (committed_link)
 
     def git(self, args, **kw):
         return git(args, cwd=self.top, **kw)
@@ -2217,11 +2218,12 @@ def registry_unstaged(repo):
 class Registry:
     """The repository's .git-filesync: [source], [file] and [dir] sections."""
 
-    def __init__(self, repo):
+    def __init__(self, repo, committed=False):
+        """committed: the file as in HEAD - only read (empty if none)."""
         self.repo = repo
         self.path = registry_path(repo)
         self.sources, self.files, self.dirs = {}, {}, {}
-        self.dry_run = False      # only change the in-memory state
+        self.dry_run = committed  # only change the in-memory state
         # written later, all at once (see flush): pull, add, rm, unlink and
         # set change many entries
         self._pending = {}        # ("file" | "dir" | "source", name, key) -> value, see _set
@@ -2230,7 +2232,11 @@ class Registry:
         # changes not staged before this command? (None: not asked yet, see finish)
         self.unstaged = None
         self._warned = False
-        if self.path.exists():
+        if committed:
+            p = repo.git(["config", "--blob", f"HEAD:{REGISTRY}", "--list", "-z"], check=False)
+            if p.returncode == 0:         # else none in HEAD (or no HEAD)
+                self.sources, self.files, self.dirs = parse_registry(p.stdout)
+        elif self.path.exists():
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
             if p.returncode:
                 raise FsError(f"{REGISTRY}: cannot parse: "
@@ -2851,6 +2857,40 @@ def base_matcher(repo, src, link, st):
     return base_matches
 
 
+def committed_link(repo, link):
+    """The entry as HEAD's .git-filesync has it, if its base is another
+    there (a pull or add staged, not committed yet) - what the committed
+    file is compared with (see committed_matcher): None if HEAD has no base
+    for it (no entry, or a new one); link itself if the base is the same,
+    or in another upstream repository (not looked up)."""
+    if repo.head_reg is None:             # read once
+        repo.head_reg = Registry(repo, committed=True)
+    old = repo.head_reg.entry(link.rel)
+    if old is None or old.unsynced:
+        return None
+    if old.is_dir != link.is_dir or norm_url(old.url) != norm_url(link.url):
+        return link
+    return old if (old.tree != link.tree if link.is_dir else old.blob != link.blob) else link
+
+
+def committed_matcher(repo, src, link, old):
+    """For local_state: does the committed file match the base HEAD has for
+    it (old, see committed_link)? None if it is link's own base. A base
+    that can't be read counts as different, without a warning: the entry
+    has another now."""
+    if old is link:
+        return None
+    if old is None:                       # not linked in HEAD: nothing adapted
+        return lambda oid, read: True
+
+    def matches(oid, read):
+        try:
+            return matches_base(repo, src, link.rel, old.blob, old.path, oid, read)
+        except BaseUnavailable:
+            return False
+    return matches
+
+
 def staged_matches(repo, rel, base_matches):
     """Is the staged version of rel the base (see base_matcher)? Not if it
     is staged for deletion."""
@@ -2858,9 +2898,11 @@ def staged_matches(repo, rel, base_matches):
     return bool(oid) and base_matches(oid, lambda: repo.read_blob(oid))
 
 
-def local_state(repo, st, link, base_matches):
+def local_state(repo, st, link, base_matches, committed_matches=None):
     """The committed, worktree and local respects of a linked file (see
-    evaluate); raises FsError if something is in the way of it."""
+    evaluate); raises FsError if something is in the way of it.
+    committed_matches: for the committed file, if its base is another in
+    HEAD (see committed_link)."""
     blocked = in_the_way(repo.top, link.rel)
     if blocked:          # not 'missing': restore and pull would delete what is there
         if isinstance(link, Member):      # the entry is what can be unlinked
@@ -2890,6 +2932,12 @@ def local_state(repo, st, link, base_matches):
         st.local = "clean"
     else:
         st.local = "modified"
+    # a pull or add staged, not committed yet: HEAD has the base HEAD's entry
+    # has (or isn't linked there), the uncommitted content the current one -
+    # no adaptation
+    if st.committed == "adapted" and committed_matches and st.local == "clean" and \
+            committed_matches(head, lambda: repo.read_blob(head)):
+        st.committed = "unmodified"
     st.violation = not st.adaptable and (st.committed == "adapted" or st.local == "modified")
 
 
@@ -2929,7 +2977,8 @@ def evaluate(ctx, repo, link):
         st.error = str(e)
         return st
     try:
-        local_state(repo, st, link, base_matcher(repo, src, link, st))
+        local_state(repo, st, link, base_matcher(repo, src, link, st),
+                    committed_matcher(repo, src, link, committed_link(repo, link)))
     except FsError as e:
         st.error = str(e)
         return st
@@ -3068,9 +3117,20 @@ def fill_members(repo, st, base, upstream):
     linked file, and the entry's state from theirs: adapted if one is,
     missing if one is, and so on. FsError if something is in the way of one."""
     st.members = dir_members(repo, st.link, base, upstream)
+    old = committed_link(repo, st.link)
+    try:                                  # the files at HEAD's base
+        old_base = dir_base(st.src, old) if old and old is not st.link else None
+    except FsError:                       # e.g. bad patterns there: as if the same
+        old, old_base = st.link, None
+    if old and old_base is None:
+        old = st.link
     for m in st.members:
         m.src, m.has_old = st.src, st.has_old
-        local_state(repo, m, m.link, base_matcher(repo, st.src, m.link, m))
+        below = m.link.below
+        m_old = m.link if old is st.link else \
+            old.member(below, old_base[below]) if old and below in old_base else None
+        local_state(repo, m, m.link, base_matcher(repo, st.src, m.link, m),
+                    committed_matcher(repo, st.src, m.link, m_old))
     sts, st.n = st.base_members, len(base)
     st.committed = "adapted" if any(m.committed == "adapted" for m in sts) else \
         "unmodified" if any(m.committed for m in sts) else None
@@ -3590,7 +3650,7 @@ def pull_one(repo, reg, st, args):
         return None
     # like `git pull`: uncommitted changes are never merged into a sync -
     # with --overwrite, they are discarded (and kept, see save_discarded)
-    if uncommitted(st) and not args.overwrite:
+    if local_changes(st) and not args.overwrite:
         rel = path_arg(repo, st.rel)
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
                       f"commit or stash them first ('git stash'; 'git restore -SW {rel}' "
@@ -3603,7 +3663,7 @@ def pull_one(repo, reg, st, args):
                                               local_mod and not discard)
 
     if args.dry_run:
-        lost = args.overwrite and uncommitted(st) and loses(repo, st, content, args)
+        lost = args.overwrite and local_changes(st) and loses(repo, st, content, args)
         notes = ([f"{st.once} once"] if st.once else []) + \
             ([f"renamed upstream: {link.path} -> {path}"] if path != link.path else []) + \
             (["discarding adaptations"] if dropped else []) + \
@@ -3624,7 +3684,7 @@ def pull_one(repo, reg, st, args):
         link.set("path", path)
     link.set("commit", new)
     link.set("blob", new_blob)
-    if args.overwrite:      # kept by the caller, for all files at once (see save_discarded)
+    if args.overwrite and local_changes(st):   # kept by the caller (see save_discarded)
         st.discards = ([st.rel], [st.rel])
     if conflicts:
         print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}")
@@ -3635,10 +3695,11 @@ def pull_one(repo, reg, st, args):
                          dropped), conflicts, content
 
 
-def uncommitted(st):
-    """Uncommitted changes that pull would overwrite: in the working tree
-    or staged (as for `git pull`, see Repo.is_modified)."""
-    return st.worktree in ("modified", "added")
+def local_changes(st):
+    """Uncommitted changes pull would overwrite: in the working tree or
+    staged (as for `git pull`, see Repo.is_modified) - and other than the
+    base: what a pull staged before is not lost."""
+    return st.worktree in ("modified", "added") and st.local == "modified"
 
 
 def overwrites(st, args):
@@ -3890,7 +3951,7 @@ def pull_dir(repo, reg, st, args):
         return None
     # like `git pull`: uncommitted changes are never merged into a sync -
     # with --overwrite, they are discarded (and kept, see save_discarded)
-    dirty = [m for m in st.mods + dels + back if uncommitted(m)]
+    dirty = [m for m in st.mods + dels + back if local_changes(m)]
     if dirty and not args.overwrite:
         raise FsError(f"your local changes to {few(repo, dirty)} would be overwritten by "
                       "pull - commit or stash them first ('git stash'; 'git restore -SW "
@@ -3998,7 +4059,8 @@ def pull_dir(repo, reg, st, args):
         return None
     # kept by the caller, for all files at once (see save_discarded)
     if args.overwrite:      # uncommitted changes discarded too
-        discarded += [r for r, c in contents.items() if c is not None]
+        changed = {m.rel for m in st.members if m.local == "modified"}
+        discarded += [r for r, c in contents.items() if c is not None and r in changed]
     st.discards = (discarded + deletes, discarded + deletes)
     dlink.drop_synced()
     dlink.set("commit", st.new)

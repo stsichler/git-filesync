@@ -416,6 +416,10 @@ other files are still synced. In scripts and CI: `git filesync pull --all
   [Linked directories](#linked-directories).
 - **Pinned files:** `pull` ends with a hint if there are [newer
   tags](#newer-tags) on the source's branch.
+- **Pulling again before the commit** works, e.g. to another version: what
+  a pull staged counts as synced, not as a local change, and the proposed
+  message gets a section for each pull. Merged adaptations are local
+  changes, though: commit them first.
 
 #### Trying a newer version
 
