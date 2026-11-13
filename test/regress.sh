@@ -53,6 +53,7 @@
 #   25. Something in the way of a linked file; rewritten upstream history
 #   26. Current directory reached through a link: junction, subst drive, symlink
 #   27. [dir] entries: a directory synced as a whole, files of its own
+#   28. pull --overwrite of uncommitted changes; pull -W; registry changes not staged
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -736,8 +737,8 @@ check "violation in long format" \
 check "violation exit code" "$(rc git filesync status --exit-code src/bar.h)" "1"
 check "violation in hook output" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'NOT ALLOWED')" "1"
 check "pull refuses to merge into a file not adaptable" "$(rc pullc src/bar.h)" "2"
-check "refusal: how to go on (uncommitted: no pull --overwrite, which refuses them)" \
-  "$(pullc src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or only the uncommitted ones with 'git restore src/bar.h'$")" "1"
+check "refusal: how to go on (uncommitted: pull --overwrite or git restore)" \
+  "$(pullc src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or sync anyway with 'git filesync pull --overwrite src/bar.h'; only the uncommitted ones: 'git restore src/bar.h'$")" "1"
 check "pull --all continues after the refusal" "$(pullc --all 2>&1 | grep -c '^error:')" "0"
 check "adaptable file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
 git commit -qm "adapt bar" src/bar.h
@@ -2350,7 +2351,7 @@ check "new link: first sync stages uncommitted changes, as add does" \
 git reset -q --hard
 # --overwrite replaces only a file that differs (add as well)
 printf '[file "h.c"]\n\tsource = %s\n\tpath = lib/b.c\n' "$SRC24" >> .git-filesync
-echo b > h.c
+echo b > h.c && git add .git-filesync
 check "new link: --overwrite of the same content replaces nothing" \
   "$(git filesync pull --overwrite h.c 2>&1 | oneline)" "h.c: synced (first sync; existing file) h.c: staged. Commit with:     git commit (it offers the proposed commit message; a copy stays in .git/FILESYNC_MSG) "
 git reset -q --hard && rm -f h.c
@@ -2768,7 +2769,7 @@ quiet git filesync set --no-include vendor
 check "set --no-include: back to the synced patterns" "$(grep -c synced- .git-filesync)" "0"
 # without the base tree, the old patterns are kept too (files unknown)
 git config -f .git-filesync dir.vendor.tree 0123456789012345678901234567890123456789
-check "set, base tree unavailable: no counts" "$(git filesync set --include sub/ vendor 2>&1 | head -1)" \
+check "set, base tree unavailable: no counts" "$(git filesync set --include sub/ vendor 2>/dev/null | head -1)" \
   "vendor/: include (none) -> sub/"
 check "set, base tree unavailable: synced-include" "$(grep -c '^	synced-include = ""$' .git-filesync)" "1"
 git reset -q && git checkout -q .git-filesync
@@ -2881,6 +2882,63 @@ if ! command -v cygpath >/dev/null; then
   check "[dir] pull: git calls only for the merges ($CP for 60, 9 merged)" \
     "$([ "$CP" -le $((C60 + 3 * 9 + 20)) ] && echo yes)" "yes"
 fi
+
+
+# =============================================================================
+section "28. pull --overwrite of uncommitted changes; pull -W; registry changes not staged"
+# =============================================================================
+cd "$T"
+git init -q m28 && (cd m28 && echo a > f && echo x > g && mkdir d && echo 1 > d/one && echo 2 > d/two \
+  && git add . && git commit -qm init)
+new_repo s28
+git filesync source map file:///nowhere/m28.git "$T/m28" >/dev/null
+addc file:///nowhere/m28.git f && addc file:///nowhere/m28.git g && addc file:///nowhere/m28.git d
+(cd ../m28 && echo b > f && echo y > g && echo 1b > d/one && git rm -q d/two && echo 3 > d/three \
+  && git add . && git commit -qm 2)
+
+# pull -W: only the working tree - to try a newer version
+OUT=$(git filesync pull -W f 2>&1); RC=$?
+check "pull -W: written, nothing staged" "$RC-$(cat f)-$(git status --porcelain | oneline)" "0-b- M f "
+check "pull -W: output" "$OUT" "f: updated in the working tree only"
+check "pull -W: still pending, modified" "$(st f)" "P M"
+check "pull -W: refuses uncommitted changes, as pull" "$(rc git filesync pull -W f)" "2"
+OUT=$(git filesync pull --overwrite f 2>&1)
+check "pull --overwrite takes it: nothing discarded" "$(echo "$OUT" | grep -c -e discard)" "0"
+check "pull --overwrite takes it: staged with its entry" "$(git status --porcelain | oneline)" "M  .git-filesync M  f "
+git commit -q --no-edit
+
+# pull --overwrite discards uncommitted changes, kept as a blob
+echo mine >> g
+OUT=$(git filesync pull --overwrite g 2>&1)
+ID=$(echo "$OUT" | sed -n 's/^discarded: g (git show \([0-9a-f]*\) to get it back)$/\1/p')
+check "pull --overwrite: uncommitted changes discarded" "$(cat g)-$(git show "$ID" | oneline)" "y-x mine "
+git commit -q --no-edit
+
+# a [dir] entry: files new upstream are left behind by 'git restore'
+check "pull -W [dir]: written, nothing staged" "$(rc git filesync pull -W d)-$(git status --porcelain | oneline)" \
+  "0- M d/one  D d/two ?? d/three "
+git restore d && rm d/three
+echo mine >> d/one
+check "pull [dir]: refuses uncommitted changes" "$(rc git filesync pull d)" "2"
+check "pull --overwrite [dir]: uncommitted changes discarded" \
+  "$(git filesync pull --overwrite d 2>&1 | grep -c '^discarded: d/one ')-$(cat d/one)" "1-1b"
+git commit -q --no-edit
+echo mine >> f
+check "pull --all --overwrite: an up-to-date file restored" \
+  "$(git filesync pull --all --overwrite 2>&1 | grep -c '^f: restored - the same as committed, nothing to commit$')-$(cat f)" "1-b"
+
+# a command staging .git-filesync warns of changes to it not staged before
+WARN="warning: .git-filesync had changes that were not staged - they are staged now too"
+echo "# mine" >> .git-filesync
+check "registry changes not staged: warning" "$(git filesync set --adaptable g 2>&1 | grep -cxF "$WARN")" "1"
+check "registry changes not staged: staged now" "$(git show :.git-filesync | grep -c '^# mine$')" "1"
+check "staged registry: no warning" "$(git filesync set --no-adaptable g 2>&1 | grep -c warning)" "0"
+echo "# more" >> .git-filesync
+check "registry changes not staged: no warning with -n" "$(git filesync set -n --adaptable g 2>&1 | grep -c warning)" "0"
+printf '#!/bin/sh\necho "# edited" >> "$1"\n' > "$T/ed28.sh"
+check "registry changes not staged: no warning with edit" \
+  "$(GIT_EDITOR="sh '$T/ed28.sh'" git filesync edit 2>&1 | grep -c warning)" "0"
+git commit -q -m registry
 
 
 # =============================================================================

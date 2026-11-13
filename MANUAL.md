@@ -104,6 +104,8 @@ committed like any other file, in git-config format:
 - Everything else may be edited by hand, but [`set`](#set),
   [`source`](#source), [`rm`](#rm), [`unlink`](#unlink) and [`mv`](#mv) know
   what a change means. When the last link is removed, the file is deleted.
+  A command that stages the file stages your changes not staged yet along,
+  with a warning (not [`edit`](#edit)).
 
 Paths must lie inside the working tree: entries pointing outside it (`..`,
 absolute paths) or into a `.git` directory are errors and never written, so
@@ -124,7 +126,7 @@ the hooks report it, and `pull` refuses the file. Look at the change with
 `diff`, then:
 
 - go back to the synced version with [`restore -SW`](#restore) – or sync
-  and discard in one step with `pull --overwrite` (committed changes only);
+  and discard in one step with `pull --overwrite`;
 - discard uncommitted changes with `git restore`;
 - or allow changes: mark the file **adaptable**.
 
@@ -382,7 +384,7 @@ What `pull` does with a file depends on its state (code of `status -s`):
 | deleted upstream (`X`) | error: `unlink` or `rm` it | error |
 | missing | error: `restore` or `unlink` it | error; nothing to sync: left out |
 | modified, but not adaptable | error: `--overwrite`, `restore -SW` or `set --adaptable` | error; nothing to sync: left out |
-| uncommitted changes (adaptable) | something to sync: error – commit, stash or discard them, as for `git pull` | the same |
+| uncommitted changes (adaptable) | something to sync: error – commit, stash or discard them, as for `git pull`, or `--overwrite` | the same |
 
 `pull --all` takes only plain updates along the history of the branch or
 tag, and names each file it leaves out with the reason (`warning: a.c:
@@ -398,7 +400,8 @@ other files are still synced. In scripts and CI: `git filesync pull --all
 | `--commit REV` | sync to this revision once – a branch, tag or commit id, also backwards (the message then lists what is reverted); the file keeps its branch or tag |
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH once (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG once |
-| `--overwrite` | take the upstream version as it is, discarding adaptations (also if the file is up to date). Uncommitted changes are still refused, except at the first sync of a new link, which works like `add --overwrite` |
+| `--overwrite` | take the upstream version as it is, discarding adaptations and uncommitted changes ([kept](#discarded-content)), also if the file is up to date |
+| `-W`, `--worktree` | write to the working tree only: nothing staged, `.git-filesync` unchanged – see [Trying a newer version](#trying-a-newer-version) |
 | `--force` | [linked directory](#linked-directories): keep a file of this repository that `pull` would delete (adapted, deleted upstream) or replace (new upstream) |
 | `-n`, `--dry-run` | change nothing; report per file what would happen: the version, whether adaptations merge cleanly (or how many conflicts), a rename upstream, every refusal |
 | `-v`, `--verbose` | before each file, where it comes from and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` |
@@ -413,6 +416,24 @@ other files are still synced. In scripts and CI: `git filesync pull --all
   [Linked directories](#linked-directories).
 - **Pinned files:** `pull` ends with a hint if there are [newer
   tags](#newer-tags) on the source's branch.
+
+#### Trying a newer version
+
+`pull -W` writes what `pull` would sync into the working tree only –
+nothing staged, `.git-filesync` unchanged –, e.g. to see whether your
+project still builds with it. It refuses what `pull` refuses and takes the
+same options.
+
+```sh
+git filesync pull -W src/foo.c             # try it
+git restore src/foo.c                      # go back
+git filesync pull --overwrite src/foo.c    # or take it
+```
+
+Meanwhile `status` shows the file as pending, with uncommitted changes.
+Files new upstream in a [linked directory](#linked-directories) stay after
+`git restore`. For an adaptable file, `pull --overwrite` drops your
+adaptations; to keep them, `git restore` and `pull`.
 
 #### Another branch or tag, once
 

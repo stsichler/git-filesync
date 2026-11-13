@@ -86,6 +86,7 @@ then also adds and deletes files, and your own files in it stay.
   dry runs
 - A local checkout of upstream instead of fetching – works offline, and is
   only read
+- Try a newer version in the working tree only (`pull -W`)
 - Discarded uncommitted content is kept, with a hint how to get it back
 - Works with Git LFS on either side and with differing line-ending conventions
 - Colored output, exit codes for CI, hooks with reminders and a check that
