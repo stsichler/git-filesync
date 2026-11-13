@@ -1556,6 +1556,7 @@ class Repo:
         self._local = {}          # (rel, content hash, size) -> blob id (as_local)
         self._wt = {}             # rel -> blob id of the working file (worktree_blobs)
         self._ids = {}            # (rel, content hash, size) -> blob id (blob_ids)
+        self._staged = None       # paths staged differently from HEAD (staged)
 
     def git(self, args, **kw):
         return git(args, cwd=self.top, **kw)
@@ -1797,6 +1798,12 @@ class Repo:
         if len(oids) != len(contents):
             raise FsError("git hash-object gave an unexpected answer")
         return oids
+
+    def staged(self):
+        """staged_changes(), asked once per run (before anything is staged)."""
+        if self._staged is None:
+            self._staged = self.staged_changes() or set()
+        return self._staged
 
     def staged_changes(self):
         """Paths whose index entry differs from HEAD - one diff-index for the
@@ -2677,7 +2684,7 @@ class FileState:
     has_old: bool = False     # synced commit exists upstream
     lost_old: bool = False    # it doesn't: behind, or history rewritten? (no guess)
     discards: tuple = ((), ())  # a first sync: (working tree, index) paths it overwrites
-    staged: bool = False      # the index differs from HEAD (pull: see uncommitted)
+    staged: bool = False      # the index differs from HEAD: uncommitted changes too
     diverged: bool = False
     moved: Optional[tuple] = None   # ('renamed' | 'deleted', path, commit)
     newest: Optional[list] = None   # newer tags of a pinned source
@@ -2833,6 +2840,13 @@ def base_matcher(repo, src, link, st):
     return base_matches
 
 
+def staged_matches(repo, rel, base_matches):
+    """Is the staged version of rel the base (see base_matcher)? Not if it
+    is staged for deletion."""
+    entry = repo.index_entries([rel]).get(rel)
+    return bool(entry) and base_matches(entry[1], lambda: repo.read_blob(entry[1]))
+
+
 def local_state(repo, st, link, base_matches):
     """The committed, worktree and local respects of a linked file (see
     evaluate); raises FsError if something is in the way of it."""
@@ -2843,6 +2857,8 @@ def local_state(repo, st, link, base_matches):
         raise FsError(blocked_text(repo, link.rel, blocked))
     exists = link.target.is_file()
     head = st.head_blob = repo.head_blob(link.rel)
+    # uncommitted changes: in the working tree or staged - what a commit would take
+    st.staged = link.rel in repo.staged()
     if head and not st.unsynced:      # a new link: no base to compare with
         st.committed = "unmodified" if base_matches(
             head, lambda: repo.read_blob(head)) else "adapted"
@@ -2850,7 +2866,7 @@ def local_state(repo, st, link, base_matches):
         st.worktree = "deleted" if head else "missing"
     elif not head:
         st.worktree = "added"
-    elif repo.is_modified(link.rel):
+    elif st.staged or repo.is_modified(link.rel):
         st.worktree = "modified"
     if not exists:
         st.local = "missing"
@@ -2858,7 +2874,8 @@ def local_state(repo, st, link, base_matches):
         pass                          # compared with upstream by its first sync
     elif st.worktree == "clean":
         st.local = "clean" if st.committed == "unmodified" else "modified"
-    elif base_matches(repo.worktree_blob(link.target), link.target.read_bytes):
+    elif base_matches(repo.worktree_blob(link.target), link.target.read_bytes) and \
+            (not st.staged or staged_matches(repo, link.rel, base_matches)):
         st.local = "clean"
     else:
         st.local = "modified"
@@ -3610,7 +3627,7 @@ def pull_one(repo, reg, st, args):
 
 def uncommitted(st):
     """Uncommitted changes that pull would overwrite: in the working tree
-    or staged (as for `git pull`)."""
+    or staged (as for `git pull`, see local_state)."""
     return st.worktree in ("modified", "added") or st.staged
 
 
@@ -4081,11 +4098,6 @@ def cmd_pull(ctx, repo, args):
     contents = {}                       # rel -> synced content (normalized form)
     deletes = []                        # files deleted with a [dir] entry's sync
     states = [evaluate(ctx, repo, link) for link in links]
-    # staged changes count as uncommitted too, as for `git pull` (see uncommitted)
-    staged = repo.staged_changes() or set()
-    for st in states:
-        for m in [st] + st.members:
-            m.staged = m.rel in staged
     # what syncing needs, asked at once: upstream contents, short commit ids,
     # attributes of the files here
     repo.check_plain([st.rel for st in states if not st.link.is_dir]

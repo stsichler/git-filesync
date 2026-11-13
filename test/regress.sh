@@ -2960,6 +2960,13 @@ check "pull --overwrite: staged version kept" \
   "$(git filesync pull --overwrite g 2>&1 | grep -c '^discarded: g, as staged ')-$(cat g)" "1-y2"
 git commit -q --no-edit
 
+# status: a staged change is uncommitted too, also with the working tree as in HEAD (git: MM)
+echo other >> f && git add f && git show HEAD:f > f
+check "status: staged change reported" "$(git filesync status -s f)" "  M f  (not adaptable!)"
+check "status --exit-code: staged change" "$(rc git filesync status --exit-code f)" "1"
+git reset -q f
+check "status: unstaged again, nothing to report" "$(st f)" ""
+
 # --overwrite discards committed adaptations also when the file is up to date
 echo adapted > g && git commit -qam adapt && git show HEAD~1:g > g
 check "pull --overwrite: committed adaptations of an up-to-date file go" \

@@ -120,7 +120,7 @@ or remove the link with `unlink`.
 ### Exact copies and adaptable files
 
 By default a linked file must stay an **exact copy** of its upstream
-version. Any change, committed or not, is a violation: `status` marks it
+version. Any change, committed, staged or not, is a violation: `status` marks it
 `NOT ALLOWED: not adaptable` (`-s`: `(not adaptable!)`, `--exit-code`: 1),
 the hooks report it, and `pull` refuses the file. Look at the change with
 `diff`, then:
@@ -290,7 +290,7 @@ Each file is looked at in three independent respects:
 |---|---|---|
 | upstream | synced upstream version ↔ current upstream | up to date, `pending`, `older`, `changed`, `renamed`, `deleted`, `new` |
 | committed | synced upstream version ↔ committed file (`HEAD`) | `unmodified`, `adapted` |
-| working tree | committed file ↔ working file | clean, `modified`, `new file`, `missing` |
+| working tree | committed file ↔ staged and working file (uncommitted changes) | clean, `modified`, `new file`, `missing` |
 
 The output has sections like `git status`:
 
