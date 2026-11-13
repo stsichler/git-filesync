@@ -1639,11 +1639,12 @@ class Repo:
         return self._head[rel]
 
     def is_modified(self, rel):
-        """Does the working tree file differ from HEAD (like `git diff HEAD`)?"""
+        """Uncommitted changes: does the working tree file (like `git diff
+        HEAD`) or the staged one differ from HEAD?"""
         if rel not in self._dirty:
             self._dirty[rel] = self.git(["diff", "--quiet", "HEAD", "--", lit(rel)],
                                         check=False).returncode == 1
-        return self._dirty[rel]
+        return self._dirty[rel] or rel in self.staged()
 
     def user_path(self, s):
         """A path given by the user, absolute: relative to the current
@@ -1802,15 +1803,25 @@ class Repo:
     def staged(self):
         """staged_changes(), asked once per run (before anything is staged)."""
         if self._staged is None:
-            self._staged = self.staged_changes() or set()
+            self._staged = self.staged_changes() or {}
         return self._staged
 
     def staged_changes(self):
-        """Paths whose index entry differs from HEAD - one diff-index for the
-        whole index, without the paths (no limit on the command line); None
+        """{path: blob id staged (None: staged for deletion)} of the paths
+        whose index entry differs from HEAD - one diff-index for the whole
+        index, without the paths (no limit on the command line); None
         without a commit."""
-        p = self.git(["diff-index", "--cached", "--name-only", "-z", "HEAD"], check=False)
-        return set(out(p).split("\0")) - {""} if p.returncode == 0 else None
+        p = self.git(["diff-index", "--cached", "--raw", "-z", "--no-renames", "HEAD"],
+                     check=False)
+        if p.returncode:
+            return None
+        items = p.stdout.decode("utf-8", "replace").split("\0")
+        changes = {}
+        for info, path in zip(items[0::2], items[1::2]):    # ':mode mode old new status'
+            fields = info.split()
+            if len(fields) == 5:
+                changes[path] = None if fields[4] == "D" else fields[3]
+        return changes
 
     def index_entries(self, rels):
         """{rel: (mode, blob id)} of these files in the index, one command."""
@@ -2843,8 +2854,8 @@ def base_matcher(repo, src, link, st):
 def staged_matches(repo, rel, base_matches):
     """Is the staged version of rel the base (see base_matcher)? Not if it
     is staged for deletion."""
-    entry = repo.index_entries([rel]).get(rel)
-    return bool(entry) and base_matches(entry[1], lambda: repo.read_blob(entry[1]))
+    oid = repo.staged().get(rel)
+    return bool(oid) and base_matches(oid, lambda: repo.read_blob(oid))
 
 
 def local_state(repo, st, link, base_matches):
@@ -2866,7 +2877,7 @@ def local_state(repo, st, link, base_matches):
         st.worktree = "deleted" if head else "missing"
     elif not head:
         st.worktree = "added"
-    elif st.staged or repo.is_modified(link.rel):
+    elif repo.is_modified(link.rel):          # staged changes too
         st.worktree = "modified"
     if not exists:
         st.local = "missing"
@@ -3352,7 +3363,7 @@ def print_long(repo, sts, verbose):
     dirty = [st for st in ok if st.worktree in labels]
     section("Uncommitted changes:",
             ['use "git filesync diff <file>..." to see all local changes',
-             'use "git restore <file>..." to discard uncommitted changes'],
+             'use "git restore -SW <file>..." to discard uncommitted changes'],
             [(labels[st.worktree], st) + note(
                 st, [m for m in st.base_members if m.worktree in labels],
                 not_allowed if not st.adaptable and st.local == "modified" else None, "boldred")
@@ -3568,7 +3579,7 @@ def pull_one(repo, reg, st, args):
         rel = path_arg(repo, st.rel)
         ways = f", or sync anyway with 'git filesync pull --overwrite {rel}'" + (
             f"; or allow them with 'git filesync set --adaptable {rel}'"
-            if st.worktree == "clean" else f"; only the uncommitted ones: 'git restore {rel}'")
+            if st.worktree == "clean" else f"; only the uncommitted ones: 'git restore -SW {rel}'")
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {rel}'; discard them with "
                       f"'git filesync restore -SW {rel}'{ways}")
@@ -3582,7 +3593,7 @@ def pull_one(repo, reg, st, args):
     if uncommitted(st) and not args.overwrite:
         rel = path_arg(repo, st.rel)
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
-                      f"commit or stash them first ('git stash'; 'git restore {rel}' "
+                      f"commit or stash them first ('git stash'; 'git restore -SW {rel}' "
                       f"discards them), or take the upstream version with "
                       f"'git filesync pull --overwrite {rel}'")
     for w in st.warnings:
@@ -3592,15 +3603,14 @@ def pull_one(repo, reg, st, args):
                                               local_mod and not discard)
 
     if args.dry_run:
-        lost = args.overwrite and uncommitted(st) and \
-            (st.staged or not has_content(repo, st.rel, content))
+        lost = args.overwrite and uncommitted(st) and loses(repo, st, content, args)
         notes = ([f"{st.once} once"] if st.once else []) + \
             ([f"renamed upstream: {link.path} -> {path}"] if path != link.path else []) + \
             (["discarding adaptations"] if dropped else []) + \
             (["discarding uncommitted changes"] if lost else []) + \
             ([paint(f"{conflicts} merge conflict(s)", "boldred") if conflicts else
               "adaptations merged cleanly"] if merged else [])
-        verb = "restore" if new_blob == st.old_blob and discard else "sync"
+        verb = "restore" if new_blob == st.old_blob and (discard or dropped) else "sync"
         print(f"{st.rel}: would {verb} to {link.name}@{src.short(new)}"
               + (f" ({'; '.join(notes)})" if notes else ""))
         if conflicts:
@@ -3627,19 +3637,31 @@ def pull_one(repo, reg, st, args):
 
 def uncommitted(st):
     """Uncommitted changes that pull would overwrite: in the working tree
-    or staged (as for `git pull`, see local_state)."""
-    return st.worktree in ("modified", "added") or st.staged
+    or staged (as for `git pull`, see Repo.is_modified)."""
+    return st.worktree in ("modified", "added")
 
 
 def overwrites(st, args):
     """pull --overwrite has something to do even without an upstream
     change: local adaptations, committed or not."""
-    return args.overwrite and (st.local == "modified" or st.committed == "adapted")
+    return args.overwrite and not st.missing and \
+        (st.local == "modified" or st.committed == "adapted")
 
 
 def synced_text(args):
     """What pull did to a file: synced - or with -W only written."""
     return paint("updated in the working tree only" if args.worktree else "synced", "green")
+
+
+def loses(repo, st, content, args):
+    """Would writing content (None: deleting) discard uncommitted content -
+    the working tree file, or the staged one (not with -W)? As the real
+    run decides it (see save_discarded)."""
+    if not has_content(repo, st.rel, content):
+        return True
+    oid = repo.staged().get(st.rel, False)
+    return oid is not False and not args.worktree and \
+        (oid is None or oid != repo.blob_ids([(st.rel, content)])[st.rel])
 
 
 def has_content(repo, rel, content):
@@ -3854,7 +3876,7 @@ def pull_dir(repo, reg, st, args):
     if not st.adaptable and local_mod and not args.overwrite:
         ways = f", or sync anyway with 'git filesync pull --overwrite {arg}'" + (
             f"; or allow them with 'git filesync set --adaptable {arg}'"
-            if st.worktree == "clean" else "; only the uncommitted ones: 'git restore <file>...'")
+            if st.worktree == "clean" else "; only the uncommitted ones: 'git restore -SW <file>...'")
         raise FsError(f"{name}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {arg}'; discard them with "
                       f"'git filesync restore -SW {arg}'{ways}")
@@ -3871,7 +3893,7 @@ def pull_dir(repo, reg, st, args):
     dirty = [m for m in st.mods + dels + back if uncommitted(m)]
     if dirty and not args.overwrite:
         raise FsError(f"your local changes to {few(repo, dirty)} would be overwritten by "
-                      "pull - commit or stash them first ('git stash'; 'git restore "
+                      "pull - commit or stash them first ('git stash'; 'git restore -SW "
                       "<file>...' discards them), or take the upstream version with "
                       f"'git filesync pull --overwrite {arg}'")
     for w in st.warnings:
@@ -3963,7 +3985,7 @@ def pull_dir(repo, reg, st, args):
     summary = ", ".join(f"{n} {w}" for n, w in counts if n) or "no file changed"
     merged = [r for r, v in notes.items() if "merge" in v]
     if args.dry_run:
-        lost = any(m.staged or not has_content(repo, m.rel, contents.get(m.rel))
+        lost = any(loses(repo, m, contents.get(m.rel), args)
                    for m in dirty)          # with --overwrite only (see above)
         what = ([f"{st.once} once"] if st.once else []) + [summary] + \
             (["discarding uncommitted changes"] if lost else []) + \
@@ -4053,7 +4075,7 @@ def nothing_staged(repo, rels):
     """Are these files and .git-filesync staged as they are in HEAD - nothing
     to commit? False without a commit."""
     staged = repo.staged_changes()
-    return staged is not None and not staged & (set(rels) | {REGISTRY})
+    return staged is not None and not staged.keys() & (set(rels) | {REGISTRY})
 
 
 def report_pull(repo, reg, synced, written):

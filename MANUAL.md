@@ -127,7 +127,7 @@ the hooks report it, and `pull` refuses the file. Look at the change with
 
 - go back to the synced version with [`restore -SW`](#restore) – or sync
   and discard in one step with `pull --overwrite`;
-- discard uncommitted changes with `git restore`;
+- discard uncommitted changes with `git restore -SW`;
 - or allow changes: mark the file **adaptable**.
 
 ```sh
@@ -313,7 +313,7 @@ Missing files:
 
 Uncommitted changes:
   (use "git filesync diff <file>..." to see all local changes)
-  (use "git restore <file>..." to discard uncommitted changes)
+  (use "git restore -SW <file>..." to discard uncommitted changes)
 	modified:   src/bar.c
 ```
 
@@ -430,7 +430,8 @@ git restore src/foo.c                      # go back
 git filesync pull --overwrite src/foo.c    # or take it
 ```
 
-Meanwhile `status` shows the file as pending, with uncommitted changes.
+Meanwhile `status` shows the file as pending, with uncommitted changes –
+for a file that isn't adaptable as not allowed, which it is until taken.
 Files new upstream in a [linked directory](#linked-directories) stay after
 `git restore`. For an adaptable file, `pull --overwrite` drops your
 adaptations; to keep them, `git restore` and `pull`.
@@ -480,7 +481,8 @@ git filesync diff -- --stat
 ```
 
 With `-- --exit-code` or `-- --quiet`, exit code 1 means differences, like
-`git diff`. Whether adaptations would merge cleanly tells `pull --dry-run`.
+`git diff`. A change only staged, with the working file as in `HEAD`, shows
+`git diff --cached`. Whether adaptations would merge cleanly tells `pull --dry-run`.
 For a [linked directory](#linked-directories), `diff` shows its files only
 (`--upstream`: also those new and deleted upstream).
 

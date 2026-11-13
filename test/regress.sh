@@ -738,7 +738,7 @@ check "violation exit code" "$(rc git filesync status --exit-code src/bar.h)" "1
 check "violation in hook output" "$(git filesync hook pre-push origin x </dev/null 2>&1 | grep -c 'NOT ALLOWED')" "1"
 check "pull refuses to merge into a file not adaptable" "$(rc pullc src/bar.h)" "2"
 check "refusal: how to go on (uncommitted: pull --overwrite or git restore)" \
-  "$(pullc src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or sync anyway with 'git filesync pull --overwrite src/bar.h'; only the uncommitted ones: 'git restore src/bar.h'$")" "1"
+  "$(pullc src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or sync anyway with 'git filesync pull --overwrite src/bar.h'; only the uncommitted ones: 'git restore -SW src/bar.h'$")" "1"
 check "pull --all continues after the refusal" "$(pullc --all 2>&1 | grep -c '^error:')" "0"
 check "adaptable file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
 git commit -qm "adapt bar" src/bar.h
@@ -2964,14 +2964,28 @@ git commit -q --no-edit
 echo other >> f && git add f && git show HEAD:f > f
 check "status: staged change reported" "$(git filesync status -s f)" "  M f  (not adaptable!)"
 check "status --exit-code: staged change" "$(rc git filesync status --exit-code f)" "1"
+check "rm refuses a staged change" "$(rc git filesync rm f)" "2"
+check "pull -n -W --overwrite: the index stays, nothing lost" \
+  "$(git filesync pull -n -W --overwrite f 2>&1 | grep -c discarding)" "0"
+check "pull -n --overwrite: the staged change would be discarded" \
+  "$(git filesync pull -n --overwrite f 2>&1 | grep -c 'discarding uncommitted changes')" "1"
 git reset -q f
 check "status: unstaged again, nothing to report" "$(st f)" ""
 
 # --overwrite discards committed adaptations also when the file is up to date
 echo adapted > g && git commit -qam adapt && git show HEAD~1:g > g
+check "pull -n --overwrite: committed adaptations of an up-to-date file: restore" \
+  "$(git filesync pull -n --overwrite g 2>&1 | grep -c '^g: would restore ')" "1"
 check "pull --overwrite: committed adaptations of an up-to-date file go" \
   "$(git filesync pull --overwrite g 2>&1 | grep -c 'staged')-$(git status --porcelain g)" "1-M  g"
 git commit -q --no-edit
+
+# pull --all --overwrite leaves out a missing file, also one with committed adaptations
+quiet git filesync set --adaptable g && git commit -q -m adaptable
+echo adapted > g && git commit -qam adapt && rm g
+check "pull --all --overwrite: a missing adapted file left out" \
+  "$(git filesync pull --all --overwrite 2>&1 | grep -c '^warning: g: missing - left out')-$(rc git filesync pull --all --overwrite)" "1-0"
+git checkout -q -- g
 
 # dry run of a [dir] entry names uncommitted changes it would discard
 echo mine >> d/one
