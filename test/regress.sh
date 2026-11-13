@@ -2936,9 +2936,48 @@ check "staged registry: no warning" "$(git filesync set --no-adaptable g 2>&1 | 
 echo "# more" >> .git-filesync
 check "registry changes not staged: no warning with -n" "$(git filesync set -n --adaptable g 2>&1 | grep -c warning)" "0"
 printf '#!/bin/sh\necho "# edited" >> "$1"\n' > "$T/ed28.sh"
-check "registry changes not staged: no warning with edit" \
+check "registry changes not staged before edit: warning" \
+  "$(GIT_EDITOR="sh '$T/ed28.sh'" git filesync edit 2>&1 | grep -cxF "$WARN")" "1"
+check "edit: what is edited gives no warning" \
   "$(GIT_EDITOR="sh '$T/ed28.sh'" git filesync edit 2>&1 | grep -c warning)" "0"
 git commit -q -m registry
+: > .git-filesync
+check "registry emptied, not staged: warning" \
+  "$(git filesync add file:///nowhere/m28.git h -p f 2>&1 | grep -cxF "$WARN")" "1"
+git reset -q --hard && rm -f h
+# CRLF already in the index: git leaves it (no change), so no warning either
+sedi 's/$/\r/' .git-filesync && git add .git-filesync && git commit -qm crlf
+echo '* text=auto' > .gitattributes && git add .gitattributes && git commit -qm attrs
+check "registry with CRLF in the index: no warning" \
+  "$(git filesync set --adaptable g 2>&1 | grep -c warning)" "0"
+git reset -q --hard HEAD~2
+
+# staged changes count as uncommitted: the index differs from HEAD, the working tree not
+echo staged >> g && git add g && git show HEAD:g > g
+(cd ../m28 && echo y2 > g && git commit -qam 3)
+check "pull refuses staged changes" "$(rc git filesync pull g)-$(git show :g | oneline)" "2-y staged "
+check "pull --overwrite: staged version kept" \
+  "$(git filesync pull --overwrite g 2>&1 | grep -c '^discarded: g, as staged ')-$(cat g)" "1-y2"
+git commit -q --no-edit
+
+# --overwrite discards committed adaptations also when the file is up to date
+echo adapted > g && git commit -qam adapt && git show HEAD~1:g > g
+check "pull --overwrite: committed adaptations of an up-to-date file go" \
+  "$(git filesync pull --overwrite g 2>&1 | grep -c 'staged')-$(git status --porcelain g)" "1-M  g"
+git commit -q --no-edit
+
+# dry run of a [dir] entry names uncommitted changes it would discard
+echo mine >> d/one
+check "pull -n --overwrite [dir]: names uncommitted changes" \
+  "$(git filesync pull -n --overwrite d 2>&1 | grep -c 'discarding uncommitted changes')" "1"
+git checkout -q -- d/one
+
+# pull -W of a new link whose file is already the upstream version: nothing written
+git config -f .git-filesync file.h.source "$(git config -f .git-filesync file.f.source)"
+git config -f .git-filesync file.h.path f && cp f h
+check "pull -W, new link already upstream's: unchanged" \
+  "$(git filesync pull -W h 2>&1)" "h: unchanged in the working tree (first sync; existing file)"
+git checkout -q -- .git-filesync && rm -f h
 
 
 # =============================================================================

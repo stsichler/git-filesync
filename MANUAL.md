@@ -104,8 +104,8 @@ committed like any other file, in git-config format:
 - Everything else may be edited by hand, but [`set`](#set),
   [`source`](#source), [`rm`](#rm), [`unlink`](#unlink) and [`mv`](#mv) know
   what a change means. When the last link is removed, the file is deleted.
-  A command that stages the file stages your changes not staged yet along,
-  with a warning (not [`edit`](#edit)).
+  A command that stages the file warns if it had changes not staged before
+  the command ran: they are staged too.
 
 Paths must lie inside the working tree: entries pointing outside it (`..`,
 absolute paths) or into a `.git` directory are errors and never written, so

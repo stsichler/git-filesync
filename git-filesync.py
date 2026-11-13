@@ -1555,6 +1555,7 @@ class Repo:
         self._raw = {}            # blob id -> content (read_blob)
         self._local = {}          # (rel, content hash, size) -> blob id (as_local)
         self._wt = {}             # rel -> blob id of the working file (worktree_blobs)
+        self._ids = {}            # (rel, content hash, size) -> blob id (blob_ids)
 
     def git(self, args, **kw):
         return git(args, cwd=self.top, **kw)
@@ -1797,6 +1798,13 @@ class Repo:
             raise FsError("git hash-object gave an unexpected answer")
         return oids
 
+    def staged_changes(self):
+        """Paths whose index entry differs from HEAD - one diff-index for the
+        whole index, without the paths (no limit on the command line); None
+        without a commit."""
+        p = self.git(["diff-index", "--cached", "--name-only", "-z", "HEAD"], check=False)
+        return set(out(p).split("\0")) - {""} if p.returncode == 0 else None
+
     def index_entries(self, rels):
         """{rel: (mode, blob id)} of these files in the index, one command."""
         entries = {}
@@ -1809,13 +1817,19 @@ class Repo:
 
     def blob_ids(self, files):
         """{rel: blob id} these [(rel, content)] get when written (see
-        write_files): content in the form stored here, LFS resolved."""
-        plain = [(r, c) for r, c in files if self.is_plain(r)]
-        ids = dict(zip([r for r, _ in plain], self.store_many([c for _, c in plain])))
-        rest = [(c, r) for r, c in files if r not in ids]
+        write_files): content in the form stored here, LFS resolved. Asked
+        before: from the cache."""
+        def key(r, c):
+            return r, hashlib.sha1(c).digest(), len(c)
+        todo = [(r, c) for r, c in files if key(r, c) not in self._ids]
+        plain = [(r, c) for r, c in todo if self.is_plain(r)]
+        for (r, c), oid in zip(plain, self.store_many([c for _, c in plain])):
+            self._ids[key(r, c)] = oid
+        rest = [(c, r) for r, c in todo if not self.is_plain(r)]
         self.as_local_many(rest)
-        ids.update((r, self.as_local(c, r)) for c, r in rest)
-        return ids
+        for c, r in rest:
+            self._ids[key(r, c)] = self.as_local(c, r)
+        return {r: self._ids[key(r, c)] for r, c in files}
 
     def write_files(self, files, stage=True):
         """Put these [(rel, content)] - content in the form stored here, LFS
@@ -2171,6 +2185,17 @@ def registry_path(repo):
     return path
 
 
+def registry_unstaged(repo):
+    """Has .git-filesync changes not staged - differs from the index, is
+    not in it, or is deleted but there? Asked of git (its rules for line
+    endings)."""
+    path, staged = registry_path(repo), repo.index_entries([REGISTRY])
+    if path.exists() != bool(staged):
+        return True
+    return path.exists() and \
+        repo.git(["diff", "--quiet", "--", REGISTRY], check=False).returncode == 1
+
+
 class Registry:
     """The repository's .git-filesync: [source], [file] and [dir] sections."""
 
@@ -2184,23 +2209,21 @@ class Registry:
         self._pending = {}        # ("file" | "dir" | "source", name, key) -> value, see _set
         self._drop = set()        # (section, name): sections to remove, see remove_file
         self._renames = {}        # (section, old name) -> new name, see _rename
-        # the file as found: changes not staged before are staged along (see finish)
-        self.found = self.path.read_bytes() if self.path.exists() else None
-        if self.found is not None:
+        # changes not staged before this command? (None: not asked yet, see finish)
+        self.unstaged = None
+        self._warned = False
+        if self.path.exists():
             p = git(["config", "-f", self.path, "--list", "-z"], check=False)
             if p.returncode:
                 raise FsError(f"{REGISTRY}: cannot parse: "
                               + p.stderr.decode("utf-8", "replace").strip())
             self.sources, self.files, self.dirs = parse_registry(p.stdout)
 
-    def unstaged(self):
-        """Did the file as found differ from the staged one (also: not
-        staged at all, or deleted but staged)?"""
-        staged = self.repo.index_entries([REGISTRY]).get(REGISTRY)
-        if self.found is None or staged is None:
-            return (self.found is None) != (staged is None)
-        return out(self.repo.git(["hash-object", f"--path={REGISTRY}", "--stdin"],
-                                 data=self.found)) != staged[1]
+    def _ask_unstaged(self):
+        """Before the file is first written: note whether it has changes not
+        staged (see registry_unstaged)."""
+        if self.unstaged is None:
+            self.unstaged = registry_unstaged(self.repo)
 
     def links(self):
         """All entries, [file] and [dir], by path."""
@@ -2336,6 +2359,7 @@ class Registry:
         self._pending, self._drop, self._renames = {}, set(), {}
         if not (pending or drop or renames):
             return
+        self._ask_unstaged()
         original = self.path.read_bytes() if self.path.exists() \
             else REGISTRY_HEADER.encode()
         edited = edit_registry(original, pending, drop, renames)
@@ -2355,13 +2379,14 @@ class Registry:
                                                else ["--unset-all", f"{sect}.{name}.{k}"]),
                 check=v is not None)
 
-    def finish(self, edited=False):
+    def finish(self):
         """Fix line endings and stage the registry (or its removal when empty)
-        - with a warning if it had changes not staged before (but for edit:
-        edited)."""
-        if not edited and self.found != b"" and self.unstaged():
+        - with a warning (once) if it had changes not staged before this
+        command, which are staged now too."""
+        self._ask_unstaged()
+        if self.unstaged and not self._warned:
             warn(f"{REGISTRY} had changes that were not staged - they are staged now too")
-        self.found = b""          # once: what is staged now is this command's
+            self._warned = True
         self.flush()
         if self.path.exists():
             if not self.sources and not self.files and not self.dirs:
@@ -2652,6 +2677,7 @@ class FileState:
     has_old: bool = False     # synced commit exists upstream
     lost_old: bool = False    # it doesn't: behind, or history rewritten? (no guess)
     discards: tuple = ((), ())  # a first sync: (working tree, index) paths it overwrites
+    staged: bool = False      # the index differs from HEAD (pull: see uncommitted)
     diverged: bool = False
     moved: Optional[tuple] = None   # ('renamed' | 'deleted', path, commit)
     newest: Optional[list] = None   # newer tags of a pinned source
@@ -3529,13 +3555,14 @@ def pull_one(repo, reg, st, args):
         raise FsError(f"{st.rel}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {rel}'; discard them with "
                       f"'git filesync restore -SW {rel}'{ways}")
-    if new_blob == st.old_blob and path == link.path and new == st.old and not discard:
+    if new_blob == st.old_blob and path == link.path and new == st.old and \
+            not (discard or dropped):
         print(f"{st.rel}: {paint('up to date', 'green')}"
               + (" (adaptations kept)" if st.committed == "adapted" else ""))
         return None
     # like `git pull`: uncommitted changes are never merged into a sync -
     # with --overwrite, they are discarded (and kept, see save_discarded)
-    if st.worktree in ("modified", "added") and not args.overwrite:
+    if uncommitted(st) and not args.overwrite:
         rel = path_arg(repo, st.rel)
         raise FsError(f"your local changes to '{st.rel}' would be overwritten by pull - "
                       f"commit or stash them first ('git stash'; 'git restore {rel}' "
@@ -3548,8 +3575,8 @@ def pull_one(repo, reg, st, args):
                                               local_mod and not discard)
 
     if args.dry_run:
-        lost = args.overwrite and st.worktree != "clean" and \
-            not has_content(repo, st.rel, content)
+        lost = args.overwrite and uncommitted(st) and \
+            (st.staged or not has_content(repo, st.rel, content))
         notes = ([f"{st.once} once"] if st.once else []) + \
             ([f"renamed upstream: {link.path} -> {path}"] if path != link.path else []) + \
             (["discarding adaptations"] if dropped else []) + \
@@ -3581,6 +3608,18 @@ def pull_one(repo, reg, st, args):
                          dropped), conflicts, content
 
 
+def uncommitted(st):
+    """Uncommitted changes that pull would overwrite: in the working tree
+    or staged (as for `git pull`)."""
+    return st.worktree in ("modified", "added") or st.staged
+
+
+def overwrites(st, args):
+    """pull --overwrite has something to do even without an upstream
+    change: local adaptations, committed or not."""
+    return args.overwrite and (st.local == "modified" or st.committed == "adapted")
+
+
 def synced_text(args):
     """What pull did to a file: synced - or with -W only written."""
     return paint("updated in the working tree only" if args.worktree else "synced", "green")
@@ -3589,7 +3628,13 @@ def synced_text(args):
 def has_content(repo, rel, content):
     """Does the working tree file have exactly this content (in the form
     stored here, see Repo.write_files) - nothing lost when it is written?"""
-    return repo.blob_ids([(rel, content)])[rel] == repo.worktree_blob(repo.top / rel)
+    path = repo.top / rel
+    if content is None or not path.is_file():
+        return False
+    data = path.read_bytes()
+    if repo.plain_content(rel, content) and repo.plain_content(rel, data):
+        return data == content            # stored as they are (see Repo.plain_content)
+    return repo.blob_ids([(rel, content)])[rel] == repo.worktree_blob(path)
 
 
 def sync_content(repo, st, new, new_blob, path, merge, rel=None, old_path=None):
@@ -3642,6 +3687,9 @@ def first_sync(repo, st, args, new, path):
         once = f"; {st.once} once" if st.once else ""
         print(f"{st.rel}: would sync to {link.name}@{src.short(commit)} "
               f"(not synced yet; {note}{once})")
+        return None
+    if content is None and args.worktree:     # the file is kept as it is: nothing to write
+        print(f"{st.rel}: unchanged in the working tree (first sync; {note})")
         return None
     if content is not None:
         content = repo.normalize(content, st.rel)
@@ -3725,13 +3773,16 @@ def first_sync_dir(repo, st, args):
         print(f"{name}: would sync to {dlink.name}@{src.short(commit)} "
               f"(not synced yet; {note}{once})")
         return None
+    if args.worktree and all(p.content is None for p in plan):   # nothing to write
+        print(f"{name}: unchanged in the working tree (first sync; {note})")
+        return None
     # kept by the caller, for all files at once (see save_discarded)
     st.discards = ([p.rel for p in plan if p.replaced],
                    [p.rel for p in plan] if args.overwrite else [])
     dlink.drop_synced()
     dlink.set("commit", commit)
     dlink.set("tree", tree)
-    print(f"{name}: {paint('synced', 'green')} (first sync; {note})")
+    print(f"{name}: {synced_text(args)} (first sync; {note})")
     msg = build_add_message(plan, src, dlink.name, dlink.url, dlink.ref, dlink.path, False,
                             st.adaptable, commit, entry=name)
     contents = {p.rel: None if p.content is None else repo.normalize(p.content, p.rel)
@@ -3790,7 +3841,7 @@ def pull_dir(repo, reg, st, args):
         raise FsError(f"{name}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {arg}'; discard them with "
                       f"'git filesync restore -SW {arg}'{ways}")
-    back = [m for m in local_mod if args.overwrite and m.new_blob == m.old_blob]
+    back = [m for m in st.base_members if overwrites(m, args) and m.new_blob == m.old_blob]
     dels = [m for m in st.dels if m.local != "missing"]
     # (other patterns, also if they only drop files gone here already: synced-* go)
     if not (st.mods or st.dels or st.adds or back) and st.new == st.old \
@@ -3800,7 +3851,7 @@ def pull_dir(repo, reg, st, args):
         return None
     # like `git pull`: uncommitted changes are never merged into a sync -
     # with --overwrite, they are discarded (and kept, see save_discarded)
-    dirty = [m for m in st.mods + dels + back if m.worktree in ("modified", "added")]
+    dirty = [m for m in st.mods + dels + back if uncommitted(m)]
     if dirty and not args.overwrite:
         raise FsError(f"your local changes to {few(repo, dirty)} would be overwritten by "
                       "pull - commit or stash them first ('git stash'; 'git restore "
@@ -3878,7 +3929,7 @@ def pull_dir(repo, reg, st, args):
         discard = args.overwrite and mod
         contents[m.rel], merged, n = sync_content(repo, m, st.new, m.new_blob, m.new_path,
                                                   mod and not discard)
-        dropped = discard and m.committed == "adapted"     # in the commit
+        dropped = args.overwrite and m.committed == "adapted"     # in the commit
         notes[m.rel] = (f"{n} merge conflict(s)" if n else "adaptations merged") if merged \
             else ("restored, local adaptations discarded" if dropped else "restored") \
             if m in back else "local adaptations discarded" if dropped else "changed upstream"
@@ -3895,7 +3946,10 @@ def pull_dir(repo, reg, st, args):
     summary = ", ".join(f"{n} {w}" for n, w in counts if n) or "no file changed"
     merged = [r for r, v in notes.items() if "merge" in v]
     if args.dry_run:
+        lost = any(m.staged or not has_content(repo, m.rel, contents.get(m.rel))
+                   for m in dirty)          # with --overwrite only (see above)
         what = ([f"{st.once} once"] if st.once else []) + [summary] + \
+            (["discarding uncommitted changes"] if lost else []) + \
             ([paint(f"merge conflicts in {len(conflicted)}", "boldred") if conflicted else
               "adaptations merged cleanly"] if merged else [])
         print(f"{name}: would sync to {dlink.name}@{src.short(st.new)} ({'; '.join(what)})")
@@ -3978,6 +4032,13 @@ def write_synced(repo, contents, conflicted=(), stage=True):
         repo.git(["add", "-f", "--"] + [lit(r) for r in kept])
 
 
+def nothing_staged(repo, rels):
+    """Are these files and .git-filesync staged as they are in HEAD - nothing
+    to commit? False without a commit."""
+    staged = repo.staged_changes()
+    return staged is not None and not staged & (set(rels) | {REGISTRY})
+
+
 def report_pull(repo, reg, synced, written):
     """The files a pull synced are staged with their entries (those with
     merge conflicts once resolved), like `git merge --squash`; one proposed
@@ -3993,9 +4054,7 @@ def report_pull(repo, reg, synced, written):
         print(f"{paint('merge conflicts', 'boldred')} - resolve them, then run:\n"
               f"    git add {add}\n    git commit\n{commit_hint(repo, msg)}")
         return EXIT_PENDING
-    staged = repo.git(["diff-index", "--cached", "--name-only", "-z", "HEAD"], check=False)
-    if staged.returncode == 0 and not set(out(staged).split("\0")) & (set(written) | {REGISTRY}):
-        # e.g. pull --overwrite discarding uncommitted changes only
+    if nothing_staged(repo, written):    # e.g. pull --overwrite of uncommitted changes only
         print(f"{name}: {paint('restored', 'green')} - the same as committed, nothing to commit")
         return EXIT_OK
     report_staged(repo, name, msg, paint("staged", "green"))
@@ -4022,6 +4081,11 @@ def cmd_pull(ctx, repo, args):
     contents = {}                       # rel -> synced content (normalized form)
     deletes = []                        # files deleted with a [dir] entry's sync
     states = [evaluate(ctx, repo, link) for link in links]
+    # staged changes count as uncommitted too, as for `git pull` (see uncommitted)
+    staged = repo.staged_changes() or set()
+    for st in states:
+        for m in [st] + st.members:
+            m.staged = m.rel in staged
     # what syncing needs, asked at once: upstream contents, short commit ids,
     # attributes of the files here
     repo.check_plain([st.rel for st in states if not st.link.is_dir]
@@ -4030,7 +4094,7 @@ def cmd_pull(ctx, repo, args):
     ok = [st for st in states if st.src and not st.error]
     # contents only of the files to sync (in the blobless cache, each one
     # may have to be fetched)
-    sync = [st for st in ok if (st.pending or args.overwrite and st.local == "modified")
+    sync = [st for st in ok if (st.pending or overwrites(st, args))
             and not (args.all and not once and st.off_track)]
     files = [m for st in sync for m in (st.members if st.link.is_dir else [st])]
     for src in {id(st.src): st.src for st in ok}.values():
@@ -4057,7 +4121,7 @@ def cmd_pull(ctx, repo, args):
         # the history (older, diverged, the previous sync point unknown):
         # only by name (or once to a given revision)
         if args.all and not once and (st.off_track or not (
-                st.pending or args.overwrite and st.local == "modified")):
+                st.pending or overwrites(st, args))):
             why = "missing" if st.missing else "previous sync point not found" \
                 if st.lost_old else "older than last sync" if st.behind_args \
                 else "history diverged" if st.diverged \
@@ -4538,8 +4602,7 @@ def cmd_add(ctx, repo, args):
     reg.finish()
     for p in plan:                # said once it is done
         print(f"{paint('linked', 'green')} {p.rel} -> {name}:{p.path} ({shown_ref})")
-    if repo.git(["diff", "--cached", "--quiet", "HEAD", "--"] + [lit(r) for r in rels]
-                 + [REGISTRY], check=False).returncode == 0:
+    if nothing_staged(repo, rels):
         print(f"{rel}: link{'s' if len(rels) > 1 else ''} and "
               f"file{'s' if len(rels) > 1 else ''} unchanged, nothing to commit")
         return EXIT_OK
@@ -4612,8 +4675,7 @@ def add_dir(repo, reg, args, src, where, ref, line, at, rel, path, target):
     reg.finish()
     print(f"{paint('linked', 'green')} {shown_rel} -> {name}:{up} ({shown_ref}), "
           f"{plural(len(plan), 'file')}")
-    if repo.git(["diff", "--cached", "--quiet", "HEAD", "--"] + [lit(r) for r in rels]
-                 + [REGISTRY], check=False).returncode == 0:
+    if nothing_staged(repo, rels):
         print(f"{shown_rel}: link and files unchanged, nothing to commit")
         return EXIT_OK
     msg = build_add_message(plan, src, name, url, ref, path, relink, args.adaptable, at,
@@ -5291,6 +5353,7 @@ def cmd_edit(ctx, repo, args):
     if not path.exists():
         raise FsError(f"no {REGISTRY} yet - link files with 'git filesync add'")
     before = path.read_bytes()
+    unstaged = registry_unstaged(repo)    # before the editor: what is edited is staged
     # the editor git would use (GIT_EDITOR, core.editor, VISUAL, EDITOR), run
     # like git runs it - not via `git config --edit`, which exits with 0 even
     # if the editor fails
@@ -5307,7 +5370,8 @@ def cmd_edit(ctx, repo, args):
         raise FsError(f"{e} - not staged; fix it with 'git filesync edit'")
     for problem in registry_problems(reg):
         warn(f"{REGISTRY}: {problem}")
-    reg.finish(edited=True)
+    reg.unstaged = unstaged
+    reg.finish()
     print(REGISTRY_STAGED)
     return EXIT_OK
 
