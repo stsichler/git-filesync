@@ -139,6 +139,11 @@ section() { printf '\n=== %s\n' "$1"; }
 # (A adapted), worktree (M modified, D deleted ...); trailing blanks removed.
 st() { git filesync status -s "$@" 2>/dev/null | head -1 | cut -c1-3 | sed 's/ *$//'; }
 
+# stn [ARGS...] - as st, with the note after the path, if any: 'P   (adapted)'
+stn() { git filesync status -s "$@" 2>/dev/null | head -1 |
+  sed -E 's/^(...) .*  \((.*)\)$/\1 (\2)/; t
+          s/^(...).*/\1/; s/ *$//'; }
+
 # quiet CMD... - run a command with all output discarded
 quiet() { "$@" >/dev/null 2>&1; }
 
@@ -242,13 +247,13 @@ check "after pull" "$(st)" ""
 sedi 's/^g$/G-local/' src/lib.c
 git commit -qam tweak
 up 's/^a$/A/' "Change A"
-check "not adaptable: an adaptation is not allowed" "$(git filesync status -s)" "PM  src/lib.c  (not adaptable!)"
+check "not adaptable: an adaptation is not allowed" "$(git filesync status -s)" "P   src/lib.c  (adapted, not adaptable!)"
 check "not adaptable: the status names the way out" \
   "$(git filesync status | grep -c 'git filesync set --adaptable <file>...')" "1"
 check "not adaptable: pull refuses" "$(rc git filesync pull src/lib.c)" "2"
 # adaptable: a committed local adaptation is kept by the next pull (3-way merge)
 quiet git filesync set src/lib.c --adaptable && git commit -qm adaptable
-check "pending + adapted" "$(st)" "PM"
+check "pending + adapted" "$(stn)" "P   (adapted)"
 pullc src/lib.c >/dev/null
 check "clean merge result" "$(oneline < src/lib.c)" "A B C d e f G-local "
 
@@ -286,7 +291,7 @@ check "revert message" "$(git log -1 --format=%B | grep -c 'Reverts upstream')" 
 # file; pull refuses it, pull --all leaves it alone
 quiet pullc src/lib.c
 rm src/lib.c
-check "deleted file is missing" "$(git filesync status -s src/lib.c)" " MD src/lib.c  (missing!)"
+check "deleted file is missing (a pull with conflicts staged)" "$(git filesync status -s src/lib.c)" " UD src/lib.c  (missing!)"
 check "missing: long format" \
   "$(git filesync status src/lib.c | grep -cE "^${TAB}missing:[[:space:]]+src/lib\.c  \(NOT ALLOWED: still linked\)$")" "1"
 check "missing: hints" "$(git filesync status src/lib.c | grep -c 'git filesync restore <file>...')" "1"
@@ -742,7 +747,7 @@ check "refusal: how to go on (uncommitted: pull --overwrite or git restore)" \
 check "pull --all continues after the refusal" "$(pullc --all 2>&1 | grep -c '^error:')" "0"
 check "adaptable file merged by --all" "$(sed -n 2p src/foo.c; sed -n 5p src/foo.c)" "$(printf 'B-local\nE-up')"
 git commit -qm "adapt bar" src/bar.h
-check "violation (committed)" "$(git filesync status -s src/bar.h)" " M  src/bar.h  (not adaptable!)"
+check "violation (committed)" "$(git filesync status -s src/bar.h)" "    src/bar.h  (adapted, not adaptable!)"
 check "refusal (committed): pull --overwrite or set --adaptable" \
   "$(pullc src/bar.h 2>&1 | grep -c "discard them with 'git filesync restore -SW src/bar.h', or sync anyway with 'git filesync pull --overwrite src/bar.h'; or allow them with 'git filesync set --adaptable src/bar.h'$")" "1"
 check "status: restore hint for a file not adaptable" \
@@ -812,7 +817,7 @@ check "registry committed with link" "$(git show --name-only --format= HEAD | so
 # mv: moves file and entry
 check "mv rc" "$(rc git filesync mv include/new.h include/renamed.h)" "0"
 check "mv: file moved" "$(ls include)" "renamed.h"
-check "mv: link moved (staged, not yet committed)" "$(git filesync status -s include/renamed.h)" "  ? include/renamed.h"
+check "mv: link moved (staged, not yet committed)" "$(git filesync status -s include/renamed.h)" " A  include/renamed.h"
 check "mv: old entry gone" "$(git config -f .git-filesync --get-regexp '^file\.include/new\.h\.' | lines)" "0"
 git commit -qm mv
 
@@ -847,7 +852,7 @@ git rm -q -r include && git commit -qm "include gone, its entry kept"
 check "deletion committed: still missing" "$(git filesync status -s include/renamed.h)" "  D include/renamed.h  (missing!)"
 check "deletion committed: pull refuses" "$(rc git filesync pull include/renamed.h)-$([ -e include ] && echo created)" "2-"
 check "deletion committed: restore brings it back" \
-  "$(rc git filesync restore include/renamed.h) $(cat include/renamed.h) $(git filesync status -s include/renamed.h)" "0 n   ? include/renamed.h"
+  "$(rc git filesync restore include/renamed.h) $(cat include/renamed.h) $(git filesync status -s include/renamed.h)" "0 n   A include/renamed.h"
 git reset -q --hard HEAD~1
 
 # unlink: removes the entry, keeps the file; the last unlink removes the registry
@@ -986,7 +991,7 @@ check "status -s: nothing when clean" "$(git filesync status -s)" ""
 sedi 's/^1$/1-adapt/' b.c c.c e.c; git commit -qam adapt          # committed adaptations
 sedi 's/^3$/3-wip/' c.c d.c                                          # uncommitted changes
 check "status -s: three columns" "$(git filesync status -s | tr '\n' '|')" \
-  "P   a.c|PM  b.c| MM c.c|P M d.c| M  e.c  (not adaptable!)|"
+  "P   a.c|P   b.c  (adapted)|  M c.c  (adapted)|P M d.c|    e.c  (adapted, not adaptable!)|"
 
 # long format: sections like git status
 OUT=$(git filesync status)
@@ -996,7 +1001,7 @@ check "status: upstream hints, diff first" "$(echo "$OUT" | grep -A2 '^Upstream 
 check "status: commit count" "$(echo "$OUT" | grep -cE "^${TAB}pending:[[:space:]]+b\.c  \(1 commit\)")" "1"
 check "status: adapted section" "$(echo "$OUT" | grep -A6 '^Locally adapted files:' | grep -cE "^${TAB}adapted:")" "3"
 check "status: not-allowed note on adapted" "$(echo "$OUT" | grep -cE "^${TAB}adapted:[[:space:]]+e\.c  \(NOT ALLOWED: not adaptable\)")" "1"
-check "status: uncommitted section" "$(echo "$OUT" | grep -A5 '^Uncommitted changes:' | grep -cE "^${TAB}modified:")" "2"
+check "status: not staged section" "$(echo "$OUT" | grep -A5 '^Changes not staged for commit:' | grep -cE "^${TAB}modified:")" "2"
 check "status: no 'nothing to sync' when pending" "$(echo "$OUT" | grep -c 'nothing to sync')" "0"
 check "status: exit code 0 like git" "$(rc git filesync status)" "0"
 check "status --exit-code" "$(rc git filesync status --exit-code)" "1"
@@ -1117,10 +1122,10 @@ git checkout -q -- f1.txt
 # 'adaptable' without a value is true, as everywhere in git config
 echo local >> a.txt
 git commit -qam adapt
-check "adapted, not adaptable" "$(git filesync status -s a.txt)" " M  a.txt  (not adaptable!)"
+check "adapted, not adaptable" "$(git filesync status -s a.txt)" "    a.txt  (adapted, not adaptable!)"
 sedi '/^\[file "a.txt"\]/a\
 adaptable' .git-filesync
-check "bare 'adaptable' means true" "$(git filesync status -s a.txt)" " M  a.txt"
+check "bare 'adaptable' means true" "$(git filesync status -s a.txt)" "    a.txt  (adapted)"
 git checkout -q -- .git-filesync
 
 # synced version not readable -> warning, not a silent 'adapted'; --overwrite recovers
@@ -1234,7 +1239,7 @@ if git lfs version >/dev/null 2>&1; then
         quiet pullc d.txt
         check "$tag: merged" "$(oneline < d.txt)" "L1-local l2 l3 l4 L5-up "
         check "$tag: committed storage" "$(git cat-file -p HEAD:d.txt | head -1 | grep -c git-lfs)" "$lfs_count"
-        check "$tag: after merge (adapted, clean worktree)" "$(st) $(git status --porcelain)" " M "
+        check "$tag: after merge (adapted, clean worktree)" "$(stn) $(git status --porcelain)" "    (adapted) "
 
         # add over an existing file: an older upstream version differs from
         # the base (the head), the same content doesn't (LFS or not);
@@ -1526,7 +1531,7 @@ check "pull follows rename: path updated" "$(git config -f .git-filesync file.r.
 check "pull follows rename: merged" "$(oneline < r.c)" "a B c d e-local f g h I "
 check "pull follows rename: message" \
   "$(git log -1 --format=%B | grep -cE '^(Upstream: .*\(main:lib/renamed.c\)|Renamed upstream: lib/r.c -> lib/renamed.c|- rename r .*|- change I .*)$')" "4"
-check "after rename: only adapted" "$(st r.c)" " M"
+check "after rename: only adapted" "$(stn r.c)" "    (adapted)"
 
 # pull refuses a deleted file and says how to proceed
 check "pull refuses deleted file" "$(rc pullc gone.c)" "2"
@@ -1542,7 +1547,7 @@ check "chained rename" "$(git filesync status r.c | grep -c 'lib/renamed.c -> li
 quiet pullc r.c
 check "pure rename: path updated" "$(git config -f .git-filesync file.r.c.path)" "lib/final.c"
 check "pure rename: commit has only the registry" "$(git show --name-only --format= HEAD)" ".git-filesync"
-check "pure rename: then clean" "$(st r.c)" " M"
+check "pure rename: then only adapted" "$(stn r.c)" "    (adapted)"
 
 
 # =============================================================================
@@ -1630,7 +1635,7 @@ mkdir docs && echo mine > docs/x.md
 check "add DIR: an existing, different file is refused" "$(rc fsd add --per-file nowhere/m11 docs --include /x.md)" "2"
 quiet fsd add --per-file --adaptable nowhere/m11 docs --include /x.md && git commit -q --no-edit
 check "add DIR: existing file kept" "$(cat docs/x.md)" "mine"
-check "add DIR: existing file adapted" "$(st docs)" " M"
+check "add DIR: existing file adapted" "$(stn docs)" "    (adapted)"
 check "add DIR: subject for an existing file" "$(git log -1 --format=%s | sed 's/@.*//')" "[filesync] Link docs/x.md to nowhere/m11"
 check "add DIR --overwrite: existing file replaced" \
   "$(fsd add --per-file -n --force --overwrite nowhere/m11 docs --include /x.md | grep -c 'replacing the existing file')" "1"
@@ -1728,7 +1733,7 @@ check "pull --tag: message without a note on it" \
 check "pull --tag: hint how to stay" \
   "$(echo "$OUT" | grep -c "^hint: .*to stay on tag v1.1, use 'git filesync set <file>... --tag v1.1'$")" "1"
 check "pull --tag: all committed" "$(git status --porcelain)" ""
-check "after pull --tag: the link's tag is older" "$(st a.c)" "OM"
+check "after pull --tag: the link's tag is older" "$(stn a.c)" "O   (adapted)"
 check "pull --tag: the hint says pull FILE goes back" \
   "$(echo "$OUT" | grep -c "so 'git filesync pull <file>...' goes back")" "1"
 check "after pull --tag: pull --all doesn't go back" \
@@ -1888,7 +1893,7 @@ git reset -q --hard HEAD~1
 check "set -p: one file only" "$(rc git filesync set a.c b.c -p a.c)" "2"
 check "set -p" "$(git filesync set b.c -p a.c 2>/dev/null | grep -c '^b.c: path b.c -> a.c, based on .*, with local modifications$')" "1"
 check "set -p: entry" "$(git config -f .git-filesync file.b.c.path)" "a.c"
-check "set -p: content differs from the new base" "$(st b.c)" " M"
+check "set -p: content differs from the new base" "$(stn b.c)" " U  (not adaptable!)"
 quiet git filesync set b.c -p b.c
 check "set -p back: matching version found" "$(st b.c) $(git config -f .git-filesync file.b.c.path)" " b.c"
 check "set -p back: entry as committed" "$(git status --porcelain)" ""
@@ -1916,7 +1921,7 @@ quiet git filesync set a.c --source "$TURL/m13copy.git" -b main -p a.c
 check "set --source copy: new source" \
   "$(git config -f .git-filesync file.a.c.source | grep -c m13copy) $(git config -f .git-filesync file.b.c.source)" "1 $SRC13"
 check "set --source copy: commit of the copy" "$(git config -f .git-filesync file.a.c.commit)" "$(git -C ../m13copy rev-parse HEAD)"
-check "set --source copy: up to date" "$(git filesync status -s)" ""
+check "set --source copy: the base's commit staged" "$(git filesync status -s)" " U  a.c"
 git commit -qm copy
 
 # --tag pins the file, without syncing; the branch stays the source's
@@ -2032,7 +2037,7 @@ else
   for i in 1 2 3 4 5 6 7 8 9; do echo local >> src/f$i.c; done
   git commit -qam "adapt 9"
   check "status: adapted files cost no git calls each" "$([ "$(calls status)" -le "$((C60 + 3))" ] && echo yes)" "yes"
-  check "status: adapted files reported" "$(git filesync status -s | grep -c '^ M ')" "9"
+  check "status: adapted files reported" "$(git filesync status -s | grep -c '  (adapted')" "9"
   # diff, restore and pull compare, convert and write all files at once:
   # 9 files cost (almost) no more git calls than one
   D1=$(calls diff src/f1.c); D9=$(calls diff src)
@@ -2068,7 +2073,7 @@ else
   N30=$(calls status)
   check "status: existing files of new links cost no git calls each ($N10 / $N30)" \
     "$([ "$N30" -le "$((N10 + 2))" ] && echo yes)" "yes"
-  check "status: all new, not committed yet" "$(git filesync status -s | grep -c '^N ?')" "30"
+  check "status: all new, not committed yet" "$(git filesync status -s | grep -c '^N A')" "30"
   NP=$(calls pull --all)
   check "pull: first syncs, one git call per file ($NP for 30)" "$([ "$NP" -le $((30 + 35)) ] && echo yes)" "yes"
   check "pull: first syncs staged" "$(git diff --cached --name-only | lines)" "31"
@@ -2088,7 +2093,7 @@ else
   BN=$(calls status)
   check "status: a new link with uncommitted changes costs no git call per file ($BA / $BN)" \
     "$([ "$BN" -le "$((BA + 8))" ] && echo yes)" "yes"
-  check "status: the adapted files still found" "$(git filesync status -s | grep -c '^ M ')" "9"
+  check "status: the adapted files still found" "$(git filesync status -s | grep -c '  (adapted')" "9"
 fi
 
 
@@ -2268,7 +2273,7 @@ if ln -s x "$T/lncheck" 2>/dev/null && [ -L "$T/lncheck" ]; then
   cd "$T/s23"
   rm a.c && echo x > there && ln -s there a.c && git add a.c there && git commit -qm "a.c a symlink"
   (cd ../m23 && git checkout -q main && echo more >> a.c && git commit -qam more && git push -q ../m23.git main)
-  check "symlink: named by its own path" "$(st a.c)" "PM"
+  check "symlink: named by its own path" "$(stn a.c)" "P   (adapted, not adaptable!)"
   quiet git filesync pull --overwrite a.c
   check "symlink: synced as a file" "$(git ls-files -s a.c | cut -c1-6) $([ -L a.c ] && echo link || echo file)" \
     "100644 file"
@@ -2337,7 +2342,7 @@ check "new link, adaptable: kept, differences are adaptations" \
   "$(rc git filesync pull c.c)-$(cat c.c)" "0-own"
 check "new link: --overwrite takes the upstream version" "$(rc git filesync pull --overwrite e.c)-$(cat e.c)" "0-e"
 git commit -q --no-edit
-check "new links synced" "$(git filesync status -s | oneline)" " M  c.c "
+check "new links synced" "$(git filesync status -s | oneline)" "    c.c  (adapted) "
 check "new links synced: exit code" "$(rc git filesync status --exit-code)" "0"
 check "new link: pull -n --commit names it once" \
   "$(printf '[file "f.c"]\n\tsource = %s\n\tpath = lib/b.c\n' "$SRC24" >> .git-filesync
@@ -2679,7 +2684,7 @@ check "pull: up to date" "$(st)" ""
 
 # not adaptable (the default): a modification is not allowed
 echo local >> vendor/a.c && git commit -qam local
-check "not adaptable: status -s" "$(git filesync status -s)" " M  vendor/  (not adaptable!)"
+check "not adaptable: status -s" "$(git filesync status -s)" "    vendor/  (adapted, not adaptable!)"
 check "not adaptable: long" "$(git filesync status | grep adapted: | sed 's/^[[:space:]]*//')" \
   "adapted:    vendor/  (1 of 3 files, NOT ALLOWED: not adaptable)"
 (cd ../m27 && echo b2 >> lib/sub/b.c && git commit -qam b2)
@@ -2697,11 +2702,11 @@ check "adapted, deleted upstream: --force keeps it as a file of this repository"
 (cd ../m27 && git revert --no-edit HEAD >/dev/null)
 check "back upstream: an existing, different file is refused" \
   "$(git filesync pull vendor 2>&1 | grep -c '^error: vendor/a.c: new upstream, but another file is here')" "1"
-check "--force (adaptable): kept as an adaptation" "$(pullc --force vendor >/dev/null; st)" " M"
+check "--force (adaptable): kept as an adaptation" "$(pullc --force vendor >/dev/null; stn)" "    (adapted)"
 
 # a missing file is never allowed - unless upstream deleted it too
 git rm -q vendor/sub/b.c && git commit -qm "no b.c"
-check "missing: short" "$(git filesync status -s)" " MD vendor/  (missing!)"
+check "missing: short" "$(git filesync status -s)" "  D vendor/  (missing!)"
 check "missing: long" "$(git filesync status | grep missing: | sed 's/^[[:space:]]*//')" \
   "missing:    vendor/  (1 of 3 files, NOT ALLOWED: still linked)"
 (cd ../m27 && echo n2 >> lib/sub/new.c && git commit -qam n2)
@@ -2896,15 +2901,21 @@ addc file:///nowhere/m28.git f && addc file:///nowhere/m28.git g && addc file://
 (cd ../m28 && echo b > f && echo y > g && echo 1b > d/one && git rm -q d/two && echo 3 > d/three \
   && git add . && git commit -qm 2)
 
-# pull -W: only the working tree - to try a newer version
+# pull -W: file and entry in the working tree only - to try a newer version
 OUT=$(git filesync pull -W f 2>&1); RC=$?
-check "pull -W: written, nothing staged" "$RC-$(cat f)-$(git status --porcelain | oneline)" "0-b- M f "
+check "pull -W: written, the entry too, nothing staged" \
+  "$RC-$(cat f)-$(git status --porcelain | oneline)$(git config --blob :.git-filesync file.f.blob | cut -c1-7)" \
+  "0-b- M .git-filesync  M f $(git -C ../m28 rev-parse --short=7 HEAD~1:f)"
 check "pull -W: output" "$OUT" "f: updated in the working tree only"
-check "pull -W: still pending, modified" "$(st f)" "P M"
-check "pull -W: refuses uncommitted changes, as pull" "$(rc git filesync pull -W f)" "2"
-OUT=$(git filesync pull --overwrite f 2>&1)
-check "pull --overwrite takes it: nothing discarded" "$(echo "$OUT" | grep -c -e discard)" "0"
-check "pull --overwrite takes it: staged with its entry" "$(git status --porcelain | oneline)" "M  .git-filesync M  f "
+check "pull -W: not pending, not staged" "$(st f)" "  U"
+check "pull -W: status says so" \
+  "$(git filesync status | grep -A3 '^Changes not staged for commit:' | grep -cE "^${TAB}updated:[[:space:]]+f  \([0-9a-f]+ -> [0-9a-f]+\)\$")" "1"
+check "pull -W: diff shows no modification" "$(git filesync diff f)" ""
+check "pull -W again: up to date" "$(git filesync pull -W f 2>&1)" "f: up to date"
+OUT=$(git filesync pull f 2>&1)
+check "pull stages it, nothing discarded" "$(echo "$OUT" | grep -c discard)-$(git status --porcelain | oneline)" \
+  "0-M  .git-filesync M  f "
+check "pull: the message from what is committed" "$(grep -c '^Upstream changes since' .git/FILESYNC_MSG)" "1"
 git commit -q --no-edit
 
 # pull --overwrite discards uncommitted changes, kept as a blob
@@ -2914,10 +2925,16 @@ ID=$(echo "$OUT" | sed -n 's/^discarded: g (git show \([0-9a-f]*\) to get it bac
 check "pull --overwrite: uncommitted changes discarded" "$(cat g)-$(git show "$ID" | oneline)" "y-x mine "
 git commit -q --no-edit
 
-# a [dir] entry: files new upstream are left behind by 'git restore'
-check "pull -W [dir]: written, nothing staged" "$(rc git filesync pull -W d)-$(git status --porcelain | oneline)" \
-  "0- M d/one  D d/two ?? d/three "
-git restore d && rm d/three
+# a [dir] entry: restore takes back what pull -W wrote, also its new files
+check "pull -W [dir]: written, the entry too, nothing staged" \
+  "$(rc git filesync pull -W d)-$(git status --porcelain | oneline)$(st d)" \
+  "0- M .git-filesync  M d/one  D d/two ?? d/three   U"
+check "restore [dir]: back, the new file gone, nothing discarded" \
+  "$(git filesync restore d 2>&1 | grep -c discarded)-$(git status --porcelain | oneline)" "0-"
+quiet git filesync pull -W d
+check "pull after pull -W [dir]: the file the new base hasn't goes from the index too" \
+  "$(quiet git filesync pull d; git status --porcelain | oneline)" "M  .git-filesync M  d/one A  d/three D  d/two "
+git reset -q --hard && rm -f d/three
 echo mine >> d/one
 check "pull [dir]: refuses uncommitted changes" "$(rc git filesync pull d)" "2"
 check "pull --overwrite [dir]: uncommitted changes discarded" \
@@ -2927,30 +2944,65 @@ echo mine >> f
 check "pull --all --overwrite: an up-to-date file restored" \
   "$(git filesync pull --all --overwrite 2>&1 | grep -c '^f: restored - the same as committed, nothing to commit$')-$(cat f)" "1-b"
 
-# a command staging .git-filesync warns of changes to it not staged before
-WARN="warning: .git-filesync had changes that were not staged - they are staged now too"
+# R2: a command stages what it changes in .git-filesync - changes made by
+# hand stay unstaged (no warning needed)
 echo "# mine" >> .git-filesync
-check "registry changes not staged: warning" "$(git filesync set --adaptable g 2>&1 | grep -cxF "$WARN")" "1"
-check "registry changes not staged: staged now" "$(git show :.git-filesync | grep -c '^# mine$')" "1"
-check "staged registry: no warning" "$(git filesync set --no-adaptable g 2>&1 | grep -c warning)" "0"
-echo "# more" >> .git-filesync
-check "registry changes not staged: no warning with -n" "$(git filesync set -n --adaptable g 2>&1 | grep -c warning)" "0"
+git config -f .git-filesync source.extra.url https://example.com/extra
+check "set: only its change staged" \
+  "$(git filesync set --adaptable g 2>&1 | grep -c warning) $(git diff --cached -U0 .git-filesync | grep -E '^[-+][^-+]' | oneline)" \
+  "0 +	adaptable = true "
+check "... the hand-made ones stay unstaged" "$(git diff -U0 .git-filesync | grep -cE '^\+(# mine|\[source "extra"\])')" "2"
+check "set: only adaptable changed: nothing to pull" "$(git filesync set --no-adaptable g 2>&1 | tail -1)" ".git-filesync staged"
+check "edit: the sections it changes" \
+  "$(GIT_EDITOR='f() { git config -f "$1" file.g.adaptable true; }; f' git filesync edit >/dev/null 2>&1; git diff --cached -U0 .git-filesync | grep -E '^[-+][^-+]' | oneline)" \
+  "+	adaptable = true "
 printf '#!/bin/sh\necho "# edited" >> "$1"\n' > "$T/ed28.sh"
-check "registry changes not staged before edit: warning" \
-  "$(GIT_EDITOR="sh '$T/ed28.sh'" git filesync edit 2>&1 | grep -cxF "$WARN")" "1"
-check "edit: what is edited gives no warning" \
-  "$(GIT_EDITOR="sh '$T/ed28.sh'" git filesync edit 2>&1 | grep -c warning)" "0"
-git commit -q -m registry
+check "edit: only a comment: nothing staged" "$(GIT_EDITOR="sh '$T/ed28.sh'" git filesync edit 2>&1 | grep -v '^warning')" \
+  ".git-filesync: only comments or layout changed - nothing staged"
+git commit -q -m registry && git checkout -q -- .git-filesync
 : > .git-filesync
-check "registry emptied, not staged: warning" \
-  "$(git filesync add file:///nowhere/m28.git h -p f 2>&1 | grep -cxF "$WARN")" "1"
+check "registry emptied by hand: add stages its entry, the others stay staged" \
+  "$(quiet git filesync add file:///nowhere/m28.git h -p f; git show :.git-filesync | grep -E '^\[' | oneline)" \
+  '[source "nowhere/m28"] [file "f"] [file "g"] [dir "d"] [file "h"] '
 git reset -q --hard && rm -f h
-# CRLF already in the index: git leaves it (no change), so no warning either
-sedi 's/$/\r/' .git-filesync && git add .git-filesync && git commit -qm crlf
+# CRLF already in the index: git leaves it (no change)
+sedi 's/$/\r/' .git-filesync && git add .gitattributes .git-filesync 2>/dev/null; git add .git-filesync && git commit -qm crlf
 echo '* text=auto' > .gitattributes && git add .gitattributes && git commit -qm attrs
 check "registry with CRLF in the index: no warning" \
   "$(git filesync set --adaptable g 2>&1 | grep -c warning)" "0"
 git reset -q --hard HEAD~2
+# a merge conflict in the registry: refused until resolved
+blob=$(git hash-object -w .git-filesync)
+git update-index --force-remove .git-filesync
+printf '100644 %s 1\t.git-filesync\n100644 %s 2\t.git-filesync\n100644 %s 3\t.git-filesync\n' "$blob" "$blob" "$blob" |
+  git update-index --index-info
+check "registry with a merge conflict: refused" "$(rc git filesync set --adaptable g) $(git filesync status 2>&1)" \
+  "2 error: .git-filesync has a merge conflict - resolve it with 'git filesync edit' (or by hand, then 'git add .git-filesync')"
+check "... edit resolves it" "$(GIT_EDITOR=true git filesync edit 2>&1) $(git ls-files -u .git-filesync | wc -l | tr -d ' ') $(rc git filesync status)" \
+  ".git-filesync: conflict resolved and staged 0 0"
+git reset -q --hard
+git update-index --cacheinfo "100644,$(printf '[broken\n' | git hash-object -w --stdin),.git-filesync"
+check "a staged registry that can't be parsed: an error" "$(rc git filesync status) $(rc git filesync restore f) $(cat f)" "2 2 b"
+git reset -q --hard
+# add -W: entry and file in the working tree only; mv, pull, restore of it
+check "add -W: in the working tree only" \
+  "$(git filesync add -W file:///nowhere/m28.git h -p f 2>&1 | grep -c 'in the working tree only') $(git status --porcelain | oneline)$(st h)" \
+  "1  M .git-filesync ?? h   A"
+check "... diff --cached: nothing" "$(git filesync diff --cached)" ""
+quiet git filesync mv h h2
+check "mv of an entry only in the working tree: stays unstaged" \
+  "$(git config --blob :.git-filesync --get-regexp '^file[.]h' | wc -l | tr -d ' ') $(st h2)" "0   A"
+check "... pull stages it" "$(quiet git filesync pull h2; git status --porcelain | oneline)" "M  .git-filesync A  h2 "
+check "... restore -S: out of the index, the working tree keeps it" \
+  "$(git filesync restore -S h2) $(git status --porcelain | oneline)" "h2: unstaged (not in HEAD yet)  M .git-filesync ?? h2 "
+check "... restore: entry and file gone" \
+  "$(git filesync restore h2) $(git status --porcelain | oneline)$(ls h2 2>/dev/null)" "h2: removed (not in the index yet) "
+git reset -q --hard
+# set: says whether pull has something to do (advice.statusHints: the hint)
+git -C ../m28 tag t28
+check "set: something to pull: said, the hint as advice.statusHints says" \
+  "$(git -c advice.statusHints=false filesync set g --tag t28 2>&1 | tail -1)" ".git-filesync staged - pending until pull"
+git reset -q --hard
 
 # staged changes count as uncommitted: the index differs from HEAD, the working tree not
 echo staged >> g && git add g && git show HEAD:g > g
@@ -2962,7 +3014,7 @@ git commit -q --no-edit
 
 # status: a staged change is uncommitted too, also with the working tree as in HEAD (git: MM)
 echo other >> f && git add f && git show HEAD:f > f
-check "status: staged change reported" "$(git filesync status -s f)" "  M f  (not adaptable!)"
+check "status: staged change reported" "$(git filesync status -s f)" " MM f  (not adaptable!)"
 check "status --exit-code: staged change" "$(rc git filesync status --exit-code f)" "1"
 check "rm refuses a staged change" "$(rc git filesync rm f)" "2"
 check "pull -n -W --overwrite: the index stays, nothing lost" \
@@ -2996,8 +3048,8 @@ git checkout -q -- d/one
 # pull -W of a new link whose file is already the upstream version: nothing written
 git config -f .git-filesync file.h.source "$(git config -f .git-filesync file.f.source)"
 git config -f .git-filesync file.h.path f && cp f h
-check "pull -W, new link already upstream's: unchanged" \
-  "$(git filesync pull -W h 2>&1)" "h: unchanged in the working tree (first sync; existing file)"
+check "pull -W, new link already upstream's: only the entry" \
+  "$(git filesync pull -W h 2>&1) $(git status --porcelain h)" "h: updated in the working tree only (first sync; existing file) ?? h"
 git checkout -q -- .git-filesync && rm -f h
 
 
@@ -3007,7 +3059,12 @@ cd "$T/s28"
   && echo 1c > d/one && git commit -qam 6)
 C4=$(git -C ../m28 rev-parse HEAD~2)
 quiet git filesync pull --commit "$C4" f
-check "staged pull: no violation" "$(git filesync status -s f)" "P M f"
+check "staged pull: no violation" "$(git filesync status -s f)" "PU  f"
+check "... status: to be committed" \
+  "$(git filesync status f | grep -A3 '^Changes to be committed:' | grep -cE "^${TAB}updated:[[:space:]]+f  \([0-9a-f]+ -> [0-9a-f]+\)\$")" "1"
+check "... diff --cached: no modification" "$(git filesync diff --cached f)" ""
+check "... pull -W on top: both columns" "$(quiet git filesync pull -W f; st f)" " UU"
+check "... restore: back to the staged one" "$(quiet git filesync restore f; cat f) $(st f)" "c PU"
 check "pull again without a commit" "$(rc git filesync pull f)-$(git show :f)" "0-d"
 check "staged pull: status --exit-code" "$(rc git filesync status --exit-code f)" "0"
 check "pull again: both parts in the proposed message" "$(grep -c '^\[filesync\] Sync f ' .git/SQUASH_MSG)" "2"
@@ -3028,6 +3085,30 @@ echo own > k && git add k && git commit -qm k
 quiet git filesync add --overwrite file:///nowhere/m28.git k -p f
 check "add --overwrite of a committed file: no violation" "$(rc git filesync status --exit-code k)" "0"
 git commit -q --no-edit
+
+# restore takes the synced version (the base of the entry below): committed
+# adaptations go from the working tree - said, git restore brings them back
+quiet git filesync set --adaptable k && echo adapted > k && git commit -qam "adapt k"
+check "restore of an adapted file: the adaptations go, said" \
+  "$(git filesync restore k 2>&1 | tail -1) $(cat k) $(stn k)" \
+  "k: adaptations removed (still staged: 'git restore <file>...' brings them back) $(git -C ../m28 show HEAD:f)   M (adapted)"
+git restore k
+# an adaptation staged: diff --cached shows it against the base of the staged entry
+echo staged >> k && git add k
+check "diff --cached: the staged adaptation" "$(git filesync diff --cached k -- --name-only) $(st k)" "k  M"
+check "... diff --committed: only the committed one" "$(git filesync diff --committed k | grep -c '^+staged')" "0"
+check "restore -S: the index from HEAD's base" \
+  "$(git filesync restore -S k) $(git show :k)" "k: restored in the index (nowhere/m28@$(git config -f .git-filesync file.k.commit | cut -c1-7)) $(git -C ../m28 show HEAD:f)"
+git reset -q --hard
+# pull of an entry the index has: only its changes staged - not changes made
+# by hand, also not to its [source]
+addc file:///nowhere/m28.git hh -p g
+(cd ../m28 && echo z > g && git commit -qam g3)
+git config -f .git-filesync source.nowhere/m28.note mine
+quiet git filesync pull hh
+check "pull: only its changes staged, not the hand-made ones (also of its [source])" \
+  "$(git config --blob :.git-filesync source.nowhere/m28.note) $(git diff --cached .git-filesync | grep -c '^+	blob')" " 1"
+git reset -q --hard
 
 # =============================================================================
 section "Upstream repositories untouched"

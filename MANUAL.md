@@ -104,8 +104,12 @@ committed like any other file, in git-config format:
 - Everything else may be edited by hand, but [`set`](#set),
   [`source`](#source), [`rm`](#rm), [`unlink`](#unlink) and [`mv`](#mv) know
   what a change means. When the last link is removed, the file is deleted.
-  A command that stages the file warns if it had changes not staged before
-  the command ran: they are staged too.
+- **HEAD, the index and the working tree** each have their
+  `.git-filesync`, and an entry there describes the file there: `status`
+  checks each against its own entry. A command stages only what it changes
+  in it – `pull` and `add` an entry whole, with its file and `[source]` –;
+  other changes, made by hand or with `-W`, stay unstaged. `pull -W f` and
+  then `git add f .git-filesync` is the same as `pull f`.
 
 Paths must lie inside the working tree: entries pointing outside it (`..`,
 absolute paths) or into a `.git` directory are errors and never written, so
@@ -288,9 +292,9 @@ Each file is looked at in three independent respects:
 
 | Respect | Compares | States |
 |---|---|---|
-| upstream | synced upstream version ↔ current upstream | up to date, `pending`, `older`, `changed`, `renamed`, `deleted`, `new` |
-| committed | synced upstream version ↔ committed file (`HEAD`) | `unmodified`, `adapted` |
-| working tree | committed file ↔ staged and working file (uncommitted changes) | clean, `modified`, `new file`, `missing` |
+| upstream | synced upstream version (of the working tree's entry) ↔ current upstream | up to date, `pending`, `older`, `changed`, `renamed`, `deleted`, `new` |
+| committed | committed file (`HEAD`) ↔ the synced version of `HEAD`'s entry | `unmodified`, `adapted` |
+| uncommitted | the index ↔ `HEAD`, the working tree ↔ the index: file and entry | `new file`, `updated` (another synced version), `modified`, `missing` |
 
 The output has sections like `git status`:
 
@@ -311,9 +315,14 @@ Missing files:
   (use "git filesync unlink <file>..." to remove the links)
 	missing:    src/old.c  (NOT ALLOWED: still linked)
 
-Uncommitted changes:
-  (use "git filesync diff <file>..." to see all local changes)
-  (use "git restore -SW <file>..." to discard uncommitted changes)
+Changes to be committed:
+  (use "git commit" to commit them)
+  (use "git filesync restore -S <file>..." to restore the index from HEAD)
+	updated:    src/baz.c  (1a2b3c4 -> 5d6e7f8)
+
+Changes not staged for commit:
+  (use "git add <file>..." to stage them)
+  (use "git filesync restore <file>..." to restore them from the index)
 	modified:   src/bar.c
 ```
 
@@ -333,14 +342,17 @@ with something to report:
 | Column | Meaning |
 |---|---|
 | 1 – upstream | `P` pending, `O` upstream older than last sync, `D` history diverged (or previous sync point unknown), `R` renamed upstream, `X` deleted upstream, `N` new link, `E` error |
-| 2 – committed | `M` adapted |
-| 3 – working tree | `M` modified, `D` missing (marked `(missing!)`), `?` not committed yet |
+| 2 – index (against `HEAD`: what a commit takes) | `A` new, `U` another synced version, `M` modified, `D` deleted |
+| 3 – working tree (against the index) | the same; `D` missing (marked `(missing!)`) |
+
+A committed adaptation is a note, not a column: `(adapted)`; one that
+isn't allowed: `(not adaptable!)`.
 
 ```
-P   src/a.c
-PM  src/b.c
- MM src/c.c
- M  include/x.h  (not adaptable!)
+P   src/a.c  (adapted)
+  M src/c.c
+ U  src/baz.c
+    include/x.h  (adapted, not adaptable!)
   D src/old.c  (missing!)
 ```
 
@@ -401,7 +413,7 @@ other files are still synced. In scripts and CI: `git filesync pull --all
 | `-b`, `--branch BRANCH` | sync to the head of BRANCH once (see [Another branch or tag, once](#another-branch-or-tag-once)) |
 | `--tag TAG` | sync to TAG once |
 | `--overwrite` | take the upstream version as it is, discarding adaptations and uncommitted changes ([kept](#discarded-content)), also if the file is up to date |
-| `-W`, `--worktree` | write to the working tree only: nothing staged, `.git-filesync` unchanged – see [Trying a newer version](#trying-a-newer-version) |
+| `-W`, `--worktree` | file and entry in the working tree only, nothing staged – see [Trying a newer version](#trying-a-newer-version) |
 | `--force` | [linked directory](#linked-directories): keep a file of this repository that `pull` would delete (adapted, deleted upstream) or replace (new upstream) |
 | `-n`, `--dry-run` | change nothing; report per file what would happen: the version, whether adaptations merge cleanly (or how many conflicts), a rename upstream, every refusal |
 | `-v`, `--verbose` | before each file, where it comes from and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` |
@@ -417,28 +429,27 @@ other files are still synced. In scripts and CI: `git filesync pull --all
 - **Pinned files:** `pull` ends with a hint if there are [newer
   tags](#newer-tags) on the source's branch.
 - **Pulling again before the commit** works, e.g. to another version: what
-  a pull staged counts as synced, not as a local change, and the proposed
-  message gets a section for each pull. Merged adaptations are local
+  a pull wrote counts as synced, not as a local change, and the proposed
+  message goes from what is committed. Merged adaptations are local
   changes, though: commit them first.
 
 #### Trying a newer version
 
-`pull -W` writes what `pull` would sync into the working tree only –
-nothing staged, `.git-filesync` unchanged –, e.g. to see whether your
-project still builds with it. It refuses what `pull` refuses and takes the
-same options.
+`pull -W` writes what `pull` would sync – file and entry – into the working
+tree only, nothing staged, e.g. to see whether your project still builds
+with it. It refuses what `pull` refuses and takes the same options; again
+with another version, it replaces the first try.
 
 ```sh
 git filesync pull -W src/foo.c             # try it
-git restore src/foo.c                      # go back
-git filesync pull --overwrite src/foo.c    # or take it
+git filesync restore src/foo.c             # go back
+git filesync pull src/foo.c                # or take it (stages it)
 ```
 
-Meanwhile `status` shows the file as pending, with uncommitted changes –
-for a file that isn't adaptable as not allowed, which it is until taken.
-Files new upstream in a [linked directory](#linked-directories) stay after
-`git restore`. For an adaptable file, `pull --overwrite` drops your
-adaptations; to keep them, `git restore` and `pull`.
+Meanwhile `status` shows `updated` under `Changes not staged for commit`
+(`-s`: `  U`). Adaptations merged by `pull -W` count as local changes:
+`pull` refuses to take them – `git add` the file and `.git-filesync`
+instead.
 
 #### Another branch or tag, once
 
@@ -472,6 +483,7 @@ after `--` goes to `git diff`).
 | Option | Effect |
 |---|---|
 | `--committed` | only the committed adaptations (synced → `HEAD`) |
+| `--cached`, `--staged` | the index instead of the working tree (against the synced version of the staged entry) |
 | `--upstream` | what `pull` would bring (synced → current upstream) |
 | `--commit REV`, `-b BRANCH`, `--tag TAG` | with `--upstream`: what `pull` with that option would bring |
 | `--for-upstream` | a patch for the upstream repository (upstream paths, for `git apply`); not with `--upstream` |
@@ -485,8 +497,7 @@ git filesync diff -- --stat
 ```
 
 With `-- --exit-code` or `-- --quiet`, exit code 1 means differences, like
-`git diff`. A change only staged, with the working file as in `HEAD`, shows
-`git diff --cached`. Whether adaptations would merge cleanly tells `pull --dry-run`.
+`git diff`. Whether adaptations would merge cleanly tells `pull --dry-run`.
 For a [linked directory](#linked-directories), `diff` shows its files only
 (`--upstream`: also those new and deleted upstream).
 
@@ -509,7 +520,7 @@ your difftool (`diff.tool`); `OPTS` go to `git difftool` (e.g. `-t meld`).
 
 | Option | Effect |
 |---|---|
-| `--committed`, `--upstream`, `--commit`, `-b`, `--tag` | as for `diff` |
+| `--committed`, `--cached`, `--upstream`, `--commit`, `-b`, `--tag` | as for `diff` |
 | `-y`, `--no-prompt` | don't ask before each file |
 | `--prompt` | ask even with `difftool.prompt = false` |
 
@@ -520,23 +531,30 @@ the tool are kept.
 
 ### `restore`
 
-`restore PATH…` – like `git restore`, but the source is the synced upstream
-version (the base recorded in `.git-filesync`): e.g. to discard the changes
-of a file that isn't adaptable, or to bring back a missing file. Unlike
-`pull --overwrite`, it brings in no newer upstream version; `.git-filesync`
-stays as it is. A new link has nothing to restore. For a [linked
+`restore PATH…` – like `git restore`, from the layer below: the working
+tree from the index, with `-S` the index from `HEAD`. The entry gets the
+synced version it has there (what it selects – source, path, tag – stays,
+as after [`set`](#set)), the file that synced upstream version. So it goes
+back after `pull -W`, discards the changes of a file that isn't adaptable,
+or brings back a missing file. Unlike `pull --overwrite`, it brings in no
+newer upstream version. An entry not in the layer below goes, with its
+files. A new link has nothing to restore. For a [linked
 directory](#linked-directories), `restore` takes its files (all, or those
-given); the repository's own files stay.
+given); files of the base below are added, others deleted, the
+repository's own files stay.
 
 | Option | Effect |
 |---|---|
-| `-S`, `--staged` | restore the index instead of the working tree |
-| `-W`, `--worktree` | restore the working tree – the default; with `-S`: both |
+| `-S`, `--staged` | restore the index (from `HEAD`) instead of the working tree (from the index) |
+| `-W`, `--worktree` | restore the working tree – the default; with `-S`: both, from `HEAD` |
 
-`restore -SW` discards committed adaptations: the synced version is back
-and staged, ready to commit. (`git restore FILE` discards only uncommitted
-changes, as usual.) Uncommitted content it overwrites is
-[kept](#discarded-content).
+The file is always the synced upstream version, also of an adaptable file:
+`restore` says so when adaptations go (`git restore FILE` brings them back
+from the index). So `restore -SW` discards committed adaptations, ready to
+commit. To go back only to the committed file, use `git restore -SW`.
+Uncommitted content it overwrites is [kept](#discarded-content). Changes
+of what an entry selects, by `set` or by hand, stay: undo them with `git
+diff .git-filesync` and by hand.
 
 ### `add`
 
@@ -563,6 +581,7 @@ directory](#linking-a-directory)).
 | `--overwrite` | replace an existing file that differs with the upstream version ([discarded content](#discarded-content) is kept) |
 | `--adaptable` | allow local adaptations; an existing FILE that differs is kept as it is |
 | `--force` | relink a file already linked: its entry is made anew, with the options given now |
+| `-W`, `--worktree` | file(s) and entry in the working tree only, nothing staged (`pull` or `git add` stages them, `restore` takes them back) |
 | `-n`, `--dry-run` | only show what would be linked, and on which version |
 
 The base is the version `pull` would sync to (or `--commit`). If FILE
@@ -665,7 +684,8 @@ repository in it. `-n` / `--dry-run` only shows what would be moved.
 
 `set PATH… OPTIONS` – change the link of linked files: source, tag,
 upstream path, adaptable, patterns. Only `.git-filesync` changes (staged);
-`status` then shows what is to sync, and `pull` syncs.
+`status` then shows what is to sync, and `pull` syncs. `set` says so
+(`pending until pull`) unless only `adaptable` changed.
 
 `set PATH…` without options shows the links as the `set` command that sets
 them, one line per entry – every aspect, also those not set (`--no-tag`),
@@ -735,8 +755,12 @@ git filesync set cfg/ --no-tag                   # follow the branch again
 
 `edit` – open `.git-filesync` in your editor, like `git config --edit`
 (`GIT_EDITOR`, `core.editor`, `VISUAL`, `EDITOR`); afterwards it is checked
-and staged. A file that can't be read any more is not staged – run `edit`
-again to fix it. Gaps that `status` would report (a missing `[source]`,
+and the sections that changed are staged – as for other commands, a synced
+entry the index hasn't yet only with its file (`pull` stages it). Only
+comments or layout changed: nothing is staged. A file that can't be read
+any more is not staged – run `edit` again to fix it; with a merge conflict
+in `.git-filesync`, which every other command refuses, `edit` is how to
+resolve it (then the whole file is staged). Gaps that `status` would report (a missing `[source]`,
 `url`, `branch` or `path`, only one of `commit` and `blob` (`tree`),
 overlapping entries, an unused source) are shown as warnings. `edit` keeps whatever you write: a changed
 `commit` or `blob` changes what counts as an adaptation.
