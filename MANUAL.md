@@ -1148,6 +1148,12 @@ PowerShell, or with `MSYS_NO_PATHCONV=1` in front in Git Bash. Don't set
 `MSYS_NO_PATHCONV` (or `MSYS=noglob`) for git itself: that breaks the
 alias.
 
+**TortoiseGit:** turn on *Staging Support* in the commit dialog (`git
+config tgit.commitstagingsupport true`, TortoiseGit 2.13 or later).
+Without it, TortoiseGit commits the working tree of the checked files,
+not what is staged – so a `pull -W` test can be committed. Check
+`.git-filesync` together with its files.
+
 ### Shipping git-filesync with your repository
 
 git-filesync can keep a copy of itself in your repository, so everyone has
