@@ -126,8 +126,10 @@ or remove the link with `unlink`.
 By default a linked file must stay an **exact copy** of its upstream
 version. Any change, committed, staged or not, is a violation: `status` marks it
 `NOT ALLOWED: not adaptable` (`-s`: `(not adaptable!)`, `--exit-code`: 1),
-the hooks report it, and `pull` refuses the file. Look at the change with
-`diff`, then:
+the hooks report it, and `pull` refuses the file – unless nothing would
+be lost: the file as in `HEAD` again after `git restore --staged`, its
+entry already newer, `pull` writes anew. Look at the change with `diff`,
+then:
 
 - go back to the synced version with [`restore -SW`](#restore) – or sync
   and discard in one step with `pull --overwrite`;
@@ -538,7 +540,7 @@ as after [`set`](#set)), the file that synced upstream version. So it goes
 back after `pull -W`, discards the changes of a file that isn't adaptable,
 or brings back a missing file. Unlike `pull --overwrite`, it brings in no
 newer upstream version. An entry not in the layer below goes, with its
-files. A new link has nothing to restore. For a [linked
+files; one not synced there is so again (e.g. a new link after `pull -W`). For a [linked
 directory](#linked-directories), `restore` takes its files (all, or those
 given); files of the base below are added, others deleted, the
 repository's own files stay.

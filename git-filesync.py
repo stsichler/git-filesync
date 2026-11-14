@@ -371,6 +371,8 @@ HOOKS = {
 # after edit, which changes only .git-filesync
 REGISTRY_STAGED = (f'{REGISTRY} staged (use "git filesync status" to see what changes, '
                    '"git filesync pull <file>..." to sync)')
+# edit, set, source set: changes of entries the index hasn't (see Registry.stage)
+WORKTREE_ONLY = f"{REGISTRY} changed in the working tree only"
 REGISTRY_HEADER = ("# git-filesync: files of this repository that are kept in sync with\n"
                    "# files in other repositories. Maintained by 'git filesync'; [file]\n"
                    "# commit/blob record the upstream version each file is based on.\n")
@@ -2540,7 +2542,8 @@ class Registry:
 
     def finish(self, stage=True):
         """Write the registry (removed when empty) with the line endings of a
-        checkout, and stage what this run changed in it (see stage)."""
+        checkout, and stage what this run changed in it (see stage).
+        Returns whether something was staged."""
         self.flush()
         if self.path.exists():
             if not self.sources and not self.files and not self.dirs:
@@ -2548,9 +2551,9 @@ class Registry:
             else:
                 self.repo.fix_eol(self.path)
         if stage:
-            self.stage()
-        else:
-            self.done, self.whole = [], set()
+            return self.stage()
+        self.done, self.whole = [], set()
+        return False
 
     def stage(self):
         """Stage what this run changed (R2): the same changes in the staged
@@ -2569,7 +2572,7 @@ class Registry:
         done, self.done = self.done, []
         whole, self.whole = {r for r in self.whole if self.entry(r)}, set()
         if not done and not whole:
-            return
+            return False
         repo = self.repo
         have = registry_model(repo.registry("index"))
         before = {s: set(have[s]) for s in have}
@@ -2627,6 +2630,7 @@ class Registry:
         if need or gone:
             apply(need, gone, {})
         write_staged(repo, batches)
+        return bool(batches)
 
 
 class Link:
@@ -3159,7 +3163,7 @@ def local_state(repo, st, link, matchers, syncs):
         st.local = "missing"
     elif st.unstaged_code:
         st.local = "modified" if adapted(work, mw, link.target.read_bytes) else "clean"
-        if work != index and (mw is None or st.local == "modified"):
+        if work != index and st.local == "modified":
             own.append("worktree")
     else:
         st.local = "modified" if st.index_adapted else "clean"
@@ -3320,6 +3324,7 @@ class DirState(FileState):
     no_base: bool = False     # the base tree isn't available: synced like a new link
     new_tree: Optional[str] = None   # upstream tree a pull would sync to
     tip: Optional[str] = None        # ... and the upstream revision it is at
+    layer_files: tuple = (None, None)    # the files of the bases in HEAD and the index
 
     # members by what a pull does with them
     adds = property(lambda self: [m for m in self.members if m.unsynced and m.new_blob])
@@ -3381,7 +3386,7 @@ def fill_members(repo, st, base, upstream):
     st.members = dir_members(repo, dlink, base, upstream)
     lower = st.entries = (layer_entry(repo, dlink, "head"), layer_entry(repo, dlink, "index"))
     st.head_base = head_base(lower[0], dlink)
-    files = [layer_files(st.src, dlink, e, base) for e in lower]
+    files = st.layer_files = [layer_files(st.src, dlink, e, base) for e in lower]
     syncs = [None if e is None else sync_keys(e.v) for e in lower] + [sync_keys(dlink.v)]
     for m in st.members:
         m.src, m.has_old = st.src, st.has_old
@@ -3647,6 +3652,11 @@ def link_text(st):
             f"({ref_text(st.link.ref, st.link.line, names)}{newest}{files}{adaptable}){via}")
 
 
+def status_hints(repo):
+    """Show hints how to go on (advice.statusHints, as git)?"""
+    return out(repo.git(["config", "--type=bool", "advice.statusHints"], check=False)) != "false"
+
+
 def versions(st, lower, upper):
     """'1a2b3c4 -> 5d6e7f8' - the synced commits of an entry in two layers
     (lower None: not there), as shown for a change between them."""
@@ -3654,9 +3664,9 @@ def versions(st, lower, upper):
         if e is None or e.unsynced:
             return "new" if e is not None else None
         try:
-            return st.src.short(e.commit) if e.commit else e.blob[:8]
+            return st.src.short(e.commit) if e.commit else short_of(e)
         except FsError:
-            return e.commit[:7]
+            return short_of(e)
     a, b = label(lower), label(upper)
     return f"{a} -> {b}" if a and b and a != b else b
 
@@ -3664,7 +3674,7 @@ def versions(st, lower, upper):
 def print_long(repo, sts, verbose):
     """Sections like `git status`; a [dir] entry in one line, with the
     number of its files concerned in the note."""
-    hints = out(repo.git(["config", "--type=bool", "advice.statusHints"], check=False)) != "false"
+    hints = status_hints(repo)
 
     def section(title, hint_lines, rows, style):
         if not rows:
@@ -3965,7 +3975,7 @@ def pull_one(repo, reg, st, args):
     # upstream's version as it is, not merged
     discard = args.overwrite and (local_mod or st.index_adapted)
     dropped = args.overwrite and st.committed == "adapted"   # committed adaptations go
-    if st.violation and not args.overwrite:
+    if st.violation and not args.overwrite and not stale(st):
         rel = path_arg(repo, st.rel)
         ways = f", or sync anyway with 'git filesync pull --overwrite {rel}'" + (
             f"; or allow them with 'git filesync set --adaptable {rel}'"
@@ -3974,8 +3984,8 @@ def pull_one(repo, reg, st, args):
                       f"'git filesync diff {rel}'; discard them with "
                       f"'git filesync restore -SW {rel}'{ways}")
     # the index too has what pull gives (with -W: only the working tree counts)
-    if new_blob == st.old_blob and path == link.path and new == st.old and \
-            not (discard or dropped) and (args.worktree or staged_as_is(repo, link)):
+    if new_blob == st.old_blob and path == link.path and new == st.old and not stale(st) \
+            and not (discard or dropped) and (args.worktree or staged_as_is(repo, link)):
         print(f"{st.rel}: {paint('up to date', 'green')}"
               + (" (adaptations kept)" if st.committed == "adapted" else ""))
         return None
@@ -3991,7 +4001,7 @@ def pull_one(repo, reg, st, args):
         warn(f"{st.rel}: {w}")
 
     content, merged, conflicts = sync_content(repo, st, new, new_blob, path,
-                                              local_mod and not discard)
+                                              local_mod and st.adaptable and not discard)
 
     if args.dry_run:
         lost = args.overwrite and local_changes(st) and loses(repo, st, content, args)
@@ -4026,6 +4036,16 @@ def pull_one(repo, reg, st, args):
     return build_message(message_view(st), src, new, new_blob,
                          st.head_base[2] if st.head_base else old_path, path, merged, conflicts,
                          dropped), conflicts, content
+
+
+def stale(st):
+    """A file that isn't adaptable differs from the base of its entry in the
+    index or the working tree, but neither as a committed adaptation nor
+    as a modification of its own (R3) - e.g. the file as in HEAD again
+    (git restore --staged) after a pull was staged: pull writes it anew,
+    nothing is lost."""
+    return not st.adaptable and st.committed != "adapted" and st.where is None and \
+        (st.index_adapted or st.local == "modified")
 
 
 def local_changes(st):
@@ -4280,14 +4300,15 @@ def pull_dir(repo, reg, st, args):
                       f"({few(repo, missing)}) - bring them back with "
                       "'git filesync restore <file>...', or remove the link with "
                       f"'git filesync unlink {arg}'")
-    if st.violation and not args.overwrite:
+    if st.violation and not args.overwrite and not stale(st):
         ways = f", or sync anyway with 'git filesync pull --overwrite {arg}'" + (
             f"; or allow them with 'git filesync set --adaptable {arg}'"
             if st.worktree == "clean" else "; only the uncommitted ones: 'git restore -SW <file>...'")
         raise FsError(f"{name}: {violation_text(st)} - inspect with "
                       f"'git filesync diff {arg}'; discard them with "
                       f"'git filesync restore -SW {arg}'{ways}")
-    back = [m for m in st.base_members if overwrites(m, args) and m.new_blob == m.old_blob]
+    back = [m for m in st.base_members if (overwrites(m, args) or stale(m))
+            and m.new_blob == m.old_blob]
     dels = [m for m in st.dels if m.local != "missing"]
     # (other patterns, also if they only drop files gone here already: synced-* go)
     as_staged = args.worktree or staged_as_is(repo, dlink)
@@ -4298,7 +4319,10 @@ def pull_dir(repo, reg, st, args):
         return None
     # like `git pull`: uncommitted changes are never merged into a sync -
     # with --overwrite, they are discarded (and kept, see save_discarded)
-    dirty = [m for m in st.mods + dels + back if local_changes(m)]
+    # (what pull -W wrote before: the files staged as they are, see below)
+    restage = [] if as_staged else [m for m in st.base_members if m.local != "missing"
+                                    and m not in st.mods + back + dels]
+    dirty = [m for m in st.mods + dels + back + restage if local_changes(m)]
     if dirty and not args.overwrite:
         raise FsError(f"your local changes to {few(repo, dirty)} would be overwritten by "
                       "pull - commit or stash them first ('git stash'; 'git restore -SW "
@@ -4374,9 +4398,10 @@ def pull_dir(repo, reg, st, args):
     if not as_staged and not args.dry_run:
         # the index gets what the working tree has (pull -W before): the
         # files staged as they are, those only the staged entry has go
-        for m in st.base_members:
-            if m.local != "missing" and m.rel not in contents and m not in st.mods + back + dels:
-                contents[m.rel] = None
+        for m in restage:         # one of its own: only with --overwrite (see above)
+            if m.rel not in contents:
+                contents[m.rel] = sync_content(repo, m, st.new, m.new_blob, m.new_path, False)[0] \
+                    if local_changes(m) else None
         for rel in staged_only(repo, src, dlink, {m.rel for m in st.members}):
             if rel not in contents and rel not in deletes:
                 deletes.append(rel)
@@ -4384,7 +4409,7 @@ def pull_dir(repo, reg, st, args):
         mod = m.local == "modified"
         discard = args.overwrite and mod
         contents[m.rel], merged, n = sync_content(repo, m, st.new, m.new_blob, m.new_path,
-                                                  mod and not discard)
+                                                  mod and st.adaptable and not discard)
         dropped = args.overwrite and m.committed == "adapted"     # in the commit
         notes[m.rel] = (f"{n} merge conflict(s)" if n else "adaptations merged") if merged \
             else ("restored, local adaptations discarded" if dropped else "restored") \
@@ -4397,8 +4422,6 @@ def pull_dir(repo, reg, st, args):
                       + f"{refused[-1][0].rel}: {refused[-1][1]} - use 'git filesync pull "
                       f"--overwrite {arg}' to take what upstream has, or --force to keep "
                       "the files of this repository")
-    if st.head_base:
-        head_notes(st, src, notes, kinds)
     counts = [(sum(1 for k in kinds.values() if k == w), w)
               for w in ("new", "deleted", "renamed", "changed")]
     summary = ", ".join(f"{n} {w}" for n, w in counts if n) or "no file changed"
@@ -4432,28 +4455,28 @@ def pull_dir(repo, reg, st, args):
         status = synced_text(args)
     print(f"{name}: {status} ({summary}"
           + (", adaptations merged" if merged and not conflicted else "") + ")")
-    return build_dir_message(st, src, notes), conflicted, contents, deletes
+    msg = None
+    if not args.worktree:         # (no proposed message with -W)
+        msg = build_dir_message(st, src, head_notes(st, notes) if st.head_base else notes)
+    return msg, conflicted, contents, deletes
 
 
-def head_notes(st, src, notes, kinds):
-    """The files of a [dir] entry's pull named as from what is committed
-    (R3), its base in HEAD (st.head_base) - not from the working tree's
-    entry, which pull writes from: new, changed or deleted between that
-    base and the new one. The notes of what pull does to a file beyond
-    that (merged, kept, ...) stay."""
-    head = layer_files(src, st.link, st.entries[0], {}) or {}
+def head_notes(st, notes):
+    """The files of a [dir] entry's pull for its proposed message, named as
+    from what is committed (R3), its base in HEAD (st.head_base) - not from
+    the working tree's entry, which pull writes from: new, changed or
+    deleted between that base and the new one. The notes of what pull does
+    to a file beyond that (merged, kept, ...) stay."""
+    head = st.layer_files[0] or {}
     after = {m.link.below: m.new_blob for m in st.members if m.new_blob}
-    plain = {"new upstream": "new", "changed upstream": "changed", "deleted upstream": "deleted"}
-    for rel in [r for r, n in notes.items() if n in plain]:
-        del notes[rel]
-        kinds.pop(rel, None)
+    plain = ("new upstream", "changed upstream", "deleted upstream")
+    notes = {r: n for r, n in notes.items() if n not in plain}
     for below in sorted(set(head) | set(after)):
         rel = join_rel(st.link.rel, below)
-        if rel in notes or head.get(below) == after.get(below):
-            continue
-        note = "new upstream" if below not in head else \
-            "deleted upstream" if below not in after else "changed upstream"
-        notes[rel], kinds[rel] = note, plain[note]
+        if rel not in notes and head.get(below) != after.get(below):
+            notes[rel] = "new upstream" if below not in head else \
+                "deleted upstream" if below not in after else "changed upstream"
+    return notes
 
 
 def build_dir_message(st, src, notes):
@@ -5362,7 +5385,10 @@ def cmd_restore(ctx, repo, args):
     for entry in select_links(repo, reg, args.files):
         try:
             lower = layer_entry(repo, entry, below)
-            if lower is not None and lower.unsynced or lower is None and entry.unsynced:
+            # nothing synced in the layers restored nor below: nothing to restore
+            here = [entry if side == "worktree" else layer_entry(repo, entry, "index")
+                    for side in sides]
+            if all(e is None or e.unsynced for e in here + [lower]):
                 raise FsError("not synced yet, nothing to restore - sync it with "
                               f"'git filesync pull {path_arg(repo, entry.rel)}'")
             if lower is None and entry.only is not None:
@@ -5433,7 +5459,8 @@ def cmd_restore(ctx, repo, args):
                     (delete if side == "worktree" else unstage).append(r)
                 else:
                     write.append((r, oid, side))
-        adapted = sorted(r for r in base if "worktree" in sides and not args.staged and
+        written = {r for r, _, side in write if side == "worktree"}
+        adapted = sorted(r for r in base if r in written and not args.staged and
                          r in index and index[r][1] != ids[r])
         if adapted and entry.adaptable:
             hints.append(f"{entry.shown_rel}: adaptations removed"
@@ -5468,7 +5495,8 @@ def cmd_restore(ctx, repo, args):
             at = src.short(lower.commit) if src and lower.commit else short_of(lower)
             name = entry.shown_rel if entry.only is None else \
                 ", ".join(shown(repo, o) for o in entry.only)
-            said.append(f"{name}: {paint(what, 'green')} ({lower.name}@{at})")
+            said.append(f"{name}: {paint(what, 'green')} "
+                        + (f"({lower.name}@{at})" if at else "(not synced yet)"))
         else:
             said.append(f"{entry.shown_rel}: nothing to restore")
     sw = [r for r, _, side in write if side == "worktree"] + delete
@@ -5501,7 +5529,7 @@ def cmd_restore(ctx, repo, args):
 
 
 def short_of(e):
-    """The synced commit of an entry, abbreviated."""
+    """The synced commit of an entry, abbreviated ('' if not synced)."""
     return e.commit[:7] if e.commit else e.blob[:8]
 
 
@@ -5611,21 +5639,22 @@ def cmd_rm(ctx, repo, args):
     for link in links:
         link.target               # refused (for all) if something is in the way
     # of a [dir] entry staged with another base: the files only that has, too
-    extra = [r for e in entries if e.is_dir and not e.unsynced for r in staged_only(
-        repo, ctx.source(e.url, e.ref, e.name, e.line), e, {lk.rel for lk in links})]
-    repo.prefetch([lk.rel for lk in links])
+    extra = {e.rel: staged_only(repo, ctx.source(e.url, e.ref, e.name, e.line), e,
+                                {lk.rel for lk in links})
+             for e in entries if e.is_dir and not e.unsynced}
+    paths = [lk.rel for lk in links] + [r for rs in extra.values() for r in rs]
+    repo.prefetch(paths)
     if not args.force:
-        dirty = [lk.rel for lk in links if lk.target.exists() and
-                 (repo.head_blob(lk.rel) is None or repo.is_modified(lk.rel))]
+        dirty = [r for r in paths if (repo.top / r).exists() and
+                 (repo.head_blob(r) is None or repo.is_modified(r))]
         if dirty:
             raise FsError("".join(f"{r}: has uncommitted changes\n" for r in dirty[:-1])
                           + f"{dirty[-1]}: has uncommitted changes - use -f to remove "
                           f"{'it' if len(dirty) == 1 else 'them'} anyway")
     if args.dry_run:
         for link in entries:
-            print(f"would remove {link.shown_rel}" + dir_note(link, links))
+            print(f"would remove {link.shown_rel}" + dir_note(link, links, extra))
         return EXIT_OK
-    paths = [lk.rel for lk in links] + extra
     save_discarded(repo, paths, paths)
     for part in chunks(paths):
         repo.git(["rm", "-q", "-f", "--ignore-unmatch", "--"] + [lit(r) for r in part])
@@ -5634,7 +5663,7 @@ def cmd_rm(ctx, repo, args):
             link.target.unlink()
     for link in entries:
         reg.remove_file(link.rel)
-        note = dir_note(link, links)
+        note = dir_note(link, links, extra)
         if link.is_dir and link.target.is_dir() and any(link.target.iterdir()):
             note = note[:-1] + "; files of this repository stay)"     # the own ones
         print(f"{paint('removed', 'green')} {link.shown_rel}{note}")
@@ -5642,11 +5671,13 @@ def cmd_rm(ctx, repo, args):
     return EXIT_OK
 
 
-def dir_note(link, files):
-    """' (3 files)' - the files of a [dir] entry among files, for rm."""
+def dir_note(link, files, extra):
+    """' (3 files)' - the files of a [dir] entry among files, and those only
+    its staged entry has (extra: {rel: [paths]}), for rm."""
     if not link.is_dir:
         return ""
-    n = sum(1 for f in files if isinstance(f, Member) and f.dlink.rel == link.rel)
+    n = sum(1 for f in files if isinstance(f, Member) and f.dlink.rel == link.rel) + \
+        len(extra.get(link.rel, []))
     return f" ({plural(n, 'file')})"
 
 
@@ -5874,9 +5905,8 @@ def cmd_set(ctx, repo, args):
     if not changed:
         print("nothing to change")
     elif not args.dry_run:
-        reg.finish()
         # only adaptable changed: nothing for pull to do (known offline)
-        print(pending_note(repo, changed != "adaptable"))
+        print(pending_note(repo, changed != "adaptable") if reg.finish() else WORKTREE_ONLY)
     return EXIT_OK
 
 
@@ -5885,9 +5915,8 @@ def pending_note(repo, pending):
     something to do, so, with how (advice.statusHints)."""
     if not pending:
         return f"{REGISTRY} staged"
-    hints = out(repo.git(["config", "--type=bool", "advice.statusHints"], check=False)) != "false"
     return f"{REGISTRY} staged - pending until pull" + \
-        (' (use "git filesync pull <file>..." to sync)' if hints else "")
+        (' (use "git filesync pull <file>..." to sync)' if status_hints(repo) else "")
 
 
 def set_path(ctx, repo, lk, path, would):
@@ -6082,8 +6111,7 @@ def cmd_edit(ctx, repo, args):
         print(f"{REGISTRY}: only comments or layout changed - nothing staged")
         return EXIT_OK
     reg.done.append((pending, drop, {}))
-    reg.finish()
-    print(REGISTRY_STAGED)
+    print(REGISTRY_STAGED if reg.finish() else WORKTREE_ONLY)
     return EXIT_OK
 
 
@@ -6156,8 +6184,8 @@ def cmd_source(ctx, repo, args):
         print(f"{would}source {args.name}: {k} {s.get(k) or '(none)'} -> {v}")
         reg.set_source(args.name, k, v)
     if not args.dry_run:
-        reg.finish()
-        print(pending_note(repo, bool(source_files(reg, args.name))))
+        staged = reg.finish()
+        print(pending_note(repo, bool(source_files(reg, args.name))) if staged else WORKTREE_ONLY)
     return EXIT_OK
 
 

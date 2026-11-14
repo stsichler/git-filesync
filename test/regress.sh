@@ -3092,6 +3092,7 @@ quiet git filesync set --adaptable k && echo adapted > k && git commit -qam "ada
 check "restore of an adapted file: the adaptations go, said" \
   "$(git filesync restore k 2>&1 | tail -1) $(cat k) $(stn k)" \
   "k: adaptations removed (still staged: 'git restore <file>...' brings them back) $(git -C ../m28 show HEAD:f)   M (adapted)"
+check "... again: nothing to restore, no note" "$(git filesync restore k 2>&1)" "k: nothing to restore"
 git restore k
 # an adaptation staged: diff --cached shows it against the base of the staged entry
 echo staged >> k && git add k
@@ -3118,6 +3119,46 @@ quiet git filesync pull d
 check "pull [dir] after pull -W: the files named from what is committed" \
   "$(grep -E '^- d/' .git/FILESYNC_MSG | oneline)" "- d/four (new upstream) - d/one (changed upstream) "
 git reset -q --hard
+# a [dir] after pull -W: a file changed by hand is refused, not staged along
+quiet git filesync set --adaptable d && git commit -qm "d adaptable"
+(cd ../m28 && echo 1g > d/one && git commit -qam 1g)
+quiet git filesync pull -W d
+echo hand >> d/three
+check "pull [dir] after pull -W: a file changed by hand refused" \
+  "$(rc git filesync pull d) $(git diff --cached --name-only | oneline)" "2 "
+git reset -q --hard && rm -f d/four
+# rm: the files only the staged entry has count too; the summary says what
+# the run did (with -W: no proposed message)
+(cd ../m28 && echo 5 > d/five && git add d/five && git commit -qm five)
+quiet git filesync pull d
+check "pull -W --commit back: the summary says what it did" \
+  "$(git filesync pull -W --commit "$(git -C ../m28 rev-parse HEAD~)" d 2>&1)" \
+  "d/: updated in the working tree only (1 deleted)"
+check "rm [dir]: the file only the staged entry has counts too" \
+  "$(rc git filesync rm d) $(git filesync rm -n -f d)" "2 would remove d/ (4 files)"
+git reset -q --hard
+# git restore --staged after a pull: the index as in HEAD, its entry newer -
+# no modification of its own (R3): pull writes it anew
+(cd ../m28 && echo g4 > g && git commit -qam g4)
+quiet git filesync pull hh && git restore --staged hh
+check "git restore --staged after a pull: not adaptable, but not refused" \
+  "$(git filesync status -s hh) | $(quiet git filesync pull hh; git status --porcelain hh .git-filesync | oneline)" \
+  " UM hh  (not adaptable!) | M  .git-filesync M  hh "
+git reset -q --hard
+# restore after pull -W of a new link (staged, not synced): back
+git config -f .git-filesync file.nl.source nowhere/m28 && git config -f .git-filesync file.nl.path f
+git add .git-filesync
+quiet git filesync pull -W nl
+check "restore after pull -W of a staged new link: back" \
+  "$(git filesync restore nl) $(git status --porcelain | oneline)$(ls nl 2>/dev/null)" \
+  "nl: restored (not synced yet) M  .git-filesync "
+git reset -q --hard
+# edit of an entry only in the working tree: nothing staged, said
+quiet git filesync add -W file:///nowhere/m28.git q -p f
+check "edit of an entry only in the working tree: said, nothing staged" \
+  "$(GIT_EDITOR='f() { git config -f "$1" file.q.adaptable true; }; f' git filesync edit 2>&1 | tail -1) $(git diff --cached --name-only | oneline)" \
+  ".git-filesync changed in the working tree only "
+git reset -q --hard && rm -f q
 
 # =============================================================================
 section "Upstream repositories untouched"
