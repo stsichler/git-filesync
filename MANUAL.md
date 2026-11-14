@@ -128,7 +128,8 @@ version. Any change, committed, staged or not, is a violation: `status` marks it
 `NOT ALLOWED: not adaptable` (`-s`: `(not adaptable!)`, `--exit-code`: 1),
 the hooks report it, and `pull` refuses the file – unless nothing would
 be lost: the file as in `HEAD` again after `git restore --staged`, its
-entry already newer, `pull` writes anew. Look at the change with `diff`,
+entry already newer, or staged with `git add` after `pull -W` – `pull`
+writes it anew. Look at the change with `diff`,
 then:
 
 - go back to the synced version with [`restore -SW`](#restore) – or sync
@@ -762,7 +763,9 @@ entry the index hasn't yet only with its file (`pull` stages it). Only
 comments or layout changed: nothing is staged. A file that can't be read
 any more is not staged – run `edit` again to fix it; with a merge conflict
 in `.git-filesync`, which every other command refuses, `edit` is how to
-resolve it (then the whole file is staged). Gaps that `status` would report (a missing `[source]`,
+resolve it (then the whole file is staged; deleted or emptied there, its
+removal). Deleted on one side of the merge: `git rm .git-filesync`, or
+`git checkout --theirs .git-filesync` (or `--ours`), then `edit`. Gaps that `status` would report (a missing `[source]`,
 `url`, `branch` or `path`, only one of `commit` and `blob` (`tree`),
 overlapping entries, an unused source) are shown as warnings. `edit` keeps whatever you write: a changed
 `commit` or `blob` changes what counts as an adaptation.

@@ -3159,6 +3159,80 @@ check "edit of an entry only in the working tree: said, nothing staged" \
   "$(GIT_EDITOR='f() { git config -f "$1" file.q.adaptable true; }; f' git filesync edit 2>&1 | tail -1) $(git diff --cached --name-only | oneline)" \
   ".git-filesync changed in the working tree only "
 git reset -q --hard && rm -f q
+# restore -S of a [dir] after set --include: the base keeps the patterns it
+# was synced with
+(cd ../m28 && mkdir e && echo x > e/x.c && echo y > e/y.h && git add e && git commit -qm e)
+addc file:///nowhere/m28.git e --include '*.c'
+quiet git filesync set --include '*.h' e
+check "restore -S [dir] after set --include: synced with the old patterns" \
+  "$(quiet git filesync restore -S e; git config --blob :.git-filesync dir.e.synced-include) $(git ls-files e | oneline)" \
+  "'*.c' e/x.c "
+check "... restore: only the files of that base" "$(quiet git filesync restore e; ls e | oneline)" "x.c "
+git reset -q --hard
+# pull -W, then git add of the file only: the index has the working tree
+# entry's base - nothing lost, pull stages it
+(cd ../m28 && echo g5 > g && git commit -qam g5)
+quiet git filesync pull -W hh && git add hh
+check "pull -W + git add of the file: pull stages it" \
+  "$(rc git filesync pull hh) $(git status --porcelain hh .git-filesync | oneline)" "0 M  .git-filesync M  hh "
+git reset -q --hard
+# pull --all --overwrite: adaptations only in the index go too
+addc file:///nowhere/m28.git ka -p f --adaptable
+echo staged >> ka && git add ka && git show HEAD:ka > ka
+check "pull --all --overwrite: staged adaptations discarded" \
+  "$(quiet git filesync pull --all --overwrite; git show :ka)" "$(git show HEAD:ka)"
+git reset -q --hard
+# restore -S of an entry new in the index and one only in HEAD and the
+# working tree: their [source] stays
+git init -q ../m28b && (cd ../m28b && echo p > p && git add p && git commit -qm p)
+git filesync source map file:///nowhere/m28b.git "$T/m28b" >/dev/null
+addc file:///nowhere/m28b.git p
+quiet git filesync unlink p && quiet git filesync add -W file:///nowhere/m28b.git p
+quiet git filesync add file:///nowhere/m28b.git p2 -p p
+check "restore -S of entries of one [source]: it stays" \
+  "$(quiet git filesync restore -S p p2; git config --blob :.git-filesync file.p.source) $(git config --blob :.git-filesync source.nowhere/m28b.url)" \
+  "nowhere/m28b file:///nowhere/m28b.git"
+git reset -q --hard && rm -f p2
+# set: the index has the file in this repository's form (here LF, upstream CRLF)
+(cd ../m28 && printf 'a\r\nb\r\n' > crlf.txt && git add crlf.txt && git commit -qm crlf)
+echo 'cr text' > .gitattributes && git add .gitattributes && git commit -qm attrs
+quiet git filesync add -W file:///nowhere/m28.git cr -p crlf.txt && git add cr
+check "set: the file staged in this repository's form - the entry staged" \
+  "$(git filesync set --adaptable cr 2>&1 | tail -1) $(git config --blob :.git-filesync file.cr.adaptable)" \
+  ".git-filesync staged true"
+git reset -q --hard && rm -f cr
+# source set --url after pull -W: each layer's entry keeps its own base,
+# with the commit it has in the other repository
+git init -q ../m7 && (cd ../m7 && echo 1 > w && git add w && git commit -qm one)
+git init -q ../m7m && (cd ../m7m && echo 1 > w && git add w && git commit -qm "mirror one" \
+  && echo 2 > w && git commit -qam "mirror two")
+git filesync source map file:///nowhere/m7.git "$T/m7" >/dev/null
+git filesync source map file:///nowhere/m7m.git "$T/m7m" >/dev/null
+addc file:///nowhere/m7.git w
+(cd ../m7 && echo 2 > w && git commit -qam two)
+quiet git filesync pull -W w
+quiet git filesync source set nowhere/m7 --url file:///nowhere/m7m.git
+check "source set --url after pull -W: each layer's base translated" \
+  "$(git config --blob :.git-filesync file.w.commit) $(git config -f .git-filesync file.w.commit)" \
+  "$(git -C ../m7m rev-parse HEAD~) $(git -C ../m7m rev-parse HEAD)"
+git reset -q --hard
+# a merge conflict in the registry, deleted on one side
+blob=$(git hash-object -w .git-filesync)
+git update-index --force-remove .git-filesync && rm .git-filesync
+printf '100644 %s 1\t.git-filesync\n100644 %s 2\t.git-filesync\n' "$blob" "$blob" | git update-index --index-info
+check "conflict, deleted on one side: how to resolve it" "$(git filesync edit 2>&1)" \
+  "error: .git-filesync has a merge conflict, deleted on one side - resolve it with 'git rm .git-filesync', or keep it with 'git checkout --theirs .git-filesync' (or --ours) and 'git filesync edit'"
+git checkout -q --ours .git-filesync
+check "... deleted in the editor: removed and staged" \
+  "$(GIT_EDITOR=rm git filesync edit 2>&1) $(git ls-files -s .git-filesync | wc -l | tr -d ' ')" \
+  ".git-filesync: conflict resolved - removed and staged 0"
+git reset -q --hard
+# before the first commit: what is staged is all of the index
+cd "$T" && git init -q s28n && cd s28n
+git filesync source map file:///nowhere/m28.git "$T/m28" >/dev/null
+quiet git filesync add file:///nowhere/m28.git f
+check "no commit yet: a staged file isn't also unstaged" \
+  "$(git filesync status -s) $(git filesync status | grep -c 'new file:')" " A  f 1"
 
 # =============================================================================
 section "Upstream repositories untouched"

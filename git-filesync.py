@@ -1579,6 +1579,7 @@ class Repo:
         self._staged = None       # paths staged differently from HEAD (staged)
         self.layers = {}          # see registry(): {layer: its Registry}
         self.rows = None          # see registry_rows()
+        self.ctx = None           # the Context of the run (see staged_as_base)
 
     def git(self, args, **kw):
         return git(args, cwd=self.top, **kw)
@@ -1830,9 +1831,12 @@ class Repo:
         return oids
 
     def staged(self):
-        """staged_changes(), asked once per run (before anything is staged)."""
+        """staged_changes(), asked once per run (before anything is staged);
+        without a commit all of the index."""
         if self._staged is None:
-            self._staged = self.staged_changes() or {}
+            self._staged = self.staged_changes()
+            if self._staged is None:
+                self._staged = {r: e[1] for r, e in self.index_entries([]).items()}
         return self._staged
 
     def staged_changes(self):
@@ -2241,9 +2245,18 @@ def registry_rows(repo):
         repo.rows = [r for r in p.stdout.decode("utf-8", "replace").split("\0") if r]
     rows = repo.rows
     if any(r.split()[2] != "0" for r in rows):
-        raise FsError(f"{REGISTRY} has a merge conflict - resolve it with 'git filesync edit' "
-                      f"(or by hand, then 'git add {REGISTRY}')")
+        raise FsError(conflict_text(repo))
     return rows
+
+
+def conflict_text(repo):
+    """The error for a merge conflict in .git-filesync: how to resolve it."""
+    if not registry_path(repo).exists():      # deleted on one side
+        return (f"{REGISTRY} has a merge conflict, deleted on one side - resolve it with "
+                f"'git rm {REGISTRY}', or keep it with 'git checkout --theirs {REGISTRY}' "
+                "(or --ours) and 'git filesync edit'")
+    return (f"{REGISTRY} has a merge conflict - resolve it with 'git filesync edit' "
+            f"(or by hand, then 'git add {REGISTRY}')")
 
 
 def write_registry(path, original, pending, drop, renames, expected):
@@ -2278,16 +2291,26 @@ def same_registry(a, b):
 
 def staged_as_base(repo, reg, rel):
     """Has the index the file of the synced [file] entry rel as its base -
-    the very blob, or the file HEAD has for an entry with the same base
-    under another name (moved with git mv)? Then staging the entry keeps
-    the index consistent. A [dir] entry: no (its base isn't looked at)."""
+    in this repository's form (see matches_base), or the file HEAD has for
+    an entry with the same base under another name (moved with git mv)?
+    Then staging the entry keeps the index consistent. A [dir] entry: no
+    (its base isn't looked at)."""
     link = reg.files.get(rel)
     oid = repo.index_entries([rel]).get(rel, (None, None))[1]
     if not link or not oid:
         return False
-    return oid == link.get("blob") or any(
-        (v.get("commit"), v.get("blob")) == (link.get("commit"), link.get("blob"))
-        and repo.head_blob(r) == oid for r, v in repo.registry("head").files.items())
+    if oid == link.get("blob") or any(
+            (v.get("commit"), v.get("blob")) == (link.get("commit"), link.get("blob"))
+            and repo.head_blob(r) == oid for r, v in repo.registry("head").files.items()):
+        return True
+    e = reg.entry(rel)
+    if repo.ctx is None or not e.blob:
+        return False
+    try:
+        src = repo.ctx.source(e.url, e.ref, e.name, e.line)
+        return matches_base(repo, src, rel, e.blob, e.path, oid, lambda: repo.read_blob(oid))
+    except FsError:
+        return False
 
 
 def registry_model(reg):
@@ -2379,6 +2402,9 @@ class Registry:
         self._renames = {}        # (section, old name) -> new name, see _rename
         self.done = []            # what flush wrote, for stage(): [(pending, drop, renames)]
         self.whole = set()        # entries pulled or added: staged whole (see stage)
+        # (section, name) -> {key: value}: sync keys the index's entry gets
+        # instead of those changed here (see keep_base)
+        self.staged_own = {}
         if layer:
             rows = registry_rows(repo) if layer == "index" else None
             if rows == []:
@@ -2552,7 +2578,7 @@ class Registry:
                 self.repo.fix_eol(self.path)
         if stage:
             return self.stage()
-        self.done, self.whole = [], set()
+        self.done, self.whole, self.staged_own = [], set(), {}
         return False
 
     def stage(self):
@@ -2571,6 +2597,7 @@ class Registry:
         file, and removed when nothing of ours is left in it."""
         done, self.done = self.done, []
         whole, self.whole = {r for r in self.whole if self.entry(r)}, set()
+        own, self.staged_own = self.staged_own, {}
         if not done and not whole:
             return False
         repo = self.repo
@@ -2590,6 +2617,7 @@ class Registry:
                     if want.get(k) != now.get(k)}
 
         mine = {(self.kind(r), r) for r in whole}
+        without = set()           # synced entries whose file the index hasn't
         for pending, drop, renames in done:
             p2, d2, r2 = {}, set(), {}
             for (s, old), new in renames.items():
@@ -2602,16 +2630,23 @@ class Registry:
                     else:
                         d2.add((s, n))
             for (s, n, k), v in pending.items():
-                if (s, n) in mine or v is None and k not in have[s].get(n, {}):
+                if (s, n) in mine or v is None and k not in have[s].get(n, {}) or \
+                        (s, n) in own and k in SYNC_KEYS:
                     continue
                 if s != "source" and n not in have[s] and is_synced(self.store(s).get(n, {})):
-                    # a synced entry the index hasn't: only with its file
-                    if staged_as_base(repo, self, n):
+                    # a synced entry the index hasn't: only with its file (asked once)
+                    if (s, n) not in without and staged_as_base(repo, self, n):
                         mine.add((s, n))
+                    else:
+                        without.add((s, n))
                     continue
                 p2[(s, n, k)] = v
             if p2 or d2 or r2:
                 apply(p2, d2, r2)
+        own = {(s, n, k): v for (s, n), vs in sorted(own.items()) if n in have[s]
+               for k, v in vs.items() if have[s][n].get(k) != v}
+        if own:
+            apply(own, set(), {})
         # the entries staged as a whole, after their [source]
         for s, n in sorted(mine, key=lambda x: x[1]):
             src = self.store(s).get(n, {}).get("source")
@@ -3120,7 +3155,8 @@ def local_state(repo, st, link, matchers, syncs):
     of the file. A layer that differs from the one below (file or entry)
     is looked at; one that doesn't is as that one. Its own modification
     (R3: what pull and restore can't get again) is a file there that is
-    neither the one below nor its entry's base."""
+    neither the one below nor its entry's base (in the index also not the
+    working tree entry's)."""
     blocked = in_the_way(repo.top, link.rel)
     if blocked:          # not 'missing': restore and pull would delete what is there
         if isinstance(link, Member):      # the entry is what can be unlinked
@@ -3155,7 +3191,9 @@ def local_state(repo, st, link, matchers, syncs):
     own = []
     if st.staged_code:
         st.index_adapted = adapted(index, mi, lambda: repo.read_blob(index))
-        if index not in (None, head) and (mi is None or st.index_adapted):
+        # (the base of the working tree's entry, e.g. after pull -W + git add: pull gets it)
+        if index not in (None, head) and (mi is None or st.index_adapted) and \
+                (mw is None or adapted(index, mw, lambda: repo.read_blob(index))):
             own.append("index")
     else:
         st.index_adapted = st.committed == "adapted"
@@ -4077,9 +4115,9 @@ def local_content(repo, st):
 
 def overwrites(st, args):
     """pull --overwrite has something to do even without an upstream
-    change: local adaptations, committed or not."""
+    change: local adaptations, committed, staged or not."""
     return args.overwrite and not st.missing and \
-        (st.local == "modified" or st.committed == "adapted")
+        (st.local == "modified" or st.committed == "adapted" or st.index_adapted)
 
 
 def synced_text(args):
@@ -4320,8 +4358,9 @@ def pull_dir(repo, reg, st, args):
     # like `git pull`: uncommitted changes are never merged into a sync -
     # with --overwrite, they are discarded (and kept, see save_discarded)
     # (what pull -W wrote before: the files staged as they are, see below)
+    taken = {id(m) for m in st.mods + back + dels}
     restage = [] if as_staged else [m for m in st.base_members if m.local != "missing"
-                                    and m not in st.mods + back + dels]
+                                    and id(m) not in taken]
     dirty = [m for m in st.mods + dels + back + restage if local_changes(m)]
     if dirty and not args.overwrite:
         raise FsError(f"your local changes to {few(repo, dirty)} would be overwritten by "
@@ -4405,6 +4444,7 @@ def pull_dir(repo, reg, st, args):
         for rel in staged_only(repo, src, dlink, {m.rel for m in st.members}):
             if rel not in contents and rel not in deletes:
                 deletes.append(rel)
+    backs = {id(m) for m in back}
     for m in st.mods + back:
         mod = m.local == "modified"
         discard = args.overwrite and mod
@@ -4413,7 +4453,7 @@ def pull_dir(repo, reg, st, args):
         dropped = args.overwrite and m.committed == "adapted"     # in the commit
         notes[m.rel] = (f"{n} merge conflict(s)" if n else "adaptations merged") if merged \
             else ("restored, local adaptations discarded" if dropped else "restored") \
-            if m in back else "local adaptations discarded" if dropped else "changed upstream"
+            if id(m) in backs else "local adaptations discarded" if dropped else "changed upstream"
         kinds[m.rel] = "changed"
         if n:
             conflicted.append(m.rel)
@@ -5334,9 +5374,15 @@ def save_discarded(repo, worktree, index=(), written=None):
 def restore_values(ctx, entry, lower):
     """{key: value (None: none)} of the sync keys (SYNC_KEYS) that make
     entry synced as lower, its entry in the layer below, is - its selection
-    stays (as after set). In another upstream repository the base gets the
+    stays (as after set; synced-include / -exclude: the patterns of lower's
+    base where they differ). In another upstream repository the base gets the
     commit it has there, as for set (see keep_base)."""
     values = {k: lower.v.get(k) for k in SYNC_KEYS}
+    if lower.is_dir and entry.is_dir:   # the patterns lower's base was synced with (see set)
+        for k in PATTERN_KEYS:
+            synced = lower.synced_patterns(k)
+            values[f"synced-{k}"] = None if synced == getattr(entry, k) else \
+                join_patterns(synced) or ""
     if values["commit"] and norm_url(lower.url) != norm_url(entry.url):
         draft = type(entry)(entry.reg, entry.rel, dict(
             {k: v for k, v in entry.v.items() if k not in SYNC_KEYS},
@@ -5473,7 +5519,7 @@ def cmd_restore(ctx, repo, args):
                     changed.add("worktree")
                 else:
                     for k, v in restore_values(ctx, entry, lower).items():
-                        if (entry.v.get(k) or None) != (v or None):
+                        if entry.v.get(k) != v:   # ("" for synced-*: no patterns)
                             entry.set(k, v)
                             changed.add("worktree")
             if "index" in sides:
@@ -5522,7 +5568,8 @@ def cmd_restore(ctx, repo, args):
         repo.git(["update-index", "-z", "--force-remove", "--stdin"],
                  data="\0".join(unstage).encode("utf-8"))
     reg.finish(stage=False)
-    write_staged(repo, [b for b in staged_ops + [unused_staged_sources(repo, removed)] if any(b)])
+    write_staged(repo, [b for b in staged_ops + [unused_staged_sources(repo, removed, staged_ops)]
+                        if any(b)])
     for line in said + hints:
         print(line)
     return rc
@@ -5546,7 +5593,7 @@ def staged_entry_ops(repo, entry, lower, ctx):
     sect = "dir" if lower.is_dir else "file"
     if ei is not None:
         pending = {(sect, ei.rel, k): v for k, v in restore_values(ctx, ei, lower).items()
-                   if (ei.v.get(k) or None) != (v or None)}
+                   if ei.v.get(k) != v}
         return (pending, set(), {}) if pending else None
     pending = {(sect, lower.rel, k): v for k, v in lower.v.items()}
     if lower.name and lower.name not in staged.sources:
@@ -5554,13 +5601,16 @@ def staged_entry_ops(repo, entry, lower, ctx):
     return pending, set(), {}
 
 
-def unused_staged_sources(repo, removed):
+def unused_staged_sources(repo, removed, ops):
     """Changes that remove the [source]s of the staged registry only the
-    entries removed (their paths) used."""
+    entries removed (their paths) used - not those the other changes (ops,
+    see staged_entry_ops) give an entry."""
     staged = repo.registry("index")
     names = {(staged.files.get(r) or staged.dirs.get(r) or {}).get("source") for r in removed}
     users = {v.get("source") for store in (staged.files, staged.dirs)
              for r, v in store.items() if r not in removed}
+    users |= {v for pending, _, _ in ops for (sect, _, k), v in pending.items()
+              if sect in ("file", "dir") and k == "source"}
     return {}, {("source", n) for n in names - users - {None} if n in staged.sources}, {}
 
 
@@ -5765,7 +5815,17 @@ def keep_base(src, link):
     """A link moves to another upstream (src): its synced version stays the
     base, with the commit it has there (see commit_in) - or, if src doesn't
     have it, a warning: the previous sync point counts as unknown. A new
-    link (not synced yet) has none."""
+    link (not synced yet) has none. The index's entry at another base (e.g.
+    after pull -W) keeps its own, translated the same way (R2)."""
+    reg = link.reg
+    ei = layer_entry(reg.repo, link, "index")
+    if ei is not None and sync_keys(ei.v) != sync_keys(link.v):
+        commit = None if ei.unsynced else commit_in(src, ei)
+        if not commit and not ei.unsynced:
+            warn(f"{link.rel}: staged synced version {ei.blob[:12]} not found in {src.label}; "
+                 "its previous sync point counts as unknown")
+        reg.staged_own[("dir" if link.is_dir else "file", link.rel)] = \
+            {"commit": commit} if commit else {}
     if link.unsynced:
         return
     commit = commit_in(src, link)
@@ -6061,16 +6121,18 @@ def registry_problems(reg):
 def cmd_edit(ctx, repo, args):
     """Open .git-filesync in the editor (like `git config --edit`), then
     check it and stage the sections that changed in it (see Registry.stage);
-    a merge conflict in it: resolved there, the whole file staged."""
+    a merge conflict in it: resolved there, the whole file staged (deleted
+    or emptied there: its removal)."""
     path = registry_path(repo)
-    if not path.exists():
-        raise FsError(f"no {REGISTRY} yet - link files with 'git filesync add'")
-    before = path.read_bytes()
     try:
         registry_rows(repo)
         conflict = False
     except FsError:
         conflict = True
+    if not path.exists():
+        raise FsError(conflict_text(repo) if conflict else
+                      f"no {REGISTRY} yet - link files with 'git filesync add'")
+    before = path.read_bytes()
     p = git(["config", "-f", path, "--list", "-z"], check=False)
     old = ({}, {}, {}) if p.returncode else parse_registry(p.stdout)
     # the editor git would use (GIT_EDITOR, core.editor, VISUAL, EDITOR), run
@@ -6085,11 +6147,18 @@ def cmd_edit(ctx, repo, args):
         return EXIT_OK
     if conflict:
         p = git(["config", "-f", path, "--list", "-z"], check=False) if path.exists() else None
-        if p is None or p.returncode or re.search(rb"^(<<<<<<<|>>>>>>>)", path.read_bytes(), re.M):
+        if p is not None and (p.returncode or
+                              re.search(rb"^(<<<<<<<|>>>>>>>)", path.read_bytes(), re.M)):
             raise FsError(f"{REGISTRY} still has conflicts or can't be parsed - not staged; "
                           "fix it with 'git filesync edit'")
-        repo.git(["add", "--", REGISTRY])
         repo.rows = None
+        if p is None or not any(parse_registry(p.stdout)):   # deleted or emptied: it goes
+            if path.exists():
+                path.unlink()
+            repo.git(["rm", "-q", "--cached", "--", REGISTRY])
+            print(f"{REGISTRY}: conflict resolved - removed and staged")
+            return EXIT_OK
+        repo.git(["add", "--", REGISTRY])
         print(f"{REGISTRY}: conflict resolved and staged")
         return EXIT_OK
     try:
@@ -6956,7 +7025,7 @@ def run(argv=None):
                     "uninstall": cmd_uninstall_hooks}[args.action](repo, args)
         if args.cmd == "hook":
             args.no_fetch = args.name == "post-merge"    # pre-push: online anyway
-        ctx = Context(args, repo)
+        ctx = repo.ctx = Context(args, repo)
         reading = args.cmd in ("status", "diff", "difftool", "hook") or \
             args.cmd == "source" and not args.action
         PipeGuard.stop = reading
