@@ -3109,6 +3109,14 @@ quiet git filesync pull hh
 check "pull: only its changes staged, not the hand-made ones (also of its [source])" \
   "$(git config --blob :.git-filesync source.nowhere/m28.note) $(git diff --cached .git-filesync | grep -c '^+	blob')" " 1"
 git reset -q --hard
+# a [dir] entry's proposed message names its files from what is committed (R3),
+# also after pull -W
+(cd ../m28 && echo 4 > d/four && git add d/four && git commit -qm four && echo 1f > d/one && git commit -qam 1f)
+quiet git filesync pull -W --commit "$(git -C ../m28 rev-parse HEAD~)" d
+quiet git filesync pull d
+check "pull [dir] after pull -W: the files named from what is committed" \
+  "$(grep -E '^- d/' .git/FILESYNC_MSG | oneline)" "- d/four (new upstream) - d/one (changed upstream) "
+git reset -q --hard
 
 # =============================================================================
 section "Upstream repositories untouched"

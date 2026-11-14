@@ -4380,18 +4380,6 @@ def pull_dir(repo, reg, st, args):
         for rel in staged_only(repo, src, dlink, {m.rel for m in st.members}):
             if rel not in contents and rel not in deletes:
                 deletes.append(rel)
-        # the files that changed since what is committed (R3)
-        eh = st.entries[0]
-        head = layer_files(src, dlink, eh, {}) if st.head_base else None
-        for below, blob in (head or {}).items():
-            rel = join_rel(dlink.rel, below)
-            if rel not in notes and below not in {m.link.below for m in st.base_members}:
-                notes[rel], kinds[rel] = "deleted upstream", "deleted"
-        for m in st.base_members if head is not None else []:
-            if m.rel not in notes and head.get(m.link.below) != m.old_blob:
-                new = m.link.below not in head
-                notes[m.rel] = "new upstream" if new else "changed upstream"
-                kinds[m.rel] = "new" if new else "changed"
     for m in st.mods + back:
         mod = m.local == "modified"
         discard = args.overwrite and mod
@@ -4409,6 +4397,8 @@ def pull_dir(repo, reg, st, args):
                       + f"{refused[-1][0].rel}: {refused[-1][1]} - use 'git filesync pull "
                       f"--overwrite {arg}' to take what upstream has, or --force to keep "
                       "the files of this repository")
+    if st.head_base:
+        head_notes(st, src, notes, kinds)
     counts = [(sum(1 for k in kinds.values() if k == w), w)
               for w in ("new", "deleted", "renamed", "changed")]
     summary = ", ".join(f"{n} {w}" for n, w in counts if n) or "no file changed"
@@ -4443,6 +4433,27 @@ def pull_dir(repo, reg, st, args):
     print(f"{name}: {status} ({summary}"
           + (", adaptations merged" if merged and not conflicted else "") + ")")
     return build_dir_message(st, src, notes), conflicted, contents, deletes
+
+
+def head_notes(st, src, notes, kinds):
+    """The files of a [dir] entry's pull named as from what is committed
+    (R3), its base in HEAD (st.head_base) - not from the working tree's
+    entry, which pull writes from: new, changed or deleted between that
+    base and the new one. The notes of what pull does to a file beyond
+    that (merged, kept, ...) stay."""
+    head = layer_files(src, st.link, st.entries[0], {}) or {}
+    after = {m.link.below: m.new_blob for m in st.members if m.new_blob}
+    plain = {"new upstream": "new", "changed upstream": "changed", "deleted upstream": "deleted"}
+    for rel in [r for r, n in notes.items() if n in plain]:
+        del notes[rel]
+        kinds.pop(rel, None)
+    for below in sorted(set(head) | set(after)):
+        rel = join_rel(st.link.rel, below)
+        if rel in notes or head.get(below) == after.get(below):
+            continue
+        note = "new upstream" if below not in head else \
+            "deleted upstream" if below not in after else "changed upstream"
+        notes[rel], kinds[rel] = note, plain[note]
 
 
 def build_dir_message(st, src, notes):
