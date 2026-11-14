@@ -3100,14 +3100,15 @@ check "... diff --committed: only the committed one" "$(git filesync diff --comm
 check "restore -S: the index from HEAD's base" \
   "$(git filesync restore -S k) $(git show :k)" "k: restored in the index (nowhere/m28@$(git config -f .git-filesync file.k.commit | cut -c1-7)) $(git -C ../m28 show HEAD:f)"
 git reset -q --hard
-# pull of an entry the index has: only its changes staged - not changes made
-# by hand, also not to its [source]
+# pull stages the entry as it used it, also if the index has it: with its
+# [source] - changes made by hand to them too; those to others stay unstaged
 addc file:///nowhere/m28.git hh -p g
 (cd ../m28 && echo z > g && git commit -qam g3)
 git config -f .git-filesync source.nowhere/m28.note mine
+git config -f .git-filesync file.k.note mine
 quiet git filesync pull hh
-check "pull: only its changes staged, not the hand-made ones (also of its [source])" \
-  "$(git config --blob :.git-filesync source.nowhere/m28.note) $(git diff --cached .git-filesync | grep -c '^+	blob')" " 1"
+check "pull: the entry staged as used, with its [source]; other entries not" \
+  "$(git config --blob :.git-filesync source.nowhere/m28.note) $(git config --blob :.git-filesync file.k.note) $(git diff --cached .git-filesync | grep -c '^+	blob')" "mine  1"
 git reset -q --hard
 # a [dir] entry's proposed message names its files from what is committed (R3),
 # also after pull -W

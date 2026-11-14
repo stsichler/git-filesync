@@ -2554,11 +2554,12 @@ class Registry:
 
     def stage(self):
         """Stage what this run changed (R2): the same changes in the staged
-        registry - not the whole file, nor whole sections. A synced entry
-        the index hasn't comes only with its file: pulled or added
-        (self.whole), or staged as its base already (see staged_as_base) -
-        then as a whole, as the working tree has it, with its [source]
-        where the index hasn't that; else a change of it stays unstaged. Each staged
+        registry - not the whole file. An entry pulled or added (self.whole)
+        is staged as a whole, as they used it, with its [source]: the commit
+        describes what its files come from (changes made by hand to it go
+        along). Another synced entry the index hasn't comes only with its
+        file (see staged_as_base), then whole as well; else a change of it
+        stays unstaged. Each staged
         entry has its [source] there; one goes only when no staged entry
         uses it, and one new there only for entries not staged isn't staged
         either. So changes made by hand, and what is only in the working
@@ -2585,7 +2586,7 @@ class Registry:
             return {(s, n, k): want.get(k) for k in list(want) + [k for k in now if k not in want]
                     if want.get(k) != now.get(k)}
 
-        mine = {(self.kind(r), r) for r in whole if r not in have[self.kind(r)]}
+        mine = {(self.kind(r), r) for r in whole}
         for pending, drop, renames in done:
             p2, d2, r2 = {}, set(), {}
             for (s, old), new in renames.items():
@@ -2611,8 +2612,7 @@ class Registry:
         # the entries staged as a whole, after their [source]
         for s, n in sorted(mine, key=lambda x: x[1]):
             src = self.store(s).get(n, {}).get("source")
-            changes = copy("source", src) if src in self.sources and src not in have["source"] \
-                else {}
+            changes = copy("source", src) if src in self.sources else {}
             changes.update(copy(s, n))
             if changes:
                 apply(changes, set(), {})
