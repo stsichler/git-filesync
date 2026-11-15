@@ -827,10 +827,15 @@ class Source:
         self.spec = None     # ('branch' | 'tag', name) it was made for (see Context.source)
         self.tag_names: Optional[list] = None   # for a tag pattern: the matching tags ref is at
         self.lfs_server = None  # mapped: () -> repository to fetch missing LFS objects in
+        self.offline = False    # never fetch a missing blob (see Context.cached_source)
         self._memo = {}      # answers that don't change during a run (see prefetch)
 
     def git(self, args, **kw):
         kw.setdefault("env", clean_env())
+        if self.offline:          # nothing missing is fetched (see Context.cached_source):
+            kw["env"] = dict(kw["env"], GIT_NO_LAZY_FETCH="1")     # Git 2.45+; before:
+            nowhere = self.dir / "no-fetch"                         # fails at once
+            args = ["-c", f"remote.origin.url={nowhere}", "-c", f"lfs.url={nowhere}"] + list(args)
         return git(PROTOCOL_V2 + ["-C", self.dir] + list(args), **kw)
 
     def head_ref(self):
@@ -1368,6 +1373,7 @@ class Context:
         self._ready = set()
         self._fetch_failed = set()
         self._cached = {}         # see cached_source
+        self.memo = {}            # answers asked once per run (e.g. restore_values)
         self._mappings = None
 
     def source(self, url, ref, name=None, line=None):
@@ -1488,9 +1494,12 @@ class Context:
             local = self.local_path(url)
             d = Path(local) if local else self.cache_dir(url)
             kind, what = ref
-            self._cached[key] = Source(d, f"refs/tags/{what}" if kind == "tag" else
-                                       f"refs/remotes/origin/{what}", name or repo_label(url),
-                                       local=bool(local)) if d.is_dir() else None
+            src = Source(d, f"refs/tags/{what}" if kind == "tag" else
+                         f"refs/remotes/origin/{what}", name or repo_label(url),
+                         local=bool(local)) if d.is_dir() else None
+            if src is not None:   # not even a missing blob or LFS object: no lfs_server
+                src.offline = True
+            self._cached[key] = src
         return self._cached[key]
 
     @staticmethod
@@ -2652,6 +2661,9 @@ class Registry:
             for (s, old), new in renames.items():
                 if old in have[s] and new not in have[s]:
                     r2[(s, old)] = new
+                    if s == "source":     # all staged entries of it follow, also others
+                        p2.update(((k, n, "source"), new) for k in ("file", "dir")
+                                  for n, v in have[k].items() if v.get("source") == old)
             for s, n in drop:
                 if n in have[s] and (s, n) not in mine:
                     if s == "source":
@@ -3273,7 +3285,8 @@ def local_state(repo, st, link, matchers, syncs):
         st.index_adapted = adapted(index, mi, lambda: repo.read_blob(index))
         # (the base of the working tree's entry, e.g. after pull -W + git add: pull gets it)
         if index not in (None, head) and (mi is None or st.index_adapted) and \
-                (mw is None or adapted(index, mw, lambda: repo.read_blob(index))):
+                (mw is None or adapted(index, mw, lambda: repo.read_blob(index))) and \
+                not moved_in_head(repo, link, si, index):
             own.append("index")
     else:
         st.index_adapted = st.committed == "adapted"
@@ -3288,6 +3301,16 @@ def local_state(repo, st, link, matchers, syncs):
     st.own, st.where = tuple(own), own[0] if own else None
     st.violation = not st.adaptable and (st.committed == "adapted" or st.index_adapted
                                          or st.local == "modified")
+
+
+def moved_in_head(repo, link, sync, oid):
+    """Is oid the file HEAD has for an entry with the base sync under another
+    name - the index's file moved (git filesync mv), nothing of its own? Only
+    for a [file] entry."""
+    if sync is None or link.is_dir or isinstance(link, Member):
+        return False
+    return any(r != link.rel and sync_keys(v) == sync and repo.head_blob(r) == oid
+               for r, v in repo.registry("head").files.items())
 
 
 def head_base(eh, link):
@@ -3335,11 +3358,11 @@ def evaluate(ctx, repo, link):
     except FsError as e:
         st.error = str(e)
         return st
-    lower = st.entries = (layer_entry(repo, link, "head"), layer_entry(repo, link, "index"))
-    st.head_base = head_base(lower[0], link)
-    st.bases = tuple(None if e is None or e.unsynced else layer_base(repo, src, link, e)
-                     for e in lower)
-    try:
+    try:          # (a registry of HEAD or the index that can't be read: this entry's error)
+        lower = st.entries = (layer_entry(repo, link, "head"), layer_entry(repo, link, "index"))
+        st.head_base = head_base(lower[0], link)
+        st.bases = tuple(None if e is None or e.unsynced else layer_base(repo, src, link, e)
+                         for e in lower)
         local_state(repo, st, link, [layer_matcher(repo, src, link, e, st) for e in lower]
                     + [None if link.unsynced else base_matcher(repo, src, link, st)],
                     [None if e is None else sync_keys(e.v) for e in lower] + [sync_keys(link.v)])
@@ -3507,6 +3530,15 @@ def fill_members(repo, st, base, upstream):
             for e in lower]
     files = st.layer_files = [layer_files(s, dlink, e, base) for s, e in zip(srcs, lower)]
     syncs = [None if e is None else sync_keys(e.v) for e in lower] + [sync_keys(dlink.v)]
+    # the bases of the layers below, asked at once (see matches_base)
+    own = [(fs, lsrc) for fs, lsrc in zip(files, srcs) if fs is not None and fs is not base]
+    if own:
+        repo.check_plain(m.rel for m in st.members)
+        for fs, lsrc in own:
+            try:
+                (lsrc or st.src).check_plain(fs.values())
+            except FsError:
+                pass
     for m in st.members:
         m.src, m.has_old = st.src, st.has_old
         below = m.link.below
@@ -3514,9 +3546,9 @@ def fill_members(repo, st, base, upstream):
         for e, fs, lsrc in zip(lower, files, srcs):
             blob = fs.get(below) if fs is not None else None
             # (its own base, read in its upstream repository - else the working tree's)
-            own = e is not None and fs is not None and fs is not base
-            b = (blob, up_join(e.path if own else dlink.path, below),
-                 (lsrc or st.src) if own else st.src) if blob else None
+            own = e if fs is not None and fs is not base else None
+            b = (blob, up_join(own.path if own is not None else dlink.path, below),
+                 (lsrc or st.src) if own is not None else st.src) if blob else None
             bases.append(b)
             matchers.append(None if b is None else blob_matcher(repo, b[2], m.rel, b[0], b[1], m))
         m.bases = tuple(bases)
@@ -3878,7 +3910,7 @@ def print_long(repo, sts, verbose, gone=()):
             lower = st.entries[i - 1]
             upper = st.link if i == 2 else st.entries[1]
             if code == "D" and upper is None:     # the entry removed there (unlink)
-                rows.append(("unlinked", st) + note(st, [], None))
+                rows.append(("unlinked", st, None, "dim"))
                 continue
             text = not_allowed if not st.adaptable and adapted(st) else \
                 "NOT ALLOWED: still linked" if code == "D" else \
@@ -5584,16 +5616,19 @@ def restore_values(ctx, entry, lower):
             values[f"synced-{k}"] = None if synced == getattr(entry, k) else \
                 join_patterns(synced) or ""
     if values["commit"] and norm_url(lower.url) != norm_url(entry.url):
-        draft = type(entry)(entry.reg, entry.rel, dict(
-            {k: v for k, v in entry.v.items() if k not in SYNC_KEYS},
-            **{k: v for k, v in values.items() if v}))
-        commit = commit_in(ctx.source(entry.url, entry.ref, entry.name, entry.line), draft)
-        if commit:
-            values["commit"] = commit
-        else:
-            warn(f"{entry.rel}: synced version {lower.blob[:12]} not found in {entry.url}; its "
-                 f"previous sync point counts as unknown - sync it with 'git filesync pull "
-                 f"{path_arg(entry.reg.repo, entry.rel)}'")
+        # (asked once per run: restore -SW translates for both layers)
+        key = ("commit_in", norm_url(entry.url), lower.commit, lower.blob, lower.path)
+        if key not in ctx.memo:
+            draft = type(entry)(entry.reg, entry.rel, dict(
+                {k: v for k, v in entry.v.items() if k not in SYNC_KEYS},
+                **{k: v for k, v in values.items() if v}))
+            ctx.memo[key] = commit_in(ctx.source(entry.url, entry.ref, entry.name, entry.line),
+                                      draft)
+            if not ctx.memo[key]:
+                warn(f"{entry.rel}: synced version {lower.blob[:12]} not found in {entry.url}; "
+                     "its previous sync point counts as unknown - sync it with 'git filesync "
+                     f"pull {path_arg(entry.reg.repo, entry.rel)}'")
+        values["commit"] = ctx.memo[key] or values["commit"]
     return values
 
 
@@ -5811,9 +5846,13 @@ def staged_entry_ops(repo, entry, lower, ctx):
         pending = {(sect, ei.rel, k): v for k, v in restore_values(ctx, ei, lower).items()
                    if ei.v.get(k) != v}
         return (pending, set(), {}) if pending else None
-    pending = {(sect, lower.rel, k): v for k, v in lower.v.items()}
+    values = dict(lower.v)
     if lower.name and lower.name not in staged.sources:
-        pending.update({("source", lower.name, k): v for k, v in lower.source.items()})
+        pending = {("source", lower.name, k): v for k, v in lower.source.items()}
+    else:                 # its [source] there, maybe with another URL: synced as there
+        pending = {}
+        values.update(restore_values(ctx, type(lower)(staged, lower.rel, dict(lower.v)), lower))
+    pending.update(((sect, lower.rel, k), v) for k, v in values.items() if v is not None)
     return pending, set(), {}
 
 
@@ -6346,13 +6385,19 @@ def cmd_edit(ctx, repo, args):
     """Open .git-filesync in the editor (like `git config --edit`), then
     check it and stage the sections that changed in it (see Registry.stage);
     a merge conflict in it: resolved there, the whole file staged (deleted
-    or emptied there: its removal)."""
+    or emptied there: its removal) - as when the staged one can't be read."""
     path = registry_path(repo)
     try:
         registry_rows(repo)
         conflict = False
     except FsError:
         conflict = True
+    broken = False                # the staged one can't be read
+    if not conflict:
+        try:
+            repo.registry("index")
+        except FsError:
+            broken = True
     if not path.exists():
         raise FsError(conflict_text(repo) if conflict else
                       f"no {REGISTRY} yet - link files with 'git filesync add'")
@@ -6372,10 +6417,12 @@ def cmd_edit(ctx, repo, args):
     if subprocess.run([shell(), "-c", f'{editor} "$@"', editor, REGISTRY],
                       cwd=repo.top).returncode:
         raise FsError("the editor failed; nothing staged")
-    if path.exists() and path.read_bytes() == before and not conflict:
+    if path.exists() and path.read_bytes() == before and not (conflict or broken):
         print(f"{REGISTRY}: no changes")
         return EXIT_OK
-    if conflict:
+    if conflict or broken:
+        done = "conflict resolved" if conflict else "staged as a whole (the staged one " \
+            "couldn't be read)"
         p = git(["config", "-f", path, "--list", "-z"], check=False) if path.exists() else None
         if p is not None and (p.returncode or
                               re.search(rb"^(<<<<<<<|>>>>>>>)", path.read_bytes(), re.M)):
@@ -6386,10 +6433,11 @@ def cmd_edit(ctx, repo, args):
             if path.exists():
                 path.unlink()
             repo.git(["rm", "-q", "--cached", "--", REGISTRY])
-            print(f"{REGISTRY}: conflict resolved - removed and staged")
+            print(f"{REGISTRY}: {done} - removed and staged" if conflict else
+                  f"{REGISTRY}: removed and staged")
             return EXIT_OK
         repo.git(["add", "--", REGISTRY])
-        print(f"{REGISTRY}: conflict resolved and staged")
+        print(f"{REGISTRY}: {done} and staged" if conflict else f"{REGISTRY}: {done}")
         return EXIT_OK
     try:
         reg = Registry(repo)

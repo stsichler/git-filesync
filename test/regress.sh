@@ -3363,6 +3363,30 @@ git config -f .git-filesync source.nowhere/m7.url file:///nowhere/old7.git && gi
 git config -f .git-filesync source.nowhere/m7.url file:///nowhere/m7.git
 check "status: the upstream of HEAD's entry isn't fetched or cloned" "$(git filesync status w 2>&1 | grep -c -e Cloning -e fetching)" "0"
 git reset -q --hard HEAD~1
+# source rename: staged entries the working tree hasn't follow too
+git config -f .git-filesync --remove-section file.p
+quiet git filesync source rename nowhere/m28b r28b
+check "source rename: a staged entry not in the working tree follows" \
+  "$(git config --blob :.git-filesync file.p.source)" "r28b"
+git reset -q --hard
+# a staged registry that can't be read: an error per entry; edit stages it whole
+git update-index --cacheinfo "100644,$(printf '[broken\n' | git hash-object -w --stdin),.git-filesync"
+check "a staged registry that can't be read: an error per entry" \
+  "$(git filesync status -s 2>/dev/null | grep -c '^E  ') $(rc git filesync status -s)" "$(git config -f .git-filesync --name-only --get-regexp '[.]path$' | wc -l | tr -d ' ') 2"
+check "... edit stages it whole" \
+  "$(GIT_EDITOR=true git filesync edit 2>&1) $(rc git diff --quiet .git-filesync)" \
+  ".git-filesync: staged as a whole (the staged one couldn't be read) 0"
+git reset -q --hard
+# git filesync mv of an adapted file after pull -W: the index has HEAD's file, moved
+(cd ../m28 && sedi 's/^3 up$/3 up2/' ml && git commit -qam ml3b)
+quiet git filesync pull -W ml && quiet git filesync mv ml ml2
+check "mv after pull -W of an adapted file: pull stages it" "$(rc git filesync pull ml2)" "0"
+git reset -q --hard && rm -f ml2
+# an entry removed in the index only: unlinked, without a note
+quiet git filesync unlink d && git show HEAD:.git-filesync > .git-filesync
+check "unlinked [dir] in the index: no note" \
+  "$(git filesync status | grep -cE "^${TAB}unlinked:[[:space:]]+d/\$")" "1"
+git reset -q --hard
 # before the first commit: what is staged is all of the index
 cd "$T" && git init -q s28n && cd s28n
 git filesync source map file:///nowhere/m28.git "$T/m28" >/dev/null
