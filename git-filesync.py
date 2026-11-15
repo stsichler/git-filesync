@@ -1367,6 +1367,7 @@ class Context:
         self._sources = {}
         self._ready = set()
         self._fetch_failed = set()
+        self._cached = {}         # see cached_source
         self._mappings = None
 
     def source(self, url, ref, name=None, line=None):
@@ -1472,6 +1473,25 @@ class Context:
                                "as last fetched")
         return Source(self._cache(url, need=f"refs/remotes/origin/{branch}"),
                       f"refs/remotes/origin/{branch}", name or repo_label(url))
+
+    def cached_source(self, url, ref, name=None):
+        """A Source for the base of an entry in a layer below (see
+        layer_source): the one of this run if there is one, else the mapped
+        checkout or the cache clone as it is - never fetched or cloned (a
+        URL changed, not committed yet: the old server may be gone); None if
+        there is neither. Its blobs are looked up by id, the ref is not."""
+        key = (norm_url(url), ref)
+        found = [s for k, s in self._sources.items() if k[:2] == key and not isinstance(s, FsError)]
+        if found:
+            return found[0]
+        if key not in self._cached:
+            local = self.local_path(url)
+            d = Path(local) if local else self.cache_dir(url)
+            kind, what = ref
+            self._cached[key] = Source(d, f"refs/tags/{what}" if kind == "tag" else
+                                       f"refs/remotes/origin/{what}", name or repo_label(url),
+                                       local=bool(local)) if d.is_dir() else None
+        return self._cached[key]
 
     @staticmethod
     def cache_dir(url):
@@ -2345,9 +2365,10 @@ def write_staged(repo, batches):
     staged .git-filesync - only the lines concerned, so that its comments
     and layout stay; all at once, but renames in a batch of their own (see
     Registry._rename). Stored as `git add` would store such a file; removed
-    from the index when nothing of ours is left in it."""
+    from the index when nothing of ours is left in it. Returns whether the
+    index changed (batches may cancel out)."""
     if not batches:
-        return
+        return False
     rows = registry_rows(repo)
     mode, oid = rows[0].split()[:2] if rows else ("100644", None)
     have = registry_model(repo.registry("index"))
@@ -2375,11 +2396,14 @@ def write_staged(repo, batches):
     if not any(v for store in have.values() for v in store.values()):
         if oid:
             repo.git(["update-index", "--force-remove", "--", REGISTRY])
-        return
+        return bool(oid)
     # as `git add` stores it (its line ends, LF here, as on a checkin)
-    oid = out(repo.git(["hash-object", "-w", f"--path={REGISTRY}", "--stdin"],
+    new = out(repo.git(["hash-object", "-w", f"--path={REGISTRY}", "--stdin"],
                        data=data.replace(b"\r\n", b"\n")))
-    repo.git(["update-index", "--add", "--cacheinfo", f"{mode},{oid},{REGISTRY}"])
+    if new == oid:
+        return False
+    repo.git(["update-index", "--add", "--cacheinfo", f"{mode},{new},{REGISTRY}"])
+    return True
 
 
 def is_synced(values):
@@ -2609,6 +2633,7 @@ class Registry:
         repo = self.repo
         have = registry_model(repo.registry("index"))
         before = {s: set(have[s]) for s in have}
+        used_before = {v.get("source") for s in ("file", "dir") for v in have[s].values()}
         batches, dropped = [], set()
 
         def apply(pending, drop, renames):
@@ -2666,12 +2691,12 @@ class Registry:
         for n in sorted(used - set(have["source"])):
             if n in self.sources:
                 need.update(copy("source", n))
+        # (one goes that this run dropped, made unused, or that is new there)
         gone = {("source", n) for n in have["source"] if n not in used and
-                (n in dropped or n not in before["source"])}
+                (n in dropped or n in used_before or n not in before["source"])}
         if need or gone:
             apply(need, gone, {})
-        write_staged(repo, batches)
-        return bool(batches)
+        return write_staged(repo, batches)
 
 
 class Link:
@@ -2963,7 +2988,7 @@ class FileState:
     where: Optional[str] = None
     own: tuple = ()           # all layers with a modification of their own (where: the first)
     head_base: Optional[tuple] = None   # HEAD's other base: see head_base()
-    bases: tuple = (None, None)   # (blob, upstream path) of the bases in HEAD and the index
+    bases: tuple = (None, None)   # (blob, upstream path, Source) of the bases in HEAD, the index
     changed: bool = False     # upstream version differs from the base
     pending: bool = False     # something for pull to do
     violation: bool = False   # modified, but not adaptable
@@ -3125,15 +3150,15 @@ def overlap_text(repo, link, others):
             f"remove one with 'git filesync unlink {path_arg(repo, link.rel)}'")
 
 
-def blob_matcher(repo, src, rel, blob, path, st, warn=True):
+def blob_matcher(repo, src, rel, blob, path, st):
     """matches_base() for the file rel and the upstream version blob (at
     path); a version that can't be read counts as different - with a
-    warning in st if warn (the base of the working tree's entry)."""
+    warning in st (the base of an entry in any layer)."""
     def matches(oid, read):
         try:
             return matches_base(repo, src, rel, blob, path, oid, read)
         except BaseUnavailable as e:
-            if warn and str(e) not in st.warnings:
+            if str(e) not in st.warnings:
                 st.warnings.append(str(e))
             return False
     return matches
@@ -3158,7 +3183,7 @@ def layer_source(repo, src, link, lower):
     if src is not None and norm_url(lower.url) == norm_url(link.url):
         return src
     try:
-        return repo.ctx.source(lower.url, lower.ref, lower.name, lower.line) if repo.ctx else None
+        return repo.ctx.cached_source(lower.url, lower.ref, lower.name) if repo.ctx else None
     except FsError:
         return None
 
@@ -3170,9 +3195,16 @@ def layer_matcher(repo, src, link, lower, st):
     adapted there."""
     if lower is None or lower.unsynced:
         return None
+    blob, path, bsrc = layer_base(repo, src, link, lower)
+    return blob_matcher(repo, bsrc, link.rel, blob, path, st)
+
+
+def layer_base(repo, src, link, lower):
+    """(blob, upstream path, Source) of the base of lower, link's entry in a
+    layer below: in its own upstream repository (see layer_source) - or,
+    if that can't be had, link's (src: its Source)."""
     lsrc = layer_source(repo, src, link, lower)
-    base = link if lsrc is None else lower
-    return blob_matcher(repo, lsrc or src, link.rel, base.blob, base.path, st, warn=base is link)
+    return (lower.blob, lower.path, lsrc) if lsrc is not None else (link.blob, link.path, src)
 
 
 def layer_code(lower, upper, below, above):
@@ -3305,8 +3337,7 @@ def evaluate(ctx, repo, link):
         return st
     lower = st.entries = (layer_entry(repo, link, "head"), layer_entry(repo, link, "index"))
     st.head_base = head_base(lower[0], link)
-    st.bases = tuple(None if e is None or e.unsynced else (e.blob, e.path)
-                     if norm_url(e.url) == norm_url(link.url) else (link.blob, link.path)
+    st.bases = tuple(None if e is None or e.unsynced else layer_base(repo, src, link, e)
                      for e in lower)
     try:
         local_state(repo, st, link, [layer_matcher(repo, src, link, e, st) for e in lower]
@@ -3482,15 +3513,12 @@ def fill_members(repo, st, base, upstream):
         matchers, bases = [], []
         for e, fs, lsrc in zip(lower, files, srcs):
             blob = fs.get(below) if fs is not None else None
-            # (the bases in link's upstream repository: those there - another
-            # one's counts as the working tree's)
-            same = e is not None and norm_url(e.url) == norm_url(dlink.url)
-            b = blob if same or fs is None else base.get(below)
-            bases.append((b, up_join(e.path if e is not None and same else dlink.path, below))
-                         if b else None)
-            path = e.path if e is not None and (same or lsrc is not None) else dlink.path
-            matchers.append(None if not blob else blob_matcher(
-                repo, lsrc or st.src, m.rel, blob, up_join(path, below), m, warn=fs is base))
+            # (its own base, read in its upstream repository - else the working tree's)
+            own = e is not None and fs is not None and fs is not base
+            b = (blob, up_join(e.path if own else dlink.path, below),
+                 (lsrc or st.src) if own else st.src) if blob else None
+            bases.append(b)
+            matchers.append(None if b is None else blob_matcher(repo, b[2], m.rel, b[0], b[1], m))
         m.bases = tuple(bases)
         matchers.append(None if m.unsynced else base_matcher(repo, st.src, m.link, m))
         local_state(repo, m, m.link, matchers,
@@ -4201,7 +4229,7 @@ def merged_layers(repo, st):
     to tell (only here, not for status); st.own and st.where updated."""
     if not st.adaptable or not st.own:
         return
-    work = (st.old_blob, st.link.path)
+    work = (st.old_blob, st.link.path, st.src)
     below = {"index": (st.head_blob, st.bases[0], [st.bases[1], work], st.index_blob),
              "worktree": (st.index_blob, st.bases[1], [work], None)}
     own = []
@@ -4217,12 +4245,13 @@ def merged_layers(repo, st):
 
 def merges_to(repo, st, oid, base, targets, have):
     """Is the file have (blob id) the clean merge of the file oid of this
-    repository, with base (blob, upstream path), to one of the targets?"""
+    repository, with base (blob, upstream path, Source), to one of the
+    targets?"""
     try:
         ours = repo.read_content(oid, st.rel)
-        old = repo.normalize(st.src.read_content(*base), st.rel)
+        old = repo.normalize(base[2].read_content(base[0], base[1]), st.rel)
         for t in targets:
-            theirs = repo.normalize(st.src.read_content(*t), st.rel)
+            theirs = repo.normalize(t[2].read_content(t[0], t[1]), st.rel)
             conflicts, content = merge3(ours, old, theirs, ["ours", "base", "theirs"])
             if not conflicts and repo.blob_ids([(st.rel, content)])[st.rel] == have:
                 return True
@@ -4837,7 +4866,8 @@ def cmd_pull(ctx, repo, args):
     for src in {id(st.src): st.src for st in ok}.values():
         # (and the bases of the layers below, to merge again: see merged_layers)
         src.read_blobs(b for st in files if st.src is src for b in (st.old_blob, st.new_blob)
-                       + (tuple(x[0] for x in st.bases if x) if st.adaptable and st.own else ()))
+                       + (tuple(x[0] for x in st.bases if x and x[2] is src)
+                          if st.adaptable and st.own else ()))
         src.shorts(c for st in ok if st.src is src for c in (st.old, st.new))
         src.dates(c for st in sync if st.src is src
                   for c in (st.old if st.has_old else None, st.new,
@@ -5011,11 +5041,12 @@ def diff_pairs(ctx, repo, args):
         # stored all at once below
         try:
             # the base of the layer compared: HEAD's, the index's or the working tree's
-            blob, path = st.bases[0] or (st.old_blob, link.path) if args.committed else \
-                st.bases[1] if args.cached else (st.old_blob, link.path)
+            blob, path, bsrc = st.bases[0] or (st.old_blob, link.path, st.src) \
+                if args.committed else st.bases[1] if args.cached else \
+                (st.old_blob, link.path, st.src)
             try:          # a new link (--upstream): the whole file is new
                 base = None if st.unsynced and not args.cached else \
-                    repo.normalize(st.src.read_content(blob, path), st.rel)
+                    repo.normalize(bsrc.read_content(blob, path), st.rel)
             except FsError:
                 raise FsError(f"synced version {blob[:12]} unavailable")
             if args.cached:
@@ -5638,8 +5669,11 @@ def cmd_restore(ctx, repo, args):
     # the bases in this repository's form, read and converted at once
     for src in {id(s): s for _, _, base, _, _ in plans for s, _, _ in base.values()}.values():
         src.read_blobs(o for _, _, base, _, _ in plans for s, o, _ in base.values() if s is src)
-        src.shorts(lw.commit for _, lw, base, _, _ in plans for s, _, _ in list(base.values())[:1]
-                   if s is src)
+        try:              # (a commit not there: see short_of below)
+            src.shorts(lw.commit for _, lw, base, _, _ in plans
+                       for s, _, _ in list(base.values())[:1] if s is src)
+        except FsError:
+            pass
     repo.check_plain(r for _, _, base, _, _ in plans for r in base)
     raw, raw_mine = {}, {}        # contents: of the bases below, of the layers restored
     for entry, _, base, _, mine in list(plans):
@@ -5715,7 +5749,10 @@ def cmd_restore(ctx, repo, args):
             what = {("index",): "restored in the index", ("worktree",): "restored"}.get(
                 tuple(sorted(changed)), "restored and staged")
             src = next(iter(base.values()))[0] if base else None
-            at = src.short(lower.commit) if src and lower.commit else short_of(lower)
+            try:
+                at = src.short(lower.commit) if src and lower.commit else short_of(lower)
+            except FsError:       # e.g. upstream history rewritten
+                at = short_of(lower)
             name = entry.shown_rel if entry.only is None else \
                 ", ".join(shown(repo, o) for o in entry.only)
             said.append(f"{name}: {paint(what, 'green')} "

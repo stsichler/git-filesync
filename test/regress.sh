@@ -3330,6 +3330,39 @@ quiet git filesync pull -W f
 check "set -p after pull -W: refused" "$(git filesync set -p g f 2>&1 | cut -c1-54) $(rc git filesync set -p g f)" \
   "error: f: synced otherwise in the index (e.g. after pu 2"
 git reset -q --hard
+# set of an entry only in the working tree: a new [source] for it isn't staged either
+git -C ../m28 branch -q dev28
+quiet git filesync add -W file:///nowhere/m28.git q2 -p f
+check "set -b of an entry only in the working tree: nothing staged, said" \
+  "$(git filesync set -b dev28 q2 2>&1 | tail -1) $(git diff --cached --name-only | oneline)" \
+  ".git-filesync changed in the working tree only "
+git reset -q --hard && rm -f q2
+# a [source] renamed by hand: pull stages the new name, the old one goes
+git config -f .git-filesync --rename-section source.nowhere/m28b source.src28b
+git config -f .git-filesync file.p.source src28b
+(cd ../m28b && echo p2 > p && git commit -qam p2)
+quiet git filesync pull p
+check "pull after a [source] renamed by hand: the old one goes from the index" \
+  "$(git config --blob :.git-filesync source.nowhere/m28b.url) $(git config --blob :.git-filesync source.src28b.url)" \
+  " file:///nowhere/m28b.git"
+git reset -q --hard
+# pulling again with merged adaptations staged
+(cd ../m28 && sedi 's/^3$/3 up/' ml && git commit -qam ml3)
+quiet git filesync pull ml
+(cd ../m28 && sedi 's/^4$/4 up/' ml && git commit -qam ml4)
+check "pull again, merged adaptations staged: merged again" \
+  "$(rc git filesync pull ml) $(git show :ml | oneline)" "0 1 mine 2 3 up 4 up 5 up "
+git reset -q --hard
+# restore: a commit not upstream (history rewritten) is no reason to fail
+git config -f .git-filesync file.f.commit 1111111111111111111111111111111111111111 && git commit -qam bogus
+echo mine >> f
+check "restore with a synced commit not upstream" "$(rc git filesync restore f) $(cat f)" "0 $(git show HEAD:f)"
+git reset -q --hard HEAD~1
+# HEAD's entry in another upstream, neither cached nor mapped: not cloned
+git config -f .git-filesync source.nowhere/m7.url file:///nowhere/old7.git && git commit -qam old7
+git config -f .git-filesync source.nowhere/m7.url file:///nowhere/m7.git
+check "status: the upstream of HEAD's entry isn't fetched or cloned" "$(git filesync status w 2>&1 | grep -c -e Cloning -e fetching)" "0"
+git reset -q --hard HEAD~1
 # before the first commit: what is staged is all of the index
 cd "$T" && git init -q s28n && cd s28n
 git filesync source map file:///nowhere/m28.git "$T/m28" >/dev/null

@@ -433,8 +433,7 @@ other files are still synced. In scripts and CI: `git filesync pull --all
   tags](#newer-tags) on the source's branch.
 - **Pulling again before the commit** works, e.g. to another version: what
   a pull wrote counts as synced, not as a local change, and the proposed
-  message goes from what is committed. Merged adaptations are local
-  changes, though: commit them first.
+  message goes from what is committed – also for merged adaptations.
 
 #### Trying a newer version
 
