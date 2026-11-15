@@ -284,7 +284,11 @@ objects after a while (normally two weeks).
 
 ### `status`
 
-`status [PATH…]` – state of all (or the given) linked files.
+```
+git filesync status [PATH…] [-s] [-v] [--exit-code] [--no-fetch]
+```
+
+Shows the state of all (or the given) linked files.
 
 | Option | Effect |
 |---|---|
@@ -365,13 +369,18 @@ scripts and [CI](#ci).
 
 ### `pull`
 
-`pull PATH…`, `pull --all` – sync files to their current upstream version.
-What that is follows simple rules: a [tag](#pinning-to-a-tag) – exactly
-that tag; a [tag pattern](#tag-patterns) – the newest matching tag on the
-source's branch; otherwise the head of the branch (with a [mapped
-checkout](#source-map): of the branch there). Something given that doesn't
-exist upstream is an error; settings that merely don't fit together, like
-a tag that isn't on the branch, give a warning.
+```
+git filesync pull (PATH… | --all) [--commit REV | -b BRANCH | --tag TAG] [--overwrite] [-W]
+                  [--force] [-n] [-v] [--no-fetch]
+```
+
+Syncs files to their current upstream version. What that is follows simple
+rules: a [tag](#pinning-to-a-tag) – exactly that tag; a [tag
+pattern](#tag-patterns) – the newest matching tag on the source's branch;
+otherwise the head of the branch (with a [mapped checkout](#source-map):
+of the branch there). Something given that doesn't exist upstream is an
+error; settings that merely don't fit together, like a tag that isn't on
+the branch, give a warning.
 
 The synced files and their entries are staged, like after `git merge
 --squash`; nothing is committed. `pull` proposes **one commit** for all of
@@ -483,9 +492,14 @@ git filesync pull src/                     # ... and sync
 
 ### `diff`
 
-`diff [PATH…] [-- OPTS]` – local changes against the synced upstream
-version, in one `git diff` (pager, colors and options as usual; anything
-after `--` goes to `git diff`).
+```
+git filesync diff [PATH…] [--committed | --cached | --upstream [--commit REV | -b BRANCH | --tag TAG]]
+                  [--for-upstream] [--no-fetch] [-- OPTS]
+```
+
+Shows local changes against the synced upstream version, in one `git diff`
+(pager, colors and options as usual; anything after `--` goes to `git
+diff`).
 
 | Option | Effect |
 |---|---|
@@ -522,8 +536,13 @@ want first.
 
 ### `difftool`
 
-`difftool [PATH…] [-- OPTS]` – the same as [`diff`](#diff), file by file in
-your difftool (`diff.tool`); `OPTS` go to `git difftool` (e.g. `-t meld`).
+```
+git filesync difftool [PATH…] [--committed | --cached | --upstream [--commit REV | -b BRANCH | --tag TAG]]
+                      [-y | --prompt] [--no-fetch] [-- OPTS]
+```
+
+The same as [`diff`](#diff), file by file in your difftool (`diff.tool`);
+`OPTS` go to `git difftool` (e.g. `-t meld`).
 
 | Option | Effect |
 |---|---|
@@ -538,17 +557,21 @@ the tool are kept.
 
 ### `restore`
 
-`restore PATH…` – like `git restore`, from the layer below: the working
-tree from the index, with `-S` the index from `HEAD`. The entry gets the
-synced version it has there (what it selects – source, path, tag – stays,
-as after [`set`](#set)), the file that synced upstream version. So it goes
-back after `pull -W`, discards the changes of a file that isn't adaptable,
-or brings back a missing file. Unlike `pull --overwrite`, it brings in no
+```
+git filesync restore PATH… [-S] [-W] [--no-fetch]
+```
+
+Like `git restore`, from the layer below: the working tree from the index,
+with `-S` the index from `HEAD`. The entry gets the synced version it has
+there (what it selects – source, path, tag – stays, as after
+[`set`](#set)), the file that synced upstream version. So it goes back
+after `pull -W`, discards the changes of a file that isn't adaptable, or
+brings back a missing file. Unlike `pull --overwrite`, it brings in no
 newer upstream version. An entry not in the layer below goes, with its
-files; one not synced there is so again (e.g. a new link after `pull -W`). For a [linked
-directory](#linked-directories), `restore` takes its files (all, or those
-given – not while the entry is synced otherwise below, e.g. after
-`pull -W`); files of the base below are added, others deleted, the
+files; one not synced there is so again (e.g. a new link after `pull -W`).
+For a [linked directory](#linked-directories), `restore` takes its files
+(all, or those given – not while the entry is synced otherwise below, e.g.
+after `pull -W`); files of the base below are added, others deleted, the
 repository's own files stay. A deleted file git doesn't track is
 [kept](#discarded-content) too.
 
@@ -567,9 +590,15 @@ diff .git-filesync` and by hand.
 
 ### `add`
 
-`add URL|SOURCE FILE` – link FILE to a file in an upstream repository, given
-by its URL or by the name of a `[source]` (upstream first, then here – as
-in `git submodule add`):
+```
+git filesync add URL|SOURCE FILE|DIR [-b BRANCH] [--tag TAG] [-p PATH] [--commit REV]
+                 [--include PATTERN]… [--exclude PATTERN]… [--per-file]
+                 [--adaptable] [--overwrite] [--force] [-W] [-n] [--no-fetch]
+```
+
+`add URL|SOURCE FILE` links FILE to a file in an upstream repository,
+given by its URL or by the name of a `[source]` (upstream first, then here
+– as in `git submodule add`):
 
 - **URL**: the file joins the source with that URL and branch (`-b`,
   default: the upstream default branch), which is created if needed.
@@ -665,9 +694,13 @@ git filesync add https://github.com/owner/backend.git proto -p api \
 
 ### `rm`
 
-`rm PATH…` – like `git rm`: remove the files and their links, staged. If
-one has uncommitted changes (or was never committed), nothing is removed –
-unless `-f` / `--force` is given ([discarded content](#discarded-content) is
+```
+git filesync rm PATH… [-f] [-n]
+```
+
+Like `git rm`: removes the files and their links, staged. If one has
+uncommitted changes (or was never committed), nothing is removed – unless
+`-f` / `--force` is given ([discarded content](#discarded-content) is
 kept). A file already gone just loses its link. `-n` / `--dry-run` only
 lists what would be removed; to keep the files, use [`unlink`](#unlink).
 Of a [linked directory](#linked-directories), `rm` removes the entry's
@@ -675,12 +708,20 @@ files; those of this repository stay.
 
 ### `unlink`
 
-`unlink PATH…` – remove the links, keep the files; `.git-filesync` is
-staged. `-n` / `--dry-run` only lists them.
+```
+git filesync unlink PATH… [-n]
+```
+
+Removes the links and keeps the files; `.git-filesync` is staged. `-n` /
+`--dry-run` only lists them.
 
 ### `mv`
 
-`mv OLD NEW` – move a linked file and its link, both staged, like `git mv`:
+```
+git filesync mv OLD… NEW [-n]
+```
+
+`mv OLD NEW` moves a linked file and its link, both staged, like `git mv`:
 NEW may be an existing directory; the directory NEW goes into must exist,
 and a NEW ending in `/` must be an existing directory. `mv OLD… DIR` moves
 several files into the existing directory DIR – all or none. A [linked
@@ -691,10 +732,19 @@ repository in it. `-n` / `--dry-run` only shows what would be moved.
 
 ### `set`
 
-`set PATH… OPTIONS` – change the link of linked files: source, tag,
-upstream path, adaptable, patterns. Only `.git-filesync` changes (staged);
-`status` then shows what is to sync, and `pull` syncs. `set` says so
-(`pending until pull`) unless only `adaptable` changed.
+```
+git filesync set PATH… [--source URL|SOURCE] [-b BRANCH] [--tag TAG | --no-tag] [-p PATH]
+                       [--adaptable | --no-adaptable]
+                       [(--include PATTERN)… | --no-include] [(--exclude PATTERN)… | --no-exclude]
+                       [-n] [--no-fetch]
+git filesync set PATH…
+git filesync set --list
+```
+
+Changes the link of linked files: source, tag, upstream path, adaptable,
+patterns. Only `.git-filesync` changes (staged); `status` then shows what
+is to sync, and `pull` syncs. `set` says so (`pending until pull`) unless
+only `adaptable` changed.
 
 `set PATH…` without options shows the links as the `set` command that sets
 them, one line per entry – every aspect, also those not set (`--no-tag`),
@@ -762,19 +812,25 @@ git filesync set cfg/ --no-tag                   # follow the branch again
 
 ### `edit`
 
-`edit` – open `.git-filesync` in your editor, like `git config --edit`
-(`GIT_EDITOR`, `core.editor`, `VISUAL`, `EDITOR`); afterwards it is checked
-and the sections that changed are staged – as for other commands, a synced
-entry the index hasn't yet only with its file (`pull` stages it). Only
-comments or layout changed: nothing is staged. A file that can't be read
-any more is not staged – run `edit` again to fix it; with a merge conflict
-in `.git-filesync`, which every other command refuses, `edit` is how to
-resolve it (then the whole file is staged; deleted or emptied there, its
-removal). Deleted on one side of the merge: `git rm .git-filesync`, or
-`git checkout --theirs .git-filesync` (or `--ours`), then `edit`. Gaps that `status` would report (a missing `[source]`,
-`url`, `branch` or `path`, only one of `commit` and `blob` (`tree`),
-overlapping entries, an unused source) are shown as warnings. `edit` keeps whatever you write: a changed
-`commit` or `blob` changes what counts as an adaptation.
+```
+git filesync edit
+```
+
+Opens `.git-filesync` in your editor, like `git config --edit`
+(`GIT_EDITOR`, `core.editor`, `VISUAL`, `EDITOR`); afterwards it is
+checked and the sections that changed are staged – as for other commands,
+a synced entry the index hasn't yet only with its file (`pull` stages it).
+Only comments or layout changed: nothing is staged. A file that can't be
+read any more is not staged – run `edit` again to fix it; with a merge
+conflict in `.git-filesync`, which every other command refuses, `edit` is
+how to resolve it (then the whole file is staged; deleted or emptied
+there, its removal). Deleted on one side of the merge: `git rm
+.git-filesync`, or `git checkout --theirs .git-filesync` (or `--ours`),
+then `edit`. Gaps that `status` would report (a missing `[source]`, `url`,
+`branch` or `path`, only one of `commit` and `blob` (`tree`), overlapping
+entries, an unused source) are shown as warnings. `edit` keeps whatever
+you write: a changed `commit` or `blob` changes what counts as an
+adaptation.
 
 Your comments and layout are kept: commands change only the lines they
 have to. A changed value keeps the indentation and comment of its line, a
@@ -783,8 +839,15 @@ to its last key, so comments after it stay.
 
 ### `source`
 
-`source [ACTION …]` – list and change the `[source]` sections, like
-`git remote`. Only `.git-filesync` changes (staged).
+```
+git filesync source [-v]
+git filesync source rename OLD NEW [-n]
+git filesync source set NAME [--url URL] [-b BRANCH] [-n] [--no-fetch]
+git filesync source set --list
+```
+
+Lists and changes the `[source]` sections, like `git remote`. Only
+`.git-filesync` changes (staged).
 
 | Command | Effect |
 |---|---|
@@ -793,8 +856,6 @@ to its last key, so comments after it stay.
 | `source set NAME --url URL` | change the URL, e.g. after upstream moved; the synced versions are looked up there as for [`set --source`](#set) |
 | `source set NAME -b BRANCH` | follow BRANCH, for all files of the source; for [pinned](#pinning-to-a-tag) ones where newer tags are looked for |
 | `source set NAME` | show the source as the command that sets it, like [`set`](#set) (`--list`: all sources) |
-
-`rename` and `source set` take `-n` / `--dry-run`.
 
 ```
 $ git filesync source -v
@@ -808,10 +869,15 @@ a change that would make two sources identical – move the files with
 
 ### `source map`
 
-`source map [URL|SOURCE [DIR]]` – use the local checkout DIR instead of
-fetching from URL (or from the URL of the `[source]` SOURCE). The mapping
-belongs to the URL, so it applies to every source with it. Without DIR, the
-mappings are listed.
+```
+git filesync source map [URL|SOURCE]
+git filesync source map URL|SOURCE DIR [--global]
+git filesync source map URL|SOURCE --unset [--global]
+```
+
+Uses the local checkout DIR instead of fetching from URL (or from the URL
+of the `[source]` SOURCE). The mapping belongs to the URL, so it applies
+to every source with it. Without DIR, the mappings are listed.
 
 | Option | Effect |
 |---|---|
@@ -894,6 +960,12 @@ Clones used in the last minutes are never removed; a removed one is cloned
 again when needed.
 
 ### `hooks`
+
+```
+git filesync hooks
+git filesync hooks install [--force]
+git filesync hooks uninstall
+```
 
 `hooks install` adds a `pre-push` hook (fetches) and a `post-merge` hook
 (cached state only). Both report pending syncs, errors, missing files and

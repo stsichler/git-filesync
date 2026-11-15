@@ -228,11 +228,11 @@ Advanced commands:
         --tag TAG               pin to TAG from now on (a pattern: the newest
                                 matching tag on the source's branch)
         --no-tag                follow the source's branch again
-        -p, --path PATH         another upstream path (one file); its
-                                current version becomes the base, as for add
-                                (the file stays as it is); a [dir]: a new
-                                link then, compared by pull; the same path:
-                                no change
+        -p, --path PATH         another upstream path (one file or
+                                directory); its current version becomes
+                                the base, as for add (the file stays as it
+                                is); a [dir]: a new link then, compared by
+                                pull; the same path: no change
         --adaptable, --no-adaptable  allow local adaptations / not any more
         --include, --exclude PATTERN  [dir]: new patterns (repeatable); the
                                 files follow at the next pull: those they
@@ -7171,8 +7171,8 @@ def run(argv=None):
                                  "on the source's branch), without syncing")
     g.add_argument("--no-tag", action="store_true",
                    help="follow the source's branch again, without syncing")
-    p.add_argument("-p", "--path", help="another upstream path (one file); its current "
-                                        "version becomes the base, as for add")
+    p.add_argument("-p", "--path", help="another upstream path (one file or directory); its "
+                                        "current version becomes the base, as for add")
     g = p.add_mutually_exclusive_group()
     g.add_argument("--adaptable", action="store_const", const=True,
                    help="allow local adaptations")
@@ -7244,7 +7244,7 @@ def run(argv=None):
     a.add_argument("url", nargs="?", metavar="URL|SOURCE",
                    help="upstream URL, or the name of a [source] for its URL "
                         "(without DIR: list its mappings)")
-    a.add_argument("dir", nargs="?", help="local checkout of the upstream repository")
+    a.add_argument("dir", nargs="?", metavar="DIR", help="local checkout of the upstream repository")
     a.add_argument("--unset", action="store_true", help="remove the mapping for the URL")
     a.add_argument("--global", dest="glob", action="store_true",
                    help="use the global git config instead of this repository's")
