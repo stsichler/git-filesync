@@ -3860,19 +3860,23 @@ def print_long(repo, sts, verbose, gone=()):
         rows += [({"D": "unlinked", "A": "new file", "U": "updated"}[getattr(st, attr)], st,
                   None, "dim") for st in gone if getattr(st, attr)]
         return sorted(rows, key=lambda r: r[1].rel)
+    def restore_hints(rows, opt, what):
+        """How to go back: an unlink changed only .git-filesync (git restore)."""
+        return ([f'use "git filesync restore {opt}<file>..." to restore {what}']
+                if any(r[0] != "unlinked" for r in rows) else []) + \
+            ([f'use "git restore {opt}{REGISTRY}" to undo unlinking (all its changes go)']
+             if any(r[0] == "unlinked" for r in rows) else [])
     staged = layer_rows("staged_code", 1, lambda st: st.index_adapted)
     section("Changes to be committed:",
-            ['use "git commit" to commit them',
-             'use "git filesync restore -S <file>..." to restore the index from HEAD'],
-            staged, "green")
+            ['use "git commit" to commit them']
+            + restore_hints(staged, "-S ", "the index from HEAD"), staged, "green")
     unstaged = layer_rows("unstaged_code", 2, lambda st: st.local == "modified")
     section("Changes not staged for commit:",
             (['use "git filesync pull <file>..." to stage them']
              if any(r[0] in ("updated", "new file") for r in unstaged) else [])
             + (['use "git add <file>..." to stage them']
                if any(r[0] == "modified" for r in unstaged) else [])
-            + ['use "git filesync restore <file>..." to restore them from the index'],
-            unstaged, "red")
+            + restore_hints(unstaged, "", "them from the index"), unstaged, "red")
     dirty = staged + unstaged
 
     warnings = [(st.rel, w) for st in ok for w in st.warnings] + \

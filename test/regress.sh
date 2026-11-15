@@ -3321,6 +3321,8 @@ git reset -q --hard
 quiet git filesync unlink g
 check "unlink staged: in status" \
   "$(git filesync status -s | grep ' g$') $(git filesync status | grep -cE "^${TAB}unlinked:[[:space:]]+g\$")" " D  g 1"
+check "... the hint: git restore of the registry" \
+  "$(git filesync status | grep -c 'git filesync restore') $(git filesync status | grep -c '(use "git restore -S .git-filesync" to undo unlinking (all its changes go))')" "0 1"
 git reset -q --hard
 # set -p after pull -W: refused (the new base would be the working tree's)
 (cd ../m28 && echo f3 > f && git commit -qam f3)
