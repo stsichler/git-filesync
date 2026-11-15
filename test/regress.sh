@@ -3247,6 +3247,18 @@ git reset -q --hard
 quiet git filesync pull -W ml && echo more >> ml
 check "... changed after it: refused" "$(rc git filesync pull ml)" "2"
 git reset -q --hard
+quiet git filesync pull ml && quiet git filesync restore -S ml
+check "pull, then restore -S of an adapted file: pull again stages the merge" \
+  "$(rc git filesync pull ml) $(git status --porcelain ml | oneline)$(git show :ml | head -1)" "0 M  ml 1 mine"
+git reset -q --hard
+# a new link in the working tree: HEAD's and the index's adaptations against
+# their own entries' bases
+echo staged >> ml && git add ml
+git config -f .git-filesync --unset file.ml.commit && git config -f .git-filesync --unset file.ml.blob
+check "new link, synced in the index: the adaptations of HEAD and the index" \
+  "$(stn ml) $(git filesync diff --committed ml | grep -c '^+1 mine') $(git filesync diff --cached ml | grep -c '^+staged')" \
+  "NMU (adapted) 1 1"
+git reset -q --hard
 # a [dir]: the same; a file pull -W --force kept as one of this repository stays
 quiet git filesync pull -W --force md && echo precious >> md/b
 check "pull [dir] after pull -W: merged files staged, the file kept stays" \
@@ -3290,6 +3302,13 @@ git reset -q --hard
 quiet git filesync pull hh && git restore --staged hh
 check "pull --all: a stale file synced, not left out" \
   "$(git filesync pull --all 2>&1 | grep -c '^warning: hh:') $(git status --porcelain hh | oneline)" "0 M  hh "
+git reset -q --hard
+# an entry staged without its [source]: an error for it
+git show :.git-filesync > "$T/reg28" && git config -f "$T/reg28" --remove-section source.nowhere/m28
+git update-index --cacheinfo "100644,$(git hash-object -w "$T/reg28"),.git-filesync"
+check "staged entry without its [source]: an error for it" \
+  "$(git filesync status -s hh 2>&1 | head -1) $(rc git filesync restore -S hh)" \
+  "error: hh: incomplete entry in .git-filesync as staged (needs a source with url and branch, and path) 2"
 git reset -q --hard
 # source rename of a source only in the working tree: said
 quiet git filesync add -W file:///nowhere/m7m.git w2 -p w
@@ -3373,6 +3392,9 @@ git reset -q --hard
 git update-index --cacheinfo "100644,$(printf '[broken\n' | git hash-object -w --stdin),.git-filesync"
 check "a staged registry that can't be read: an error per entry" \
   "$(git filesync status -s 2>/dev/null | grep -c '^E  ') $(rc git filesync status -s)" "$(git config -f .git-filesync --name-only --get-regexp '[.]path$' | wc -l | tr -d ' ') 2"
+check "... rm refused before it changes anything" \
+  "$(git filesync rm g 2>&1 | grep -c "fix it with 'git filesync edit'") $(rc git filesync rm g) $(git status --porcelain -uno | oneline)" \
+  "1 2 MM .git-filesync "
 check "... edit stages it whole" \
   "$(GIT_EDITOR=true git filesync edit 2>&1) $(rc git diff --quiet .git-filesync)" \
   ".git-filesync: staged as a whole (the staged one couldn't be read) 0"
@@ -3393,6 +3415,23 @@ git filesync source map file:///nowhere/m28.git "$T/m28" >/dev/null
 quiet git filesync add file:///nowhere/m28.git f
 check "no commit yet: a staged file isn't also unstaged" \
   "$(git filesync status -s) $(git filesync status | grep -c 'new file:')" " A  f 1"
+# a lower layer's source with another URL: nothing missing is fetched from its
+# cache clone (Git before 2.45 has no GIT_NO_LAZY_FETCH)
+cd "$T" && git init -q m28z && (cd m28z && echo 1 > z && git add z && git commit -qm one)
+for r in m28z m28zb; do git clone -q --bare m28z $r.git && git -C $r.git config uploadpack.allowFilter true; done
+git init -q s28z && cd s28z
+addc --adaptable "$TURL/m28z.git" z
+(cd ../m28z && echo 2 > z && git commit -qam two && git push -q ../m28z.git HEAD)
+git config -f .git-filesync file.z.commit "$(git -C ../m28z rev-parse HEAD)"
+git config -f .git-filesync file.z.blob "$(git -C ../m28z rev-parse HEAD:z)"
+echo 2 > z && git commit -qam "synced by hand" && echo 3 > z
+git config -f .git-filesync "source.$(git config -f .git-filesync file.z.source).url" "$TURL/m28zb.git"
+git config -f .git-filesync file.z.commit "$(git -C ../m28z rev-parse HEAD~)"
+git config -f .git-filesync file.z.blob "$(git -C ../m28z rev-parse HEAD~:z)"
+quiet git filesync pull z
+cache28z=$(dirname "$(grep -l "m28z[.]git" "$FILESYNC_CACHE"/*/config)")
+check "a lower layer's source: nothing fetched" "$(GIT_NO_LAZY_FETCH=1 git -C "$cache28z" \
+  -c protocol.allow=never cat-file -e "$(git -C ../m28z rev-parse HEAD:z)" 2>/dev/null || echo missing)" "missing"
 
 # =============================================================================
 section "Upstream repositories untouched"

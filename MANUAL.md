@@ -99,8 +99,9 @@ committed like any other file, in git-config format:
   with [`edit`](#edit) – just `source` and `path` (and `tag`, `adaptable`
   as needed) – then run `pull --all`. Until its first sync, a new link has
   nothing to [`restore`](#restore) or `diff` against (`diff --upstream`
-  shows the whole file); `pull -n` tells whether the first sync would be
-  refused.
+  shows the whole file; `--cached` and `--committed` compare against the
+  entry of the index and HEAD, if they have one with a base); `pull -n`
+  tells whether the first sync would be refused.
 - Everything else may be edited by hand, but [`set`](#set),
   [`source`](#source), [`rm`](#rm), [`unlink`](#unlink) and [`mv`](#mv) know
   what a change means. When the last link is removed, the file is deleted.
