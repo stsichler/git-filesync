@@ -1579,7 +1579,7 @@ class Repo:
         self._staged = None       # paths staged differently from HEAD (staged)
         self.layers = {}          # see registry(): {layer: its Registry}
         self.rows = None          # see registry_rows()
-        self.ctx = None           # the Context of the run (see staged_as_base)
+        self.ctx: Optional["Context"] = None    # the Context of the run (see staged_as_base)
 
     def git(self, args, **kw):
         return git(args, cwd=self.top, **kw)
@@ -2661,7 +2661,7 @@ class Registry:
             if changes:
                 apply(changes, set(), {})
         # what the staged entries use is there; what they don't use may go
-        used = {v.get("source") for s in ("file", "dir") for v in have[s].values()}
+        used = {v["source"] for s in ("file", "dir") for v in have[s].values() if v.get("source")}
         need = {}
         for n in sorted(used - set(have["source"])):
             if n in self.sources:
@@ -3486,7 +3486,8 @@ def fill_members(repo, st, base, upstream):
             # one's counts as the working tree's)
             same = e is not None and norm_url(e.url) == norm_url(dlink.url)
             b = blob if same or fs is None else base.get(below)
-            bases.append((b, up_join(e.path if same else dlink.path, below)) if b else None)
+            bases.append((b, up_join(e.path if e is not None and same else dlink.path, below))
+                         if b else None)
             path = e.path if e is not None and (same or lsrc is not None) else dlink.path
             matchers.append(None if not blob else blob_matcher(
                 repo, lsrc or st.src, m.rel, blob, up_join(path, below), m, warn=fs is base))
@@ -5706,11 +5707,11 @@ def cmd_restore(ctx, repo, args):
                     if lower is None:
                         removed.add(entry.rel)
         if lower is None and entry.only is None and changed:
-            what = {("index",): "unstaged", ("worktree",): "removed"}.get(
-                tuple(sides), "removed and unstaged")
+            what = {"index": "unstaged", "worktree": "removed"}[sides[0]] if len(sides) == 1 \
+                else "removed and unstaged"
             said.append(f"{entry.shown_rel}: {paint(what, 'green')} (not in "
                         f"{'HEAD' if args.staged else 'the index'} yet)")
-        elif changed:
+        elif changed and lower is not None:
             what = {("index",): "restored in the index", ("worktree",): "restored"}.get(
                 tuple(sorted(changed)), "restored and staged")
             src = next(iter(base.values()))[0] if base else None
@@ -6396,7 +6397,7 @@ def cmd_source(ctx, repo, args):
             if not args.verbose:
                 print(name)
                 continue
-            used = [reg.entry(r).shown_rel for r in source_files(reg, name)]
+            used = [r + "/" if r in reg.dirs else r for r in source_files(reg, name)]
             print(f"{name}\t{s.get('url', '')} ({s.get('branch') or 'branch missing'}, "
                   f"{entries_text(used) or '0 files'})")
         return EXIT_OK
