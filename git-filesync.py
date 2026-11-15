@@ -2313,6 +2313,13 @@ def staged_as_base(repo, reg, rel):
         return False
 
 
+def section_changes(sect, name, was, now):
+    """{(sect, name, key): value (None: removed)} - the changes (see
+    edit_registry) that make a section with the keys was one with now."""
+    return {(sect, name, k): now.get(k) for k in list(now) + [k for k in was if k not in now]
+            if now.get(k) != was.get(k)}
+
+
 def registry_model(reg):
     """{section: {name: {key: value}}} of a Registry, a copy to change (see
     apply_changes)."""
@@ -2612,9 +2619,7 @@ class Registry:
 
         def copy(s, n):
             """A section as the working tree has it."""
-            want, now = self.store(s).get(n, {}), have[s].get(n, {})
-            return {(s, n, k): want.get(k) for k in list(want) + [k for k in now if k not in want]
-                    if want.get(k) != now.get(k)}
+            return section_changes(s, n, have[s].get(n, {}), self.store(s).get(n, {}))
 
         mine = {(self.kind(r), r) for r in whole}
         without = set()           # synced entries whose file the index hasn't
@@ -2955,6 +2960,7 @@ class FileState:
     unstaged_code: Optional[str] = None
     index_adapted: bool = False
     where: Optional[str] = None
+    own: tuple = ()           # all layers with a modification of their own (where: the first)
     head_base: Optional[tuple] = None   # HEAD's other base: see head_base()
     bases: tuple = (None, None)   # (blob, upstream path) of the bases in HEAD and the index
     changed: bool = False     # upstream version differs from the base
@@ -3184,7 +3190,9 @@ def local_state(repo, st, link, matchers, syncs):
         st.committed = "adapted" if adapted(head, mh, lambda: repo.read_blob(head)) \
             else "unmodified"
     st.staged_code = layer_code(sh, si, head, index)
-    st.unstaged_code = "D" if not exists and not st.unsynced else layer_code(si, sw, index, work)
+    # (missing: 'D' where the file goes - here, unless its deletion is staged)
+    st.unstaged_code = "D" if not exists and not st.unsynced and index is not None \
+        else layer_code(si, sw, index, work)
     if st.unsynced:               # compared with upstream by its first sync
         st.local = "missing" if not exists else "clean"
         return
@@ -3205,7 +3213,7 @@ def local_state(repo, st, link, matchers, syncs):
             own.append("worktree")
     else:
         st.local = "modified" if st.index_adapted else "clean"
-    st.where = own[0] if own else None
+    st.own, st.where = tuple(own), own[0] if own else None
     st.violation = not st.adaptable and (st.committed == "adapted" or st.index_adapted
                                          or st.local == "modified")
 
@@ -3629,7 +3637,9 @@ def short_code(st):
     up = upstream_state(st, note=False)
     x = {"pending": "P", "older": "O", "diverged": "D", "new": "N", "renamed": "R",
          "deleted": "X"}[up[0]] if up else " "
-    return x + (st.staged_code or " ") + ("D" if st.missing else st.unstaged_code or " ")
+    # (missing: deleted in the working tree - unless the deletion is staged, as git shows it)
+    return x + (st.staged_code or " ") + \
+        ("D" if st.missing and st.staged_code != "D" else st.unstaged_code or " ")
 
 
 def short_note(st):
@@ -3788,7 +3798,9 @@ def print_long(repo, sts, verbose):
             upper = st.link if i == 2 else st.entries[1]
             text = not_allowed if not st.adaptable and adapted(st) else \
                 "NOT ALLOWED: still linked" if code == "D" else \
-                versions(st, lower, upper) if code in "AU" else None
+                ", ".join([v for v in [versions(st, lower, upper)] if v]
+                          + (["adapted"] if adapted(st) else [])) or None \
+                if code in "AU" else None
             rows.append((labels[code], st) + note(st, ms, text, "boldred" if code in "MD" else "dim"))
         return rows
     staged = layer_rows("staged_code", 1, lambda st: st.index_adapted)
@@ -3845,8 +3857,18 @@ def cmd_status(ctx, repo, args):
             report_error(st)
     if args.short:
         print_short(repo, sts)
-    else:
-        print_long(repo, sts, args.verbose)
+        return rc
+    # the synced commits of the entries a layer changes (see versions), asked at once
+    changed = [st for st in sts if not st.error and st.src and
+               {st.staged_code, st.unstaged_code} & {"A", "U"}]
+    for src in {id(st.src): st.src for st in changed}.values():
+        try:
+            src.shorts(e.commit for st in changed if st.src is src
+                       for e in st.entries + (st.link,) if e is not None and e.commit
+                       and norm_url(e.url) == norm_url(st.link.url))
+        except FsError:
+            pass                  # (asked one by one, see versions)
+    print_long(repo, sts, args.verbose)
     return rc
 
 
@@ -4084,6 +4106,44 @@ def stale(st):
     nothing is lost."""
     return not st.adaptable and st.committed != "adapted" and st.where is None and \
         (st.index_adapted or st.local == "modified")
+
+
+def merged_layers(repo, st):
+    """pull (R3): in a layer of an adaptable file, the merge of the file of
+    the layer below from that one's base to the layer's own - in the index
+    also to the working tree's (pull -W, then git add) - is no modification
+    of its own: what pull -W wrote, consistent with its entry. Merged again
+    to tell (only here, not for status); st.own and st.where updated."""
+    if not st.adaptable or not st.own:
+        return
+    work = (st.old_blob, st.link.path)
+    below = {"index": (st.head_blob, st.bases[0], [st.bases[1], work], st.index_blob),
+             "worktree": (st.index_blob, st.bases[1], [work], None)}
+    own = []
+    for layer in st.own:
+        oid, base, targets, have = below[layer]
+        if not oid or not base or not merges_to(
+                repo, st, oid, base, targets,
+                have or repo.worktree_blob(repo.top / st.rel)):
+            own.append(layer)
+    st.own, st.where = tuple(own), own[0] if own else None
+
+
+def merges_to(repo, st, oid, base, targets, have):
+    """Is the file have (blob id) the clean merge of the file oid of this
+    repository, with base (blob, upstream path), to one of the targets?"""
+    try:
+        ours = repo.read_content(oid, st.rel)
+        old = repo.normalize(st.src.read_content(*base), st.rel)
+        for t in targets:
+            if t and t[0] and t != base:
+                theirs = repo.normalize(st.src.read_content(*t), st.rel)
+                conflicts, content = merge3(ours, old, theirs, ["ours", "base", "theirs"])
+                if not conflicts and repo.blob_ids([(st.rel, content)])[st.rel] == have:
+                    return True
+    except FsError:
+        pass
+    return False
 
 
 def local_changes(st):
@@ -4551,16 +4611,23 @@ def staged_as_is(repo, link):
 
 def staged_only(repo, src, dlink, mine):
     """Files of a [dir] entry that only its staged version has (another base
-    there, e.g. after pull -W), not among mine (rels): still in the index,
-    they go with the pull or rm that stages the entry."""
+    there, e.g. after pull -W), not among mine (rels), gone from the working
+    tree: still in the index, they go with the pull or rm that stages the
+    entry. One still there is a file of this repository (pull -W --force
+    kept it): it stays."""
     staged = repo.registry("index").entry(dlink.rel)
     if staged is None or not staged.is_dir or sync_keys(staged.v) == sync_keys(dlink.v):
         return []
     try:
+        if norm_url(staged.url) != norm_url(dlink.url):     # its own upstream repository
+            if repo.ctx is None:
+                return []
+            src = repo.ctx.source(staged.url, staged.ref, staged.name, staged.line)
         base = dir_base(src, staged) or {}
     except FsError:
         return []
-    rels = [join_rel(dlink.rel, b) for b in base if join_rel(dlink.rel, b) not in mine]
+    rels = [r for r in (join_rel(dlink.rel, b) for b in base)
+            if r not in mine and not os.path.lexists(repo.top / r)]
     return sorted(repo.index_entries(rels)) if rels else []
 
 
@@ -4661,6 +4728,13 @@ def cmd_pull(ctx, repo, args):
     contents = {}                       # rel -> synced content (normalized form)
     deletes = []                        # files deleted with a [dir] entry's sync
     states = [evaluate(ctx, repo, link) for link in links]
+    for st in states:             # what pull -W merged: nothing of its own
+        for m in st.base_members if st.link.is_dir else [st]:
+            merged_layers(repo, m)
+        if st.link.is_dir and not st.error:
+            where = {m.where for m in st.base_members}
+            st.where = "index" if "index" in where else "worktree" if "worktree" in where \
+                else None
     # what syncing needs, asked at once: upstream contents, short commit ids,
     # attributes of the files here
     repo.check_plain([st.rel for st in states if not st.link.is_dir]
@@ -5431,10 +5505,11 @@ def cmd_restore(ctx, repo, args):
     for entry in select_links(repo, reg, args.files):
         try:
             lower = layer_entry(repo, entry, below)
-            # nothing synced in the layers restored nor below: nothing to restore
+            # nothing synced anywhere: nothing to restore (only in the working
+            # tree, as after add -W: restore -S says so, see below)
             here = [entry if side == "worktree" else layer_entry(repo, entry, "index")
                     for side in sides]
-            if all(e is None or e.unsynced for e in here + [lower]):
+            if entry.unsynced and all(e is None or e.unsynced for e in here + [lower]):
                 raise FsError("not synced yet, nothing to restore - sync it with "
                               f"'git filesync pull {path_arg(repo, entry.rel)}'")
             if lower is None and entry.only is not None:
@@ -5529,7 +5604,7 @@ def cmd_restore(ctx, repo, args):
                     changed.add("index")
                     if lower is None:
                         removed.add(entry.rel)
-        if lower is None and entry.only is None:
+        if lower is None and entry.only is None and changed:
             what = {("index",): "unstaged", ("worktree",): "removed"}.get(
                 tuple(sides), "removed and unstaged")
             said.append(f"{entry.shown_rel}: {paint(what, 'green')} (not in "
@@ -6134,7 +6209,13 @@ def cmd_edit(ctx, repo, args):
                       f"no {REGISTRY} yet - link files with 'git filesync add'")
     before = path.read_bytes()
     p = git(["config", "-f", path, "--list", "-z"], check=False)
-    old = ({}, {}, {}) if p.returncode else parse_registry(p.stdout)
+    old = parse_registry(p.stdout) if not p.returncode else ({}, {}, {})
+    if p.returncode and not conflict:     # can't be read: what changed is against the index
+        try:
+            staged = repo.registry("index")
+            old = (staged.sources, staged.files, staged.dirs)
+        except FsError:
+            pass
     # the editor git would use (GIT_EDITOR, core.editor, VISUAL, EDITOR), run
     # like git runs it - not via `git config --edit`, which exits with 0 even
     # if the editor fails
@@ -6173,9 +6254,7 @@ def cmd_edit(ctx, repo, args):
             if name not in now:
                 drop.add((sect, name))
                 continue
-            for k in list(now[name]) + [k for k in was.get(name, {}) if k not in now[name]]:
-                if now[name].get(k) != was.get(name, {}).get(k):
-                    pending[(sect, name, k)] = now[name].get(k)
+            pending.update(section_changes(sect, name, was.get(name, {}), now[name]))
     if not (pending or drop):
         print(f"{REGISTRY}: only comments or layout changed - nothing staged")
         return EXIT_OK

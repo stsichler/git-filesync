@@ -3227,6 +3227,46 @@ check "... deleted in the editor: removed and staged" \
   "$(GIT_EDITOR=rm git filesync edit 2>&1) $(git ls-files -s .git-filesync | wc -l | tr -d ' ')" \
   ".git-filesync: conflict resolved - removed and staged 0"
 git reset -q --hard
+# an adaptable file after pull -W: the merge it wrote is nothing of its own -
+# pull stages it (also after git add); a change after it is refused
+(cd ../m28 && printf '1\n2\n3\n4\n5\n' > ml && mkdir md && printf '1\n2\n3\n4\n5\n' > md/a \
+  && echo b > md/b && git add ml md && git commit -qm ml)
+addc file:///nowhere/m28.git ml --adaptable && addc file:///nowhere/m28.git md --adaptable
+sedi 's/^1$/1 mine/' ml md/a && echo mine >> md/b && git commit -qam "adapt ml md"
+(cd ../m28 && sedi 's/^5$/5 up/' ml md/a && git rm -q md/b && git commit -qam "ml md")
+quiet git filesync pull -W ml
+check "pull -W of an adapted file: status says adapted" \
+  "$(git filesync status | grep -cE "^${TAB}updated:[[:space:]]+ml  \([0-9a-f]+ -> [0-9a-f]+, adapted\)\$")" "1"
+check "... pull stages it, the adaptation kept" \
+  "$(rc git filesync pull ml) $(git status --porcelain ml | oneline)$(git show :ml | head -1)" "0 M  ml 1 mine"
+git reset -q --hard
+quiet git filesync pull -W ml && git add ml
+check "... after git add of the file too" "$(rc git filesync pull ml) $(git status --porcelain ml | oneline)" "0 M  ml "
+git reset -q --hard
+quiet git filesync pull -W ml && echo more >> ml
+check "... changed after it: refused" "$(rc git filesync pull ml)" "2"
+git reset -q --hard
+# a [dir]: the same; a file pull -W --force kept as one of this repository stays
+quiet git filesync pull -W --force md && echo precious >> md/b
+check "pull [dir] after pull -W: merged files staged, the file kept stays" \
+  "$(rc git filesync pull md) $(git status --porcelain md | oneline)$(tail -1 md/b)" \
+  "0 M  md/a  M md/b precious"
+git reset -q --hard
+# restore -S of an entry only in the working tree: nothing to restore there
+quiet git filesync add -W file:///nowhere/m28.git aw -p f
+check "restore -S after add -W: nothing to restore" "$(git filesync restore -S aw 2>&1) $(rc git filesync restore -S aw)" \
+  "aw: nothing to restore 0"
+git reset -q --hard && rm -f aw
+# edit of a registry that couldn't be read: the changes against the index
+printf '[broken\n' >> .git-filesync
+printf '#!/bin/sh\ngit show :.git-filesync > "$1" && git config -f "$1" --remove-section file.ka\n' > "$T/ed28b.sh"
+check "edit of a broken registry: a removed section staged" \
+  "$(GIT_EDITOR="sh '$T/ed28b.sh'" git filesync edit >/dev/null 2>&1; git config --blob :.git-filesync file.ka.path)" ""
+git reset -q --hard
+# git rm of a linked file: the deletion staged, as git shows it
+git rm -q k
+check "git rm of a linked file: deleted in the index only" "$(stn k)" " D  (missing!)"
+git reset -q --hard
 # before the first commit: what is staged is all of the index
 cd "$T" && git init -q s28n && cd s28n
 git filesync source map file:///nowhere/m28.git "$T/m28" >/dev/null

@@ -450,9 +450,9 @@ git filesync pull src/foo.c                # or take it (stages it)
 ```
 
 Meanwhile `status` shows `updated` under `Changes not staged for commit`
-(`-s`: `  U`). Adaptations merged by `pull -W` count as local changes:
-`pull` refuses to take them – `git add` the file and `.git-filesync`
-instead.
+(`-s`: `  U`), with `adapted` for merged adaptations. `pull` takes the
+merge `pull -W` wrote; changes you made after it are local changes, which
+it refuses.
 
 #### Another branch or tag, once
 

@@ -160,7 +160,7 @@ Basic commands – what you need day to day:
 | `status [PATH…]` | state of the linked files, like `git status` |
 | `pull PATH…`, `pull --all` | sync files from upstream, keeping local adaptations |
 | `diff [PATH…]`, `difftool [PATH…]` | local changes against the synced upstream version |
-| `restore PATH…` | files back to the synced upstream version, like `git restore` |
+| `restore PATH…` | files and entries back to what the index has (`-S`: HEAD), like `git restore` |
 | `add URL\|SOURCE FILE\|DIR` | link a file (or a directory) to upstream |
 | `rm PATH…`, `unlink PATH…`, `mv OLD… NEW` | remove links with their files (like `git rm`) or without, move them |
 
