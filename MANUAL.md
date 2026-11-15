@@ -434,6 +434,10 @@ other files are still synced. In scripts and CI: `git filesync pull --all
 - **Pulling again before the commit** works, e.g. to another version: what
   a pull wrote counts as synced, not as a local change, and the proposed
   message goes from what is committed – also for merged adaptations.
+- **Undoing a pull by hand:** `git restore --staged FILE` leaves the new
+  entry staged with the old file – for an adaptable file, upstream's
+  changes then count as adaptations. Undo both with `git filesync restore
+  -S FILE`.
 
 #### Trying a newer version
 
