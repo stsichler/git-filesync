@@ -543,8 +543,10 @@ or brings back a missing file. Unlike `pull --overwrite`, it brings in no
 newer upstream version. An entry not in the layer below goes, with its
 files; one not synced there is so again (e.g. a new link after `pull -W`). For a [linked
 directory](#linked-directories), `restore` takes its files (all, or those
-given); files of the base below are added, others deleted, the
-repository's own files stay.
+given – not while the entry is synced otherwise below, e.g. after
+`pull -W`); files of the base below are added, others deleted, the
+repository's own files stay. A deleted file git doesn't track is
+[kept](#discarded-content) too.
 
 | Option | Effect |
 |---|---|
@@ -707,7 +709,7 @@ git filesync set third_party/lib/ --source https://github.com/owner/lib.git -b m
 | `-b`, `--branch BRANCH` | follow BRANCH (with `--source URL`: of that upstream; default: its default branch) |
 | `--tag TAG` | [pin](#pinning-to-a-tag) the files to TAG or a [pattern](#tag-patterns); a tag that doesn't exist is refused |
 | `--no-tag` | follow the source's branch again |
-| `-p`, `--path PATH` | another upstream path (one file or directory); the same path changes nothing |
+| `-p`, `--path PATH` | another upstream path (one file or directory); the same path changes nothing; refused for a file synced otherwise in the index (after `pull -W`: `pull` or `restore` first) |
 | `--adaptable`, `--no-adaptable` | allow [local adaptations](#exact-copies-and-adaptable-files), or not any more (the default) |
 | `--include PATTERN`, `--exclude PATTERN` | [linked directory](#linked-directories): new patterns (repeatable; they replace the old ones); the files follow at the next `pull` |
 | `--no-include`, `--no-exclude` | linked directory: remove the patterns |

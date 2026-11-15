@@ -2929,8 +2929,8 @@ git commit -q --no-edit
 check "pull -W [dir]: written, the entry too, nothing staged" \
   "$(rc git filesync pull -W d)-$(git status --porcelain | oneline)$(st d)" \
   "0- M .git-filesync  M d/one  D d/two ?? d/three   U"
-check "restore [dir]: back, the new file gone, nothing discarded" \
-  "$(git filesync restore d 2>&1 | grep -c discarded)-$(git status --porcelain | oneline)" "0-"
+check "restore [dir]: back, the new file gone (kept as discarded)" \
+  "$(git filesync restore d 2>&1 | grep -c '^discarded: d/three ')-$(git status --porcelain | oneline)" "1-"
 quiet git filesync pull -W d
 check "pull after pull -W [dir]: the file the new base hasn't goes from the index too" \
   "$(quiet git filesync pull d; git status --porcelain | oneline)" "M  .git-filesync M  d/one A  d/three D  d/two "
@@ -2996,7 +2996,8 @@ check "... pull stages it" "$(quiet git filesync pull h2; git status --porcelain
 check "... restore -S: out of the index, the working tree keeps it" \
   "$(git filesync restore -S h2) $(git status --porcelain | oneline)" "h2: unstaged (not in HEAD yet)  M .git-filesync ?? h2 "
 check "... restore: entry and file gone" \
-  "$(git filesync restore h2) $(git status --porcelain | oneline)$(ls h2 2>/dev/null)" "h2: removed (not in the index yet) "
+  "$(git filesync restore h2 | sed -E 's/ \(git show [0-9a-f]+ to get it back\)//' | oneline)$(git status --porcelain | oneline)$(ls h2 2>/dev/null)" \
+  "discarded: h2 h2: removed (not in the index yet) "
 git reset -q --hard
 # set: says whether pull has something to do (advice.statusHints: the hint)
 git -C ../m28 tag t28
@@ -3150,8 +3151,8 @@ git config -f .git-filesync file.nl.source nowhere/m28 && git config -f .git-fil
 git add .git-filesync
 quiet git filesync pull -W nl
 check "restore after pull -W of a staged new link: back" \
-  "$(git filesync restore nl) $(git status --porcelain | oneline)$(ls nl 2>/dev/null)" \
-  "nl: restored (not synced yet) M  .git-filesync "
+  "$(git filesync restore nl | sed -E 's/ \(git show [0-9a-f]+ to get it back\)//' | oneline)$(git status --porcelain | oneline)$(ls nl 2>/dev/null)" \
+  "discarded: nl nl: restored (not synced yet) M  .git-filesync "
 git reset -q --hard
 # edit of an entry only in the working tree: nothing staged, said
 quiet git filesync add -W file:///nowhere/m28.git q -p f
@@ -3302,6 +3303,31 @@ check "pull [dir] after pull -W: the summary counts the files staged" \
   "$(git filesync pull d 2>&1 | head -1) | $(git status --porcelain d | grep -c '^A ') $(git status --porcelain d | grep -c '^M ')" \
   "d/: synced (3 new, 1 changed) | 3 1"
 git reset -q --hard && rm -f d/six
+# restore of some files of a [dir] synced otherwise below: refused
+(cd ../m28 && echo 7 > d/seven && git add d/seven && git commit -qm seven)
+quiet git filesync pull -W d
+check "restore of a file of a [dir] synced otherwise below: refused" \
+  "$(git filesync restore d/seven 2>&1) $(ls d/seven)" \
+  "error: d: synced otherwise than in the index - restore d/ as a whole d/seven"
+git reset -q --hard && rm -f d/seven d/six
+# restore of a new link after pull -W: a file git doesn't track goes, but is kept
+git config -f .git-filesync file.nk.source nowhere/m28 && git config -f .git-filesync file.nk.path f
+git add .git-filesync && git -C ../m28 show HEAD:f > nk
+quiet git filesync pull -W nk
+check "restore after pull -W of a new link: the file it found kept as discarded" \
+  "$(git filesync restore nk 2>&1 | grep -c '^discarded: nk ') $(ls nk 2>/dev/null)" "1 "
+git reset -q --hard
+# an unlink staged: shown, also without the entry in the working tree
+quiet git filesync unlink g
+check "unlink staged: in status" \
+  "$(git filesync status -s | grep ' g$') $(git filesync status | grep -cE "^${TAB}unlinked:[[:space:]]+g\$")" " D  g 1"
+git reset -q --hard
+# set -p after pull -W: refused (the new base would be the working tree's)
+(cd ../m28 && echo f3 > f && git commit -qam f3)
+quiet git filesync pull -W f
+check "set -p after pull -W: refused" "$(git filesync set -p g f 2>&1 | cut -c1-54) $(rc git filesync set -p g f)" \
+  "error: f: synced otherwise in the index (e.g. after pu 2"
+git reset -q --hard
 # before the first commit: what is staged is all of the index
 cd "$T" && git init -q s28n && cd s28n
 git filesync source map file:///nowhere/m28.git "$T/m28" >/dev/null
