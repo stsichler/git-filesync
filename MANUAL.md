@@ -297,7 +297,7 @@ Each file is looked at in three independent respects:
 |---|---|---|
 | upstream | synced upstream version (of the working tree's entry) ↔ current upstream | up to date, `pending`, `older`, `changed`, `renamed`, `deleted`, `new` |
 | committed | committed file (`HEAD`) ↔ the synced version of `HEAD`'s entry | `unmodified`, `adapted` |
-| uncommitted | the index ↔ `HEAD`, the working tree ↔ the index: file and entry | `new file`, `updated` (another synced version), `modified`, `missing` |
+| uncommitted | the index ↔ `HEAD`, the working tree ↔ the index: file and entry | `new file`, `updated` (another synced version; `adapted`: with adaptations), `modified`, `unlinked` (the entry removed), `missing` |
 
 The output has sections like `git status`:
 
@@ -345,7 +345,7 @@ with something to report:
 | Column | Meaning |
 |---|---|
 | 1 – upstream | `P` pending, `O` upstream older than last sync, `D` history diverged (or previous sync point unknown), `R` renamed upstream, `X` deleted upstream, `N` new link, `E` error |
-| 2 – index (against `HEAD`: what a commit takes) | `A` new, `U` another synced version, `M` modified, `D` deleted |
+| 2 – index (against `HEAD`: what a commit takes) | `A` new, `U` another synced version, `M` modified, `D` deleted (file or entry) |
 | 3 – working tree (against the index) | the same; `D` missing (marked `(missing!)`) |
 
 A committed adaptation is a note, not a column: `(adapted)`; one that
@@ -553,7 +553,7 @@ repository's own files stay.
 
 The file is always the synced upstream version, also of an adaptable file:
 `restore` says so when adaptations go (`git restore FILE` brings them back
-from the index). So `restore -SW` discards committed adaptations, ready to
+from the index, `git restore -S`/`-SW` from `HEAD`). So `restore -SW` discards committed adaptations, ready to
 commit. To go back only to the committed file, use `git restore -SW`.
 Uncommitted content it overwrites is [kept](#discarded-content). Changes
 of what an entry selects, by `set` or by hand, stay: undo them with `git

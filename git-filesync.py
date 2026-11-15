@@ -2595,10 +2595,10 @@ class Registry:
         describes what its files come from (changes made by hand to it go
         along). Another synced entry the index hasn't comes only with its
         file (see staged_as_base), then whole as well; else a change of it
-        stays unstaged. Each staged
-        entry has its [source] there; one goes only when no staged entry
-        uses it, and one new there only for entries not staged isn't staged
-        either. So changes made by hand, and what is only in the working
+        stays unstaged. A new link (no base) the index hasn't comes whole.
+        Each staged entry has its [source] there; one goes only when no
+        staged entry uses it, and one new there only for entries not staged
+        isn't staged either. So changes made by hand, and what is only in the working
         tree (pull -W, add -W), stay unstaged. Comments and layout of the
         staged registry stay; it is stored as `git add` would store such a
         file, and removed when nothing of ours is left in it."""
@@ -2638,9 +2638,11 @@ class Registry:
                 if (s, n) in mine or v is None and k not in have[s].get(n, {}) or \
                         (s, n) in own and k in SYNC_KEYS:
                     continue
-                if s != "source" and n not in have[s] and is_synced(self.store(s).get(n, {})):
-                    # a synced entry the index hasn't: only with its file (asked once)
-                    if (s, n) not in without and staged_as_base(repo, self, n):
+                if s != "source" and n not in have[s] and n in self.store(s):
+                    # an entry the index hasn't: whole - a synced one only with
+                    # its file (asked once), a new link as it is
+                    if not is_synced(self.store(s)[n]) or \
+                            (s, n) not in without and staged_as_base(repo, self, n):
                         mine.add((s, n))
                     else:
                         without.add((s, n))
@@ -3124,25 +3126,38 @@ def layer_entry(repo, link, layer):
     return e if e is not None and e.is_dir == link.is_dir else None
 
 
+def layer_source(repo, src, link, lower):
+    """The Source of the base of lower, link's entry in a layer below: src
+    (link's) - or, in another upstream repository, that one's; None if it
+    can't be had (then link's base counts instead)."""
+    if norm_url(lower.url) == norm_url(link.url):
+        return src
+    try:
+        return repo.ctx.source(lower.url, lower.ref, lower.name, lower.line) if repo.ctx else None
+    except FsError:
+        return None
+
+
 def layer_matcher(repo, src, link, lower, st):
     """matches_base() against the base of lower, link's entry in a layer
-    below (see layer_entry); None if it has none (not there, a new link):
-    nothing is adapted there. Its base in another upstream repository isn't
-    looked up: the working tree's counts (a known limit)."""
+    below (see layer_entry; in its own upstream repository, see
+    layer_source); None if it has none (not there, a new link): nothing is
+    adapted there."""
     if lower is None or lower.unsynced:
         return None
-    base = link if norm_url(lower.url) != norm_url(link.url) else lower
-    return blob_matcher(repo, src, link.rel, base.blob, base.path, st, warn=base is link)
+    lsrc = layer_source(repo, src, link, lower)
+    base = link if lsrc is None else lower
+    return blob_matcher(repo, lsrc or src, link.rel, base.blob, base.path, st, warn=base is link)
 
 
 def layer_code(lower, upper, below, above):
     """What a layer has of a linked file that the one below hasn't - their
     entries' bases (sync_keys; None: no entry), their files (blob ids;
     None: none): 'A' the entry or the file new, 'U' another base (synced
-    otherwise), 'D' the file gone, 'M' another file with the same base;
-    None: the same."""
+    otherwise), 'D' the file gone (or the entry: unlinked), 'M' another
+    file with the same base; None: the same."""
     if upper is None:
-        return None
+        return None if lower is None else "D"
     if lower is None:
         return "A"
     if upper != lower:
@@ -3408,13 +3423,13 @@ def dir_members(repo, dlink, base, upstream):
 
 def layer_files(src, dlink, lower, base):
     """{path below: blob id} of the files at the base of lower, a [dir]
-    entry's entry in a layer below (see layer_entry); None if it has none
-    (not there, a new link). base: those of dlink's base - also for one in
-    another upstream repository, or whose tree isn't there (not looked up:
-    a known limit)."""
+    entry's entry in a layer below (see layer_entry), src the Source of
+    that base (see layer_source); None if it has none (not there, a new
+    link). base: those of dlink's base - also if src is None, or if the tree
+    isn't there."""
     if lower is None or lower.unsynced:
         return None
-    if norm_url(lower.url) != norm_url(dlink.url) or sync_keys(lower.v) == sync_keys(dlink.v):
+    if src is None or sync_keys(lower.v) == sync_keys(dlink.v):
         return base
     try:
         files = dir_base(src, lower)
@@ -3432,19 +3447,24 @@ def fill_members(repo, st, base, upstream):
     st.members = dir_members(repo, dlink, base, upstream)
     lower = st.entries = (layer_entry(repo, dlink, "head"), layer_entry(repo, dlink, "index"))
     st.head_base = head_base(lower[0], dlink)
-    files = st.layer_files = [layer_files(st.src, dlink, e, base) for e in lower]
+    srcs = [None if e is None or e.unsynced else layer_source(repo, st.src, dlink, e)
+            for e in lower]
+    files = st.layer_files = [layer_files(s, dlink, e, base) for s, e in zip(srcs, lower)]
     syncs = [None if e is None else sync_keys(e.v) for e in lower] + [sync_keys(dlink.v)]
     for m in st.members:
         m.src, m.has_old = st.src, st.has_old
         below = m.link.below
         matchers, bases = [], []
-        for e, fs in zip(lower, files):
+        for e, fs, lsrc in zip(lower, files, srcs):
             blob = fs.get(below) if fs is not None else None
-            path = e.path if e is not None and norm_url(e.url) == norm_url(dlink.url) \
-                else dlink.path
-            bases.append((blob, up_join(path, below)) if blob else None)
+            # (the bases in link's upstream repository: those there - another
+            # one's counts as the working tree's)
+            same = e is not None and norm_url(e.url) == norm_url(dlink.url)
+            b = blob if same or fs is None else base.get(below)
+            bases.append((b, up_join(e.path if same else dlink.path, below)) if b else None)
+            path = e.path if e is not None and (same or lsrc is not None) else dlink.path
             matchers.append(None if not blob else blob_matcher(
-                repo, st.src, m.rel, blob, up_join(path, below), m, warn=fs is base))
+                repo, lsrc or st.src, m.rel, blob, up_join(path, below), m, warn=fs is base))
         m.bases = tuple(bases)
         matchers.append(None if m.unsynced else base_matcher(repo, st.src, m.link, m))
         local_state(repo, m, m.link, matchers,
@@ -3460,8 +3480,7 @@ def fill_members(repo, st, base, upstream):
     st.violation = any(m.violation for m in sts)
     st.index_adapted = any(m.index_adapted for m in sts)
     st.staged = any(m.staged for m in sts)
-    where = {m.where for m in sts}
-    st.where = "index" if "index" in where else "worktree" if "worktree" in where else None
+    st.where = dir_where(sts)
 
     def code(lower, upper, attr):
         """The entry's code (see layer_code): the base's, else its files'."""
@@ -3471,6 +3490,13 @@ def fill_members(repo, st, base, upstream):
         return "D" if "D" in codes else "M" if codes & {"M", "A"} else None
     st.staged_code = code(syncs[0], syncs[1], "staged_code")
     st.unstaged_code = code(syncs[1], syncs[2], "unstaged_code")
+
+
+def dir_where(members):
+    """Where a [dir] entry has a modification of its own (see local_state):
+    in the index if one of its files has, else in the working tree."""
+    where = {m.where for m in members}
+    return "index" if "index" in where else "worktree" if "worktree" in where else None
 
 
 def evaluate_dir(ctx, repo, dlink):
@@ -3796,6 +3822,9 @@ def print_long(repo, sts, verbose):
             ms = [m for m in st.base_members if getattr(m, attr)]
             lower = st.entries[i - 1]
             upper = st.link if i == 2 else st.entries[1]
+            if code == "D" and upper is None:     # the entry removed there (unlink)
+                rows.append(("unlinked", st) + note(st, [], None))
+                continue
             text = not_allowed if not st.adaptable and adapted(st) else \
                 "NOT ALLOWED: still linked" if code == "D" else \
                 ", ".join([v for v in [versions(st, lower, upper)] if v]
@@ -4419,9 +4448,9 @@ def pull_dir(repo, reg, st, args):
     # with --overwrite, they are discarded (and kept, see save_discarded)
     # (what pull -W wrote before: the files staged as they are, see below)
     taken = {id(m) for m in st.mods + back + dels}
-    restage = [] if as_staged else [m for m in st.base_members if m.local != "missing"
+    restaged = [] if as_staged else [m for m in st.base_members if m.local != "missing"
                                     and id(m) not in taken]
-    dirty = [m for m in st.mods + dels + back + restage if local_changes(m)]
+    dirty = [m for m in st.mods + dels + back + restaged if local_changes(m)]
     if dirty and not args.overwrite:
         raise FsError(f"your local changes to {few(repo, dirty)} would be overwritten by "
                       "pull - commit or stash them first ('git stash'; 'git restore -SW "
@@ -4497,13 +4526,17 @@ def pull_dir(repo, reg, st, args):
     if not as_staged and not args.dry_run:
         # the index gets what the working tree has (pull -W before): the
         # files staged as they are, those only the staged entry has go
-        for m in restage:         # one of its own: only with --overwrite (see above)
-            if m.rel not in contents:
-                contents[m.rel] = sync_content(repo, m, st.new, m.new_blob, m.new_path, False)[0] \
-                    if local_changes(m) else None
-        for rel in staged_only(repo, src, dlink, {m.rel for m in st.members}):
+        todo = [m for m in restaged if m.rel not in contents]
+        now = repo.worktree_blobs([m.rel for m in todo])
+        for m in todo:            # one of its own: only with --overwrite (see above)
+            contents[m.rel] = sync_content(repo, m, st.new, m.new_blob, m.new_path, False)[0] \
+                if local_changes(m) else None
+            if local_changes(m) or now.get(m.rel) != m.index_blob:    # (for the summary)
+                kinds[m.rel] = "new" if m.index_blob is None else "changed"
+        for rel in staged_only(repo, dlink, {m.rel for m in st.members}, src):
             if rel not in contents and rel not in deletes:
                 deletes.append(rel)
+                kinds[rel] = "deleted"
     backs = {id(m) for m in back}
     for m in st.mods + back:
         mod = m.local == "modified"
@@ -4609,17 +4642,17 @@ def staged_as_is(repo, link):
     return sync_keys(staged) == sync_keys(link.v)
 
 
-def staged_only(repo, src, dlink, mine):
+def staged_only(repo, dlink, mine, src=None):
     """Files of a [dir] entry that only its staged version has (another base
     there, e.g. after pull -W), not among mine (rels), gone from the working
     tree: still in the index, they go with the pull or rm that stages the
     entry. One still there is a file of this repository (pull -W --force
-    kept it): it stays."""
+    kept it): it stays. src: dlink's Source, if at hand."""
     staged = repo.registry("index").entry(dlink.rel)
     if staged is None or not staged.is_dir or sync_keys(staged.v) == sync_keys(dlink.v):
         return []
     try:
-        if norm_url(staged.url) != norm_url(dlink.url):     # its own upstream repository
+        if src is None or norm_url(staged.url) != norm_url(dlink.url):    # its own one
             if repo.ctx is None:
                 return []
             src = repo.ctx.source(staged.url, staged.ref, staged.name, staged.line)
@@ -4701,6 +4734,13 @@ def report_pull(repo, reg, synced, written):
     return EXIT_OK
 
 
+def to_sync(repo, st, args):
+    """Has pull something to do for st (by name or with --all): an upstream
+    change, adaptations to discard (--overwrite), a stale file to write anew,
+    the entry to stage?"""
+    return st.pending or overwrites(st, args) or stale(st) or restage(repo, st, args)
+
+
 def restage(repo, st, args):
     """pull has to stage the entry as the working tree has it (written
     there by pull -W, add -W): not with -W, not for a new link."""
@@ -4732,9 +4772,7 @@ def cmd_pull(ctx, repo, args):
         for m in st.base_members if st.link.is_dir else [st]:
             merged_layers(repo, m)
         if st.link.is_dir and not st.error:
-            where = {m.where for m in st.base_members}
-            st.where = "index" if "index" in where else "worktree" if "worktree" in where \
-                else None
+            st.where = dir_where(st.base_members)
     # what syncing needs, asked at once: upstream contents, short commit ids,
     # attributes of the files here
     repo.check_plain([st.rel for st in states if not st.link.is_dir]
@@ -4743,7 +4781,7 @@ def cmd_pull(ctx, repo, args):
     ok = [st for st in states if st.src and not st.error]
     # contents only of the files to sync (in the blobless cache, each one
     # may have to be fetched)
-    sync = [st for st in ok if (st.pending or overwrites(st, args) or restage(repo, st, args))
+    sync = [st for st in ok if to_sync(repo, st, args)
             and not (args.all and not once and st.off_track)]
     files = [m for st in sync for m in (st.members if st.link.is_dir else [st])]
     for src in {id(st.src): st.src for st in ok}.values():
@@ -4771,7 +4809,7 @@ def cmd_pull(ctx, repo, args):
         # the history (older, diverged, the previous sync point unknown):
         # only by name (or once to a given revision)
         if args.all and not once and (st.off_track or not (
-                st.pending or overwrites(st, args) or restage(repo, st, args))):
+                to_sync(repo, st, args))):
             why = "missing" if st.missing else "previous sync point not found" \
                 if st.lost_old else "older than last sync" if st.behind_args \
                 else "history diverged" if st.diverged \
@@ -5580,13 +5618,17 @@ def cmd_restore(ctx, repo, args):
                     (delete if side == "worktree" else unstage).append(r)
                 else:
                     write.append((r, oid, side))
-        written = {r for r, _, side in write if side == "worktree"}
-        adapted = sorted(r for r in base if r in written and not args.staged and
-                         r in index and index[r][1] != ids[r])
+        # adaptations the layer below has that go: said, with how to get them back
+        written = {r for r, _, _ in write}
+        adapted = entry.adaptable and sorted(r for r in base if r in written and (
+            repo.head_blob(r) if args.staged else index.get(r, (None, None))[1])
+            not in (None, ids[r]))
         if adapted and entry.adaptable:
+            again = "-SW " if args.staged and worktree else "-S " if args.staged else ""
             hints.append(f"{entry.shown_rel}: adaptations removed"
                          + (f" in {plural(len(adapted), 'file')}" if entry.is_dir else "")
-                         + " (still staged: 'git restore <file>...' brings them back)")
+                         + f" (still {'committed' if args.staged else 'staged'}: "
+                         f"'git restore {again}<file>...' brings them back)")
         if entry.only is None:            # the entry itself
             if "worktree" in sides:
                 if lower is None:
@@ -5764,8 +5806,7 @@ def cmd_rm(ctx, repo, args):
     for link in links:
         link.target               # refused (for all) if something is in the way
     # of a [dir] entry staged with another base: the files only that has, too
-    extra = {e.rel: staged_only(repo, ctx.source(e.url, e.ref, e.name, e.line), e,
-                                {lk.rel for lk in links})
+    extra = {e.rel: staged_only(repo, e, {lk.rel for lk in links})
              for e in entries if e.is_dir and not e.unsynced}
     paths = [lk.rel for lk in links] + [r for rs in extra.values() for r in rs]
     repo.prefetch(paths)
@@ -6310,8 +6351,9 @@ def cmd_source(ctx, repo, args):
             print(f"would rename {args.name} -> {args.value}")
             return EXIT_OK
         reg.rename_source(args.name, args.value)
-        reg.finish()
-        print(f"{paint(f'renamed {args.name} -> {args.value}', 'green')}; {REGISTRY} staged")
+        staged = reg.finish()
+        print(f"{paint(f'renamed {args.name} -> {args.value}', 'green')}; "
+              + (f"{REGISTRY} staged" if staged else WORKTREE_ONLY))
         return EXIT_OK
     url, branch = args.url or s.get("url", ""), args.branch or s.get("branch")
     keys = [(k, v) for k, v in (("url", url), ("branch", branch)) if v != s.get(k)]

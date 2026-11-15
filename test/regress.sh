@@ -3099,7 +3099,7 @@ echo staged >> k && git add k
 check "diff --cached: the staged adaptation" "$(git filesync diff --cached k -- --name-only) $(st k)" "k  M"
 check "... diff --committed: only the committed one" "$(git filesync diff --committed k | grep -c '^+staged')" "0"
 check "restore -S: the index from HEAD's base" \
-  "$(git filesync restore -S k) $(git show :k)" "k: restored in the index (nowhere/m28@$(git config -f .git-filesync file.k.commit | cut -c1-7)) $(git -C ../m28 show HEAD:f)"
+  "$(git filesync restore -S k | oneline)$(git show :k)" "k: restored in the index (nowhere/m28@$(git config -f .git-filesync file.k.commit | cut -c1-7)) k: adaptations removed (still committed: 'git restore -S <file>...' brings them back) $(git -C ../m28 show HEAD:f)"
 git reset -q --hard
 # pull stages the entry as it used it, also if the index has it: with its
 # [source] - changes made by hand to them too; those to others stay unstaged
@@ -3267,6 +3267,41 @@ git reset -q --hard
 git rm -q k
 check "git rm of a linked file: deleted in the index only" "$(stn k)" " D  (missing!)"
 git reset -q --hard
+# a new link written by hand, then set: staged whole, not just the key set
+git config -f .git-filesync file.nh.source nowhere/m28 && git config -f .git-filesync file.nh.path f
+quiet git filesync set --adaptable nh
+check "set of a new link the index hasn't: staged whole" \
+  "$(git config --blob :.git-filesync file.nh.path) $(git config --blob :.git-filesync file.nh.adaptable)" "f true"
+git reset -q --hard
+# HEAD's entry in another upstream repository: its base looked up there
+quiet git filesync pull -W w
+quiet git filesync set --source file:///nowhere/m7m.git -b "$(git -C ../m7m branch --show-current)" w
+check "HEAD's entry in another upstream: an exact copy there, not adapted" \
+  "$(git filesync status -s w | grep -c adapted) $(rc git filesync pull w)" "0 0"
+git reset -q --hard
+# unlink staged, linked again in the working tree: both shown
+quiet git filesync unlink g && quiet git filesync add -W --overwrite file:///nowhere/m28.git g
+check "unlink staged: shown in the index" \
+  "$(stn g) $(git filesync status | grep -cE "^${TAB}unlinked:[[:space:]]+g\$")" " DA (adapted, not adaptable!) 1"
+git reset -q --hard
+# pull --all: a stale file is written anew, as by pull FILE
+(cd ../m28 && echo g6 > g && git commit -qam g6)
+quiet git filesync pull hh && git restore --staged hh
+check "pull --all: a stale file synced, not left out" \
+  "$(git filesync pull --all 2>&1 | grep -c '^warning: hh:') $(git status --porcelain hh | oneline)" "0 M  hh "
+git reset -q --hard
+# source rename of a source only in the working tree: said
+quiet git filesync add -W file:///nowhere/m7m.git w2 -p w
+check "source rename only in the working tree: said" \
+  "$(git filesync source rename nowhere/m7m mm 2>&1)" "renamed nowhere/m7m -> mm; .git-filesync changed in the working tree only"
+git reset -q --hard && rm -f w2
+# pull [dir] after pull -W: the summary counts what it stages
+(cd ../m28 && echo 1h > d/one && echo 6 > d/six && git add d && git commit -qm "d six")
+quiet git filesync pull -W d
+check "pull [dir] after pull -W: the summary counts the files staged" \
+  "$(git filesync pull d 2>&1 | head -1) | $(git status --porcelain d | grep -c '^A ') $(git status --porcelain d | grep -c '^M ')" \
+  "d/: synced (3 new, 1 changed) | 3 1"
+git reset -q --hard && rm -f d/six
 # before the first commit: what is staged is all of the index
 cd "$T" && git init -q s28n && cd s28n
 git filesync source map file:///nowhere/m28.git "$T/m28" >/dev/null
