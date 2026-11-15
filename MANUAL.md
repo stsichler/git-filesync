@@ -12,7 +12,7 @@ motivation and installation see the [README](README.md).
   - [Local modifications on top of the upstream version](#local-modifications-on-top-of-the-upstream-version)
   - [Linked directories](#linked-directories)
 - [Commands](#commands)
-  - [Common options](#common-options)
+  - [Common options](#common-options) · [Upstream access](#upstream-access)
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool) · [`restore`](#restore)
   - [`add`](#add) · [`rm`](#rm) · [`unlink`](#unlink) · [`mv`](#mv)
 - [Advanced commands](#advanced-commands)
@@ -276,16 +276,26 @@ objects after a while (normally two weeks).
 
 ### Common options
 
-| Option | Commands | Effect |
-|---|---|---|
-| `--no-fetch` | `status`, `pull`, `diff`/`difftool`, `restore`, `add`, `set`, `source set` | don't fetch, use the cached state (offline); an upstream not in the [cache](#cache) yet is cloned anyway. `restore`, `diff` of local changes and `set` without `--source`, `-b`, `--tag`, `-p` fetch only if the cache lacks the branch, even without it |
-| `--remote` | as `--no-fetch` | ignore [mappings](#source-map) this once and use the upstream URL; the mapping stays. With `--no-fetch`: the cached state |
-| `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
+All commands take them:
+
+| Option | Effect |
+|---|---|
+| `--color[=always\|never\|auto]`, `--no-color` | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
+
+### Upstream access
+
+The commands that access upstream (`status`, `pull`, `diff`, `difftool`,
+`restore`, `add`, `set`, `source set`) also take:
+
+| Option | Effect |
+|---|---|
+| `--no-fetch` | don't fetch, use the cached state (offline); an upstream not in the [cache](#cache) yet is cloned anyway. `restore`, `diff` of local changes and `set` without `--source`, `-b`, `--tag`, `-p` fetch only if the cache lacks the branch, even without it |
+| `--remote` | ignore [mappings](#source-map) this once and use the upstream URL; the mapping stays. With `--no-fetch`: the cached state |
 
 ### `status`
 
 ```
-git filesync status [PATH…] [-s] [-v] [--exit-code] [--no-fetch]
+git filesync status [PATH…] [-s] [-v] [--exit-code] [--no-fetch] [--remote]
 ```
 
 Shows the state of all (or the given) linked files.
@@ -371,7 +381,7 @@ scripts and [CI](#ci).
 
 ```
 git filesync pull (PATH… | --all) [--commit REV | -b BRANCH | --tag TAG] [--overwrite] [-W]
-                  [--force] [-n] [-v] [--no-fetch]
+                  [--force] [-n] [-v] [--no-fetch] [--remote]
 ```
 
 Syncs files to their current upstream version. What that is follows simple
@@ -494,7 +504,7 @@ git filesync pull src/                     # ... and sync
 
 ```
 git filesync diff [PATH…] [--committed | --cached | --upstream [--commit REV | -b BRANCH | --tag TAG]]
-                  [--for-upstream] [--no-fetch] [-- OPTS]
+                  [--for-upstream] [--no-fetch] [--remote] [-- OPTS]
 ```
 
 Shows local changes against the synced upstream version, in one `git diff`
@@ -538,7 +548,7 @@ want first.
 
 ```
 git filesync difftool [PATH…] [--committed | --cached | --upstream [--commit REV | -b BRANCH | --tag TAG]]
-                      [-y | --prompt] [--no-fetch] [-- OPTS]
+                      [-y | --prompt] [--no-fetch] [--remote] [-- OPTS]
 ```
 
 The same as [`diff`](#diff), file by file in your difftool (`diff.tool`);
@@ -558,7 +568,7 @@ the tool are kept.
 ### `restore`
 
 ```
-git filesync restore PATH… [-S] [-W] [--no-fetch]
+git filesync restore PATH… [-S] [-W] [--no-fetch] [--remote]
 ```
 
 Like `git restore`, from the layer below: the working tree from the index,
@@ -593,7 +603,8 @@ diff .git-filesync` and by hand.
 ```
 git filesync add URL|SOURCE FILE|DIR [-b BRANCH] [--tag TAG] [-p PATH] [--commit REV]
                  [--include PATTERN]… [--exclude PATTERN]… [--per-file]
-                 [--adaptable] [--overwrite] [--force] [-W] [-n] [--no-fetch]
+                 [--adaptable] [--overwrite] [--force] [-W] [-n]
+                 [--no-fetch] [--remote]
 ```
 
 `add URL|SOURCE FILE` links FILE to a file in an upstream repository,
@@ -736,7 +747,7 @@ repository in it. `-n` / `--dry-run` only shows what would be moved.
 git filesync set PATH… [--source URL|SOURCE] [-b BRANCH] [--tag TAG | --no-tag] [-p PATH]
                        [--adaptable | --no-adaptable]
                        [(--include PATTERN)… | --no-include] [(--exclude PATTERN)… | --no-exclude]
-                       [-n] [--no-fetch]
+                       [-n] [--no-fetch] [--remote]
 git filesync set PATH…
 git filesync set --list
 ```
@@ -842,7 +853,7 @@ to its last key, so comments after it stay.
 ```
 git filesync source [-v]
 git filesync source rename OLD NEW [-n]
-git filesync source set NAME [--url URL] [-b BRANCH] [-n] [--no-fetch]
+git filesync source set NAME [--url URL] [-b BRANCH] [-n] [--no-fetch] [--remote]
 git filesync source set --list
 ```
 
@@ -914,7 +925,7 @@ checked out there. Nothing is fetched; it works offline.
 
 The checkout is only read – also from a read-only network share; LFS
 objects missing there come via the cache clone. To work against the server
-once, add [`--remote`](#common-options) (`git filesync status --remote`).
+once, add [`--remote`](#upstream-access) (`git filesync status --remote`).
 
 Without a mapping, a source is fetched into a blobless partial clone in
 `~/.cache/git-filesync` (Windows: `%LOCALAPPDATA%\git-filesync`, or

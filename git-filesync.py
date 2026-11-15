@@ -298,17 +298,18 @@ Advanced commands:
                                 of other tools)
     hook pre-push|post-merge    what the installed hooks run (internal)
 
-    Common options:
-        --no-fetch              use the cached state, don't fetch (status,
-                                pull, diff/difftool, restore, add, set,
-                                source set; restore, diff of local changes
-                                and set without --source, -b, --tag, -p
-                                fetch anyway only if the cache lacks the
-                                branch); an upstream not in the cache yet
-                                is cloned anyway
+    Upstream access (status, pull, diff/difftool, restore, add, set,
+    source set):
+        --no-fetch              use the cached state, don't fetch (restore,
+                                diff of local changes and set without
+                                --source, -b, --tag, -p fetch anyway only if
+                                the cache lacks the branch); an upstream not
+                                in the cache yet is cloned anyway
         --remote                ignore mappings (source map) this once, use
-                                the upstream URL (same commands; with
-                                --no-fetch: the cached state)
+                                the upstream URL (with --no-fetch: the
+                                cached state)
+
+    Common options (all commands):
         --color[=WHEN], --no-color  always, never or auto (default)
 
 Exit codes: 0 ok, 1 unfinished (pull: conflicts; --exit-code),
