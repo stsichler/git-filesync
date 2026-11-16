@@ -1256,12 +1256,15 @@ git-filesync can keep a copy of itself in your repository, so everyone has
 the same version:
 
 ```sh
-git filesync add https://github.com/stsichler/git-filesync.git tools/git-filesync.py \
-    -p git-filesync.py --tag v0.23.2
+mkdir -p tools
+curl -fsSLo tools/git-filesync.py https://github.com/stsichler/git-filesync/releases/latest/download/git-filesync.py
 git config alias.filesync '!python3 tools/git-filesync.py'     # each clone, once (Windows: !py …)
+git filesync add https://github.com/stsichler/git-filesync.git tools/git-filesync.py \
+    -p git-filesync.py --tag 'v*'
+git commit
 ```
 
 The repository's alias beats a global one, and git runs it in the
-top-level directory, so it works from any subdirectory. To update: `git
-filesync set --tag vX.Y.Z tools/git-filesync.py`, then `pull` (`pull` and
-`status -v` name the newest release).
+top-level directory, so it works from any subdirectory. With the [tag
+pattern](#tag-patterns) `v*`, `status` shows a new release as `pending`
+and `git filesync pull tools/git-filesync.py` takes it.
