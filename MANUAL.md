@@ -470,6 +470,16 @@ Meanwhile `status` shows `updated` under `Changes not staged for commit`
 merge `pull -W` wrote; changes you made after it are local changes, which
 it refuses.
 
+With [`set -W`](#set) first, the try can take the files from elsewhere,
+e.g. a fork. `restore` keeps what an entry selects; `git restore
+.git-filesync` undoes `set -W`:
+
+```sh
+git filesync set -W src/ --source https://github.com/me/lib-fork.git
+git filesync pull -W src/
+git filesync restore src/ && git restore .git-filesync    # go back
+```
+
 #### Another branch or tag, once
 
 `pull -b BRANCH` and `pull --tag TAG` sync the given files (or `--all`)
@@ -747,14 +757,14 @@ git filesync set PATH… [--source URL|SOURCE] [-b BRANCH] [--tag TAG | --no-tag
                        [--adaptable | --no-adaptable]
                        [(--include PATTERN)… | --no-include]
                        [(--exclude PATTERN)… | --no-exclude]
-                       [-n] [--no-fetch] [--remote] [--color[=WHEN] | --no-color]
+                       [-W] [-n] [--no-fetch] [--remote] [--color[=WHEN] | --no-color]
 git filesync set PATH… [--color[=WHEN] | --no-color]
 git filesync set --list [--color[=WHEN] | --no-color]
 ```
 
 Changes the link of linked files: source, tag, upstream path, adaptable,
-patterns. Only `.git-filesync` changes (staged); `status` then shows what
-is to sync, and `pull` syncs. `set` says so (`pending until pull`) unless
+patterns. Only `.git-filesync` changes (staged; `-W`: in the working tree
+only); `status` then shows what is to sync, and `pull` syncs. `set` says so (`pending until pull`) unless
 only `adaptable` changed.
 
 `set PATH…` without options shows the links as the `set` command that sets
@@ -779,6 +789,7 @@ git filesync set third_party/lib/ --source https://github.com/owner/lib.git -b m
 | `--include PATTERN`, `--exclude PATTERN` | [linked directory](#linked-directories): new patterns (repeatable; they replace the old ones); the files follow at the next `pull` |
 | `--no-include`, `--no-exclude` | linked directory: remove the patterns |
 | `--list` | show all entries (see above) |
+| `-W`, `--worktree` | change `.git-filesync` in the working tree only, nothing staged – with [`pull -W`](#trying-a-newer-version) a whole try, e.g. a fork |
 | `-n`, `--dry-run` | only show what would change |
 
 URL and branch select the source, as for [`add`](#add): the one with that
@@ -824,7 +835,7 @@ git filesync set cfg/ --no-tag                   # follow the branch again
 ### `edit`
 
 ```
-git filesync edit [--color[=WHEN] | --no-color]
+git filesync edit [-W] [--color[=WHEN] | --no-color]
 ```
 
 Opens `.git-filesync` in your editor, like `git config --edit`
@@ -843,6 +854,9 @@ entries, an unused source) are shown as warnings. `edit` keeps whatever
 you write: a changed `commit` or `blob` changes what counts as an
 adaptation.
 
+With `-W` (`--worktree`), nothing is staged – also not a resolved
+conflict: `git add .git-filesync` stages it (deleted: `git rm`).
+
 Your comments and layout are kept: commands change only the lines they
 have to. A changed value keeps the indentation and comment of its line, a
 renamed entry the comment of its header; a removed entry takes its lines up
@@ -852,14 +866,14 @@ to its last key, so comments after it stay.
 
 ```
 git filesync source [-v] [--color[=WHEN] | --no-color]
-git filesync source rename OLD NEW [-n] [--color[=WHEN] | --no-color]
-git filesync source set NAME [--url URL] [-b BRANCH] [-n] [--no-fetch] [--remote]
+git filesync source rename OLD NEW [-W] [-n] [--color[=WHEN] | --no-color]
+git filesync source set NAME [--url URL] [-b BRANCH] [-W] [-n] [--no-fetch] [--remote]
                              [--color[=WHEN] | --no-color]
 git filesync source set --list [--color[=WHEN] | --no-color]
 ```
 
 Lists and changes the `[source]` sections, like `git remote`. Only
-`.git-filesync` changes (staged).
+`.git-filesync` changes (staged; `-W`: in the working tree only).
 
 | Command | Effect |
 |---|---|

@@ -2987,6 +2987,9 @@ printf '100644 %s 1\t.git-filesync\n100644 %s 2\t.git-filesync\n100644 %s 3\t.gi
   git update-index --index-info
 check "registry with a merge conflict: refused" "$(rc git filesync set --adaptable g) $(git filesync status 2>&1)" \
   "2 error: .git-filesync has a merge conflict - resolve it with 'git filesync edit' (or by hand, then 'git add .git-filesync')"
+check "... edit -W resolves it in the working tree only" \
+  "$(GIT_EDITOR=true git filesync edit -W 2>&1) $(git ls-files -u .git-filesync | wc -l | tr -d ' ') $(rc git filesync status)" \
+  ".git-filesync: conflict resolved in the working tree only - 'git add .git-filesync' stages it 3 2"
 check "... edit resolves it" "$(GIT_EDITOR=true git filesync edit 2>&1) $(git ls-files -u .git-filesync | wc -l | tr -d ' ') $(rc git filesync status)" \
   ".git-filesync: conflict resolved and staged 0 0"
 git reset -q --hard
@@ -3237,6 +3240,13 @@ check "... deleted in the editor: removed and staged" \
   "$(GIT_EDITOR=rm git filesync edit 2>&1) $(git ls-files -s .git-filesync | wc -l | tr -d ' ')" \
   ".git-filesync: conflict resolved - removed and staged 0"
 git reset -q --hard
+git update-index --force-remove .git-filesync && rm .git-filesync
+printf '100644 %s 1\t.git-filesync\n100644 %s 2\t.git-filesync\n' "$blob" "$blob" | git update-index --index-info
+git checkout -q --ours .git-filesync
+check "... edit -W: removed in the working tree only" \
+  "$(GIT_EDITOR=rm git filesync edit -W 2>&1) $(git ls-files -u .git-filesync | wc -l | tr -d ' ') $(ls .git-filesync 2>/dev/null)" \
+  ".git-filesync: conflict resolved - removed in the working tree only - 'git rm .git-filesync' stages it 2 "
+git reset -q --hard
 # an adaptable file after pull -W: the merge it wrote is nothing of its own -
 # pull stages it (also after git add); a change after it is refused
 (cd ../m28 && printf '1\n2\n3\n4\n5\n' > ml && mkdir md && printf '1\n2\n3\n4\n5\n' > md/a \
@@ -3363,8 +3373,31 @@ git -C ../m28 branch -q dev28
 quiet git filesync add -W file:///nowhere/m28.git q2 -p f
 check "set -b of an entry only in the working tree: nothing staged, said" \
   "$(git filesync set -b dev28 q2 2>&1 | tail -1) $(git diff --cached --name-only | oneline)" \
-  ".git-filesync changed in the working tree only "
+  ".git-filesync changed in the working tree only - pending until pull -W (use \"git filesync pull -W <file>...\" to sync) "
 git reset -q --hard && rm -f q2
+# -W for set, source rename, source set, edit: .git-filesync in the working tree only
+check "set -W: nothing staged, said" \
+  "$(git filesync set -W --no-adaptable g 2>&1 | tail -1) $(git diff --cached --name-only | oneline)$(git config -f .git-filesync file.g.adaptable)" \
+  ".git-filesync changed in the working tree only "
+git reset -q --hard
+check "set -W of something to pull: pending until pull -W" \
+  "$(git filesync set -W -b dev28 f 2>&1 | tail -1 | cut -c1-70) $(git diff --cached --name-only | oneline)" \
+  ".git-filesync changed in the working tree only - pending until pull -W "
+check "... pull -W then: still nothing staged" \
+  "$(quiet git filesync pull -W f; git diff --cached --name-only | oneline)$(st f)" "  U"
+git reset -q --hard
+check "source rename -W: nothing staged, said" \
+  "$(git filesync source rename -W nowhere/m28 r28 2>&1) $(git diff --cached --name-only | oneline)$(git config -f .git-filesync file.f.source)" \
+  "renamed nowhere/m28 -> r28; .git-filesync changed in the working tree only r28"
+git reset -q --hard
+check "source set -W: nothing staged" \
+  "$(git filesync source set -W nowhere/m28 -b dev28 2>&1 | tail -1 | cut -c1-70) $(git diff --cached --name-only | oneline)$(git config -f .git-filesync source.nowhere/m28.branch)" \
+  ".git-filesync changed in the working tree only - pending until pull -W dev28"
+git reset -q --hard
+check "edit -W: nothing staged, said" \
+  "$(GIT_EDITOR="git config -f .git-filesync file.g.adaptable false; :" git filesync edit -W 2>&1) $(git diff --cached --name-only | oneline)$(git config -f .git-filesync file.g.adaptable)" \
+  ".git-filesync changed in the working tree only false"
+git reset -q --hard
 # a [source] renamed by hand: pull stages the new name, the old one goes
 git config -f .git-filesync --rename-section source.nowhere/m28b source.src28b
 git config -f .git-filesync file.p.source src28b

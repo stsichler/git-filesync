@@ -239,12 +239,16 @@ Advanced commands:
                                 select now are fetched, those left out
                                 deleted (as if changed upstream)
         --no-include, --no-exclude  [dir]: remove the patterns
+        -W, --worktree          .git-filesync in the working tree only,
+                                nothing staged (with pull -W: a whole try,
+                                e.g. a fork)
         -n, --dry-run           only show what would change
 
     edit                        open .git-filesync in the editor (like `git
                                 config --edit`); afterwards it is checked
                                 and what changed staged (a merge conflict
                                 in it: resolved, the whole file)
+        -W, --worktree          nothing staged (also a resolved conflict)
 
     source                      list the [source]s (-v: with URL, branch,
                                 entries)
@@ -255,6 +259,8 @@ Advanced commands:
         --url URL               another URL; the synced versions are looked
                                 up there as for set --source
         -b, --branch BRANCH     follow BRANCH, all files of the source
+        -W, --worktree          (also rename) .git-filesync in the working
+                                tree only, nothing staged
         -n, --dry-run           (also rename) only show what would change
     source map [URL|SOURCE [DIR]]  use the local checkout DIR instead of
                                 fetching URL (SOURCE: the URL of that
@@ -6239,17 +6245,21 @@ def cmd_set(ctx, repo, args):
         print("nothing to change")
     elif not args.dry_run:
         # only adaptable changed: nothing for pull to do (known offline)
-        print(pending_note(repo, changed != "adaptable") if reg.finish() else WORKTREE_ONLY)
+        print(pending_note(repo, changed != "adaptable", reg.finish(stage=not args.worktree)))
     return EXIT_OK
 
 
-def pending_note(repo, pending):
-    """What set and source set say at the end: staged - and if pull may have
-    something to do, so, with how (advice.statusHints)."""
+def pending_note(repo, pending, staged):
+    """What set and source set say at the end: staged, or in the working tree
+    only - and if pull may have something to do, so, with how
+    (advice.statusHints); after a change in the working tree only that is
+    pull -W, which keeps the try unstaged."""
+    done = f"{REGISTRY} staged" if staged else WORKTREE_ONLY
     if not pending:
-        return f"{REGISTRY} staged"
-    return f"{REGISTRY} staged - pending until pull" + \
-        (' (use "git filesync pull <file>..." to sync)' if status_hints(repo) else "")
+        return done
+    pull = "pull" if staged else "pull -W"
+    return f"{done} - pending until {pull}" + \
+        (f' (use "git filesync {pull} <file>..." to sync)' if status_hints(repo) else "")
 
 
 def set_path(ctx, repo, lk, path, would):
@@ -6439,9 +6449,16 @@ def cmd_edit(ctx, repo, args):
             raise FsError(f"{REGISTRY} still has conflicts or can't be parsed - not staged; "
                           "fix it with 'git filesync edit'")
         repo.rows = None
-        if p is None or not any(parse_registry(p.stdout)):   # deleted or emptied: it goes
-            if path.exists():
-                path.unlink()
+        gone = p is None or not any(parse_registry(p.stdout))   # deleted or emptied: it goes
+        if gone and path.exists():
+            path.unlink()
+        if args.worktree:         # in the working tree only; git add/rm stages it
+            what = ("conflict resolved" + (" - removed" if gone else "")) if conflict else \
+                "removed" if gone else "changed"
+            print(f"{REGISTRY}: {what} in the working tree only - "
+                  f"'git {'rm' if gone else 'add'} {REGISTRY}' stages it")
+            return EXIT_OK
+        if gone:
             repo.git(["rm", "-q", "--cached", "--", REGISTRY])
             print(f"{REGISTRY}: {done} - removed and staged" if conflict else
                   f"{REGISTRY}: removed and staged")
@@ -6466,7 +6483,7 @@ def cmd_edit(ctx, repo, args):
         print(f"{REGISTRY}: only comments or layout changed - nothing staged")
         return EXIT_OK
     reg.done.append((pending, drop, {}))
-    print(REGISTRY_STAGED if reg.finish() else WORKTREE_ONLY)
+    print(REGISTRY_STAGED if reg.finish(stage=not args.worktree) else WORKTREE_ONLY)
     return EXIT_OK
 
 
@@ -6517,7 +6534,7 @@ def cmd_source(ctx, repo, args):
             print(f"would rename {args.name} -> {args.value}")
             return EXIT_OK
         reg.rename_source(args.name, args.value)
-        staged = reg.finish()
+        staged = reg.finish(stage=not args.worktree)
         print(f"{paint(f'renamed {args.name} -> {args.value}', 'green')}; "
               + (f"{REGISTRY} staged" if staged else WORKTREE_ONLY))
         return EXIT_OK
@@ -6540,8 +6557,8 @@ def cmd_source(ctx, repo, args):
         print(f"{would}source {args.name}: {k} {s.get(k) or '(none)'} -> {v}")
         reg.set_source(args.name, k, v)
     if not args.dry_run:
-        staged = reg.finish()
-        print(pending_note(repo, bool(source_files(reg, args.name))) if staged else WORKTREE_ONLY)
+        print(pending_note(repo, bool(source_files(reg, args.name)),
+                           reg.finish(stage=not args.worktree)))
     return EXIT_OK
 
 
@@ -7196,9 +7213,13 @@ def run(argv=None):
         g.add_argument(f"--no-{k}", action="store_true", help=f"linked directory: no {k} "
                                                                "patterns")
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
+    p.add_argument("-W", "--worktree", action="store_true",
+                   help=f"change {REGISTRY} in the working tree only, nothing staged")
 
-    add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then check "
-                                                  "it and stage what changed")
+    p = add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then "
+                                                      "check it and stage what changed")
+    p.add_argument("-W", "--worktree", action="store_true",
+                   help=f"change {REGISTRY} in the working tree only, nothing staged")
 
     p = add_command(sub, "restore", parents=[common],
                     help="like 'git restore': entries and files back to the layer below "
@@ -7237,6 +7258,8 @@ def run(argv=None):
     a.add_argument("name", metavar="OLD", help="key of the [source]")
     a.add_argument("value", metavar="NEW")
     a.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
+    a.add_argument("-W", "--worktree", action="store_true",
+                   help=f"change {REGISTRY} in the working tree only, nothing staged")
     # checks the branch upstream
     a = add_command(actions, "set", parents=[common],
                     help="change the URL or branch of a source (without options: show them)")
@@ -7247,6 +7270,8 @@ def run(argv=None):
     a.add_argument("--list", action="store_true",
                    help="show the command for each source, one per line")
     a.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
+    a.add_argument("-W", "--worktree", action="store_true",
+                   help=f"change {REGISTRY} in the working tree only, nothing staged")
     a = add_command(actions, "map", parents=[colorp],
                     help="use a local checkout for an upstream URL (this repo's config; "
                          "--global for all repos)")
