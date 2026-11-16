@@ -611,6 +611,8 @@ given by its URL or by the name of a `[source]` (upstream first, then here
 - **URL**: the file joins the source with that URL and branch (`-b`,
   default: the upstream default branch), which is created if needed.
 - **Source name**: the file joins that source; a `-b` must be its branch.
+  An argument that is neither a URL, nor a source, nor an existing path is
+  refused.
 
 `add URL|SOURCE DIR` links an upstream directory (see [Linking a
 directory](#linking-a-directory)).

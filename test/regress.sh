@@ -222,6 +222,8 @@ check "add: copy of the proposed message" "$(cat .git/FILESYNC_MSG)" "$(cat .git
 git commit -q --no-edit
 check "add + commit: status clean" "$(st)" ""
 check "add + commit: file and entry" "$(git show --name-only --format= HEAD | sort | oneline)" ".git-filesync src/lib.c "
+check "registry header: [file] and [dir] bases" \
+  "$(sed -n 3p .git-filesync)" "# commit/blob and [dir] commit/tree record the upstream version."
 check "add: proposed commit message, with the commit's date" \
   "$(git log -1 --format=%B | sed '/^$/d' | oneline)" \
   "[filesync] Add src/lib.c from $(basename "$T")/upstream@$(git -C "$T/upstream" log -1 --format='%h (%cs)') Upstream: $URL (main:lib.c) "
@@ -546,6 +548,13 @@ check "map SOURCE: listing by name" "$(cd sB && git filesync source map "$SRC3" 
 check "map SOURCE --unset" "$(git -C sB config --local --get-regexp '^filesync\.' | lines)" "0"
 check "map: mistyped source name refused" "$(cd sB && rc git filesync source map no-such-source "$T/coB")" "2"
 check "map: nothing written for it" "$(git -C sB config --local --get-regexp '^filesync\.' | lines)" "0"
+# the same for add and set --source: a name that is no [source] (e.g. removed
+# with its last file) is not taken for a URL
+check "add: mistyped source name refused" \
+  "$(cd sB && git filesync add no-such-source y.c 2>&1)" \
+  "error: 'no-such-source' is neither a URL nor a [source] in .git-filesync"
+check "set --source: mistyped source name refused" \
+  "$(cd sB && git filesync set x.c --source no-such-source -b main 2>&1 | grep -c "neither a URL nor a \[source\]")" "1"
 
 # a link on the way stays in the mapping, absolute or relative (junction on
 # Windows, symlink elsewhere): the path as given, not resolved

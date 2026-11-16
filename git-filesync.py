@@ -344,7 +344,7 @@ from dataclasses import dataclass, field, replace as dc_replace
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.24.0"
+__version__ = "0.24.1"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -375,7 +375,7 @@ REGISTRY_STAGED = (f'{REGISTRY} staged (use "git filesync status" to see what ch
 WORKTREE_ONLY = f"{REGISTRY} changed in the working tree only"
 REGISTRY_HEADER = ("# git-filesync: files of this repository that are kept in sync with\n"
                    "# files in other repositories. Maintained by 'git filesync'; [file]\n"
-                   "# commit/blob record the upstream version each file is based on.\n")
+                   "# commit/blob and [dir] commit/tree record the upstream version.\n")
 
 
 class FsError(Exception):
@@ -5271,6 +5271,7 @@ def add_ref(ctx, reg, args, hint=None):
                              f"source's branch with 'git filesync source set "
                              f"{args.source} -b {args.branch}'"))
         return s.get("url", ""), s["branch"], args.source
+    require_url(reg.repo, args.source)
     return args.source, args.branch or ctx.default_branch(args.source), None
 
 
@@ -6578,10 +6579,18 @@ def map_url(repo, arg, setting):
             if not source.get("url"):
                 raise FsError(f"[source \"{arg}\"] in {REGISTRY} has no url")
             return source["url"]
-    if setting and not (repo.base if repo else Path.cwd()).joinpath(arg).exists():
+    if setting:
+        require_url(repo, arg)
+    return arg
+
+
+def require_url(repo, arg):
+    """Refuse an arg that isn't a [source] (checked before) and is neither
+    URL-like nor an existing path (which git takes as a URL too) - most
+    likely a mistyped or removed source name."""
+    if not looks_like_url(arg) and not (repo.base if repo else Path.cwd()).joinpath(arg).exists():
         where = f"a [source] in {REGISTRY}" if repo else "a [source] (not inside a repository)"
         raise FsError(f"'{arg}' is neither a URL nor {where}")
-    return arg
 
 
 def cmd_map(args, repo):
