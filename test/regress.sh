@@ -2995,6 +2995,7 @@ check "... edit resolves it" "$(GIT_EDITOR=true git filesync edit 2>&1) $(git ls
 git reset -q --hard
 git update-index --cacheinfo "100644,$(printf '[broken\n' | git hash-object -w --stdin),.git-filesync"
 check "a staged registry that can't be parsed: an error" "$(rc git filesync status) $(rc git filesync restore f) $(cat f)" "2 2 b"
+check "... edit -W without a change: says so" "$(GIT_EDITOR=true git filesync edit -W 2>&1)" ".git-filesync: no changes"
 git reset -q --hard
 # add -W: entry and file in the working tree only; mv, pull, restore of it
 check "add -W: in the working tree only" \
@@ -3170,7 +3171,7 @@ git reset -q --hard
 quiet git filesync add -W file:///nowhere/m28.git q -p f
 check "edit of an entry only in the working tree: said, nothing staged" \
   "$(GIT_EDITOR='f() { git config -f "$1" file.q.adaptable true; }; f' git filesync edit 2>&1 | tail -1) $(git diff --cached --name-only | oneline)" \
-  ".git-filesync changed in the working tree only "
+  ".git-filesync changed in the working tree only (use \"git filesync status\" to see what changes, \"git filesync pull -W <file>...\" to sync) "
 git reset -q --hard && rm -f q
 # restore -S of a [dir] after set --include: the base keeps the patterns it
 # was synced with
@@ -3367,6 +3368,8 @@ git reset -q --hard
 quiet git filesync pull -W f
 check "set -p after pull -W: refused" "$(git filesync set -p g f 2>&1 | cut -c1-54) $(rc git filesync set -p g f)" \
   "error: f: synced otherwise in the index (e.g. after pu 2"
+check "... set -W -p: nothing staged, so not refused" \
+  "$(rc git filesync set -W -p g f) $(git diff --cached --name-only | oneline)$(git config -f .git-filesync file.f.path)" "0 g"
 git reset -q --hard
 # set of an entry only in the working tree: a new [source] for it isn't staged either
 git -C ../m28 branch -q dev28
@@ -3396,7 +3399,7 @@ check "source set -W: nothing staged" \
 git reset -q --hard
 check "edit -W: nothing staged, said" \
   "$(GIT_EDITOR="git config -f .git-filesync file.g.adaptable false; :" git filesync edit -W 2>&1) $(git diff --cached --name-only | oneline)$(git config -f .git-filesync file.g.adaptable)" \
-  ".git-filesync changed in the working tree only false"
+  ".git-filesync changed in the working tree only (use \"git filesync status\" to see what changes, \"git filesync pull -W <file>...\" to sync) false"
 git reset -q --hard
 # a [source] renamed by hand: pull stages the new name, the old one goes
 git config -f .git-filesync --rename-section source.nowhere/m28b source.src28b

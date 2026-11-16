@@ -472,7 +472,7 @@ it refuses.
 
 With [`set -W`](#set) first, the try can take the files from elsewhere,
 e.g. a fork. `restore` keeps what an entry selects; `git restore
-.git-filesync` undoes `set -W`:
+.git-filesync` undoes `set -W` – and every other unstaged change in it:
 
 ```sh
 git filesync set -W src/ --source https://github.com/me/lib-fork.git
@@ -764,8 +764,9 @@ git filesync set --list [--color[=WHEN] | --no-color]
 
 Changes the link of linked files: source, tag, upstream path, adaptable,
 patterns. Only `.git-filesync` changes (staged; `-W`: in the working tree
-only); `status` then shows what is to sync, and `pull` syncs. `set` says so (`pending until pull`) unless
-only `adaptable` changed.
+only); `status` then shows what is to sync, and `pull` syncs. `set` says
+so (`pending until pull`; in the working tree only: `pull -W`, which keeps
+the try unstaged) unless only `adaptable` changed.
 
 `set PATH…` without options shows the links as the `set` command that sets
 them, one line per entry – every aspect, also those not set (`--no-tag`),
