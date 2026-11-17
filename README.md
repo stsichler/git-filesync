@@ -76,8 +76,8 @@ then also adds and deletes files, and your own files in it stay.
 - Single files, or whole directories (new and deleted upstream files follow,
   your own files in them stay); all links in one file, `.git-filesync`, in
   git-config format like `.gitmodules`
-- Follows an upstream branch, or per file a tag (with a hint at newer tags)
-  or the newest tag matching a pattern (`v1.*`)
+- Follows an upstream branch, or per file a tag or the newest tag matching
+  a pattern (`v1.*`)
 - Proposed commit message listing the upstream commits since the last sync
 - Exact copies by default; `adaptable` files keep local adaptations through
   a 3-way merge
@@ -171,7 +171,7 @@ Advanced commands:
 | `set PATH… [OPTIONS]` | change (or show) source, tag, upstream path, adaptable or patterns of linked files |
 | `versions [PATH…]` | the upstream versions linked files can take: commits or tags |
 | `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
-| `source [ACTION …]` | list sources; rename, change URL or branch |
+| `source [ACTION …]` | list sources; rename, change URL or branch; list their tags |
 | `source map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |
 | `cache [ACTION]` | the cache of upstream clones: show, list, prune, clear, print its directory |
 | `hooks [install\|uninstall]` | hooks for `push` and `merge`: reminders, check that synced upstream commits are pushed |

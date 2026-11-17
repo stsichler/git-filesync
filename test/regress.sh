@@ -1693,13 +1693,16 @@ new_repo s12
 for f in a b c; do addc --adaptable --tag v1.0 "$URL12" $f.c; done
 SRC12=$(git config -f .git-filesync file.a.c.source)
 
-# newer tags by their place in the commit graph, on the source's branch -
-# names are opaque, so a pre-release counts like any tag: status -v, pull
-check "status -v: newest tag" "$(git filesync status -v | grep -c '(tag v1.0 on main, newest v2.0-rc1, adaptable)')" "3"
-check "plain status: no hint" "$(git filesync status | grep -c newest)" "0"
+# a pin points at no newer tags (status can't know whether they matter);
+# source versions lists them by their place in the commit graph, on the
+# source's branch - names are opaque, so a pre-release counts like any tag
+check "pinned: no hint at newer tags (status -v, pull)" \
+  "$(git filesync status -v | grep -c newest) $(git filesync pull --all 2>&1 | grep -c '^hint: .*pinned')" "0 0"
 check "source -v: the branch" "$(git filesync source -v)" "$(printf '%s\t%s (main, 3 files)' "$SRC12" "$URL12")"
-check "pull: hint" "$(git filesync pull --all 2>&1 | grep -c "^hint: 3 files pinned to tag v1.0; \
-the newest tag on branch main is v2.0-rc1 (use 'git filesync set --tag v2.0-rc1 <file>...' and pull to switch)$")" "1"
+check "source versions: by the commit graph" \
+  "$(git filesync source versions "$SRC12" | sed 1d | sed -E 's/  .*//' | oneline)" "v2.0-rc1 v1.1 v1.0 "
+check "source versions: the pinned entries marked" \
+  "$(git filesync source versions "$SRC12" | grep -c '^v1.0 .*(selected by a.c, b.c and c.c)$')" "1"
 
 # a maintenance branch from v1.0 with v1.0.1; a feature branch from v1.1
 # with tag f1, merged into main; rel-2 on the same commit as v2.0-rc1; v1.2
@@ -1709,12 +1712,11 @@ the newest tag on branch main is v2.0-rc1 (use 'git filesync set --tag v2.0-rc1 
   && git checkout -qb feature v1.1 && echo f > f.txt && git add f.txt && git commit -qm f \
   && git tag f1 && git checkout -q main && git merge -q --no-ff -m "merge feature" feature \
   && git tag rel-2 HEAD^1 && git tag v1.2 v1.1 && git push -q origin main maint feature --tags)
-check "branch: only its line, merged side branch ignored" \
-  "$(git filesync status -v | grep -c '(tag v1.0 on main, newest rel-2 = v2.0-rc1, adaptable)')" "3"
-check "pull: hint, tags on one commit" "$(git filesync pull --all 2>&1 | grep -c "^hint: 3 files pinned \
-to tag v1.0; the newest tag on branch main is rel-2 = v2.0-rc1 (use 'git filesync set --tag rel-2 ")" "1"
+check "source versions: only its line, merged side branch ignored, tags on one commit" \
+  "$(git filesync source versions "$SRC12" | sed 1d | sed -E 's/  .*//' | oneline)" "rel-2 = v2.0-rc1 v1.1 = v1.2 v1.0 "
 git filesync source set "$SRC12" -b maint >/dev/null
-check "branch maint" "$(git filesync status -v | grep -c '(tag v1.0 on maint, newest v1.0.1, adaptable)')" "3"
+check "source versions: the source's branch maint" \
+  "$(git filesync source versions "$SRC12" | sed 1d | sed -E 's/  .*//' | oneline)" "v1.0.1 v1.0 "
 git filesync set a.c --tag v1.0.1 >/dev/null
 check "newest tag pinned: no newer" "$(git filesync status -v a.c | grep -c newest)" "0"
 git filesync source set "$SRC12" -b main >/dev/null
@@ -1733,8 +1735,8 @@ git commit -qm "pinned to v1.0 on main"
 # with a mapped checkout: its branches and tags, unpushed ones included
 (cd ../co12 && git tag local-3)
 git filesync source map "$URL12" "$T/co12" >/dev/null
-check "mapped: newest tag from the checkout" \
-  "$(git filesync status -v | grep -c '(tag v1.0 on main, newest local-3, adaptable)')" "3"
+check "mapped: source versions from the checkout, unpushed tags too" \
+  "$(git filesync source versions "$SRC12" --max-count 1 | sed 1d | sed -E 's/  .*//' | oneline)" "local-3 (3 more: --all lists them) "
 git filesync source map "$URL12" --unset >/dev/null
 (cd ../co12 && git tag -d local-3 >/dev/null)
 
@@ -1776,7 +1778,7 @@ quiet pullc --all -b main
 
 # refusals and dry runs change nothing
 check "pull -v: where from, synced so far" "$(git filesync pull -v -n a.c | head -1)" \
-  "a.c: from $SRC12:a.c (tag v1.0 on main, newest rel-2 = v2.0-rc1, adaptable), synced at $(git -C ../co12 log -1 --format=%h main -- a.c)"
+  "a.c: from $SRC12:a.c (tag v1.0 on main, adaptable), synced at $(git -C ../co12 log -1 --format=%h main -- a.c)"
 check "pull -v: syncs too" \
   "$(git filesync pull -v a.c >/dev/null 2>&1; echo $?) $(git diff --cached --name-only | oneline)" \
   "0 .git-filesync a.c "
@@ -3539,7 +3541,7 @@ for i in 1 2 3 4; do
   echo $i > f && echo $i > d/x && git add -A && git commit -qm "change $i" -m "body of $i" && git tag v$i
 done
 git tag -a v4a -m "Release 4" -m "notes for 4"
-echo 5 > other && git add other && git commit -qm unrelated
+echo 5 > other && git add other && git commit -qm unrelated && git tag v5
 git checkout -q -b side v2 && git commit -q --allow-empty -m side && git tag v9 && git checkout -q main
 cd "$T" && git init -q s30 && cd s30
 quiet git filesync add ../m30 f
@@ -3547,19 +3549,26 @@ quiet git filesync add ../m30 g -p f --tag 'v*'
 quiet git filesync add ../m30 h -p f --tag v2
 quiet git filesync add ../m30 d
 git commit -qm links
-(cd ../m30 && echo 6 > f && git commit -qam "change 6" && git tag v6)
+# a merged side branch with a tag, not changing f; a change without a tag
+(cd ../m30 && echo 6 > f && git commit -qam "change 6" && git tag v6 \
+  && git checkout -q -b feat && echo s > s.txt && git add s.txt && git commit -qm side2 \
+  && git tag s1 && git checkout -q main && git merge -q --no-ff -m "merge feat" feat \
+  && echo 7 > f && git commit -qam "change 7")
 OUT=$(git filesync versions f)
-check "versions: commits changing the path, pull's marked" \
-  "$(echo "$OUT" | sed -E 's/^[0-9a-f]+ +[0-9-]+ +//')" "f: branch main of m30
-change 6  (selected by f)
-change 4  (synced by f)
-change 3
-change 2
-change 1"
+check "versions: commits changing the path and tags along the branch, older ones too" \
+  "$(echo "$OUT" | sed -E 's/^[0-9a-f]{7,} /HASH /; s/  +[0-9-]{10}  +/ | /')" "f: branch main of m30
+HASH | change 7  (selected by f)
+v6 | change 6
+v5 | unrelated
+v4 = v4a | change 4  (synced by f)
+v3 | change 3
+v2 | change 2
+v1 | change 1"
 OUT=$(git filesync versions g)
 check "versions: a pattern's tags along the branch, also unchanged ones" \
   "$(echo "$OUT" | sed -E 's/  +[0-9-]{10}  +/ | /')" "g: newest tag matching v* on main of m30
 v6 | change 6  (selected by g)
+v5 | unrelated  (synced by g)
 v4 = v4a | change 4  (synced by g)
 v3 | change 3
 v2 | change 2
@@ -3568,11 +3577,11 @@ check "versions: a pinned tag only" \
   "$(git filesync versions h | sed -E 's/  +[0-9-]{10}  +/ | /')" "h: tag v2 of m30
 v2 | change 2  (selected by h, synced by h)"
 check "versions: a file of a [dir] lists the entry" \
-  "$(git filesync versions d/x | sed -n '1p;2s/^[0-9a-f]* *[0-9-]* *//p')" "d/: branch main of m30
-change 4  (selected by d/, synced by d/)"
-OUT=$(git filesync versions g -v --max-count 2)
+  "$(git filesync versions d/x | sed -E 's/  +[0-9-]{10}  +/ | /' | sed -n '1p;/selected/p')" "d/: branch main of m30
+v4 = v4a | change 4  (selected by d/, synced by d/)"
+OUT=$(git filesync versions g -v --max-count 3)
 check "versions -v --max-count: messages, how many more" \
-  "$(echo "$OUT" | sed -E 's/  +[0-9-]{10}  +/ | /' | sed -n '3,$p')" "v4 = v4a | change 4  (synced by g)
+  "$(echo "$OUT" | sed -E 's/  +[0-9-]{10}  +/ | /' | sed -n '/^v4 = v4a/,$p')" "v4 = v4a | change 4  (synced by g)
     Release 4
 
     notes for 4
@@ -3581,16 +3590,32 @@ check "versions -v --max-count: messages, how many more" \
 (3 more: --all lists them)"
 check "versions --all: all" "$(git filesync versions g --max-count 2 --all 2>&1 | grep -c 'not allowed')" "1"
 check "versions --max-count 0: none, as git log -n 0" \
-  "$(git filesync versions g --max-count 0 | sed 1d)" "(5 more: --all lists them)"
+  "$(git filesync versions g --max-count 0 | sed 1d)" "(6 more: --all lists them)"
 check "versions --max-count -1: refused" "$(rc git filesync versions g --max-count -1)" "2"
 # an entry that can't be listed: an error, the others are listed
 git config -f .git-filesync file.n.source m30 && git config -f .git-filesync file.n.path nothere
 git config -f .git-filesync file.z.source gone && git config -f .git-filesync file.z.path f
-check "versions: no commits change the path" "$(git filesync versions n)" "n: branch main of m30
-no commits on main change nothere"
+check "versions: a path no commit changes: the tags only" \
+  "$(git filesync versions n | sed 1d | sed -E 's/  .*//' | oneline)" "v6 v5 v4 = v4a v3 v2 v1 "
 OUT=$(git filesync versions 2>&1); RC=$?
 check "versions: an entry without source is an error, the rest is listed" \
   "$RC $(echo "$OUT" | grep -c '^error: z: incomplete entry') $(echo "$OUT" | grep -c ': branch main of m30$')" "2 1 3"
+git checkout -q .git-filesync
+# source versions: the tags along the source's branch, pinned entries marked
+check "source versions: tags matching, the pinned entries that take them" \
+  "$(git filesync source versions m30 --tag 'v[2-6]*' | sed -E 's/  +[0-9-]{10}  +/ | /')" "m30: tags matching v[2-6]* on main
+v6 | change 6  (selected by g)
+v5 | unrelated
+v4 = v4a | change 4
+v3 | change 3
+v2 | change 2  (selected by h)"
+check "source versions -b: along another branch" \
+  "$(git filesync source versions m30 -b side | sed 1d | sed -E 's/  .*//' | oneline)" "v9 v2 v1 "
+check "source versions: none matching" "$(git filesync source versions m30 --tag 'x*' | sed 1d)" "no tags matching x* on main"
+check "source versions: an unknown name refused" "$(rc git filesync source versions nosuch)" "2"
+check "source versions URL: outside a repository too" \
+  "$(cd "$T" && git filesync source versions "$T/m30" --max-count 1 | sed -E 's/  .*//' | oneline)" \
+  "$T/m30: tags on main v6 (5 more: --all lists them) "
 git checkout -q .git-filesync
 git filesync source map ../m30 "$T/m30" >/dev/null
 check "versions: from a mapped checkout (its path as the platform writes it)" \

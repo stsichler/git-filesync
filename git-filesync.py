@@ -16,8 +16,8 @@ upstream repository:
 
     [source "owner/lib"]
         url = https://github.com/owner/lib.git
-        branch = main          ; followed by its files (pinned ones: where
-                               ; newer tags are looked for)
+        branch = main          ; followed by its files (pinned ones: their
+                               ; tag must be on it)
     [file "src/foo.c"]
         source = owner/lib
         path = lib/foo.c       ; path in the upstream repository
@@ -73,10 +73,6 @@ Basic commands:
                                 base, M modified, D missing; notes:
                                 (adapted) committed, (not adaptable!)
         -v, --verbose           also list all linked files with their sources
-                                (pinned ones with the newest tag: on the
-                                first tagged commit from the head of the
-                                source's branch back along its first-parent
-                                line)
         --exit-code             exit 1 if something is to sync, a linked
                                 file is missing, or a file that isn't
                                 adaptable is modified
@@ -245,11 +241,11 @@ Advanced commands:
         -n, --dry-run           only show what would change
 
     versions [PATH...]          per entry the upstream versions it can take,
-                                newest first: the commits of its branch
-                                that changed its path, the tags matching
-                                its pattern along the branch, its pinned
-                                tag; marked: selected (what pull takes),
-                                synced
+                                newest first by the commit graph, older
+                                ones too: the commits that changed its
+                                path and the tags along its branch; the
+                                tags matching its pattern; its pinned tag;
+                                marked: selected (what pull takes), synced
         -v, --verbose           also each whole commit message (and the
                                 message of an annotated tag)
         --max-count N           the newest N (default: 10; 0: none)
@@ -273,6 +269,13 @@ Advanced commands:
         -W, --worktree          (also rename) .git-filesync in the working
                                 tree only, nothing staged
         -n, --dry-run           (also rename) only show what would change
+    source versions URL|SOURCE  the tags along the branch of a source (a
+                                URL: its default branch), newest first;
+                                marked: the pinned entries that take them;
+                                also outside a repository, with a URL
+        --tag PATTERN           only the tags matching PATTERN
+        -b, --branch BRANCH     along BRANCH instead
+        -v, --max-count N, --all  as for versions
     source map [URL|SOURCE [DIR]]  use the local checkout DIR instead of
                                 fetching URL (SOURCE: the URL of that
                                 [source]); its branch is used, unpushed
@@ -1241,8 +1244,8 @@ class Source:
 
     def newest_matching(self, pattern, branch):
         """The tags matching pattern on the newest commit of branch that has
-        any, by the commit graph like newer_tags: the first one along the
-        branch's first-parent line, from its head back. [] if none."""
+        any, by the commit graph (tags have no reliable date): the first one
+        along the branch's first-parent line, from its head back. [] if none."""
         ref = self.branch_refs().get(branch)
         if not ref:
             raise FsError(f"branch '{branch}' not found in {self.label}")
@@ -1261,42 +1264,6 @@ class Source:
         others = sorted(self.branch_refs(commits)) if commits else []
         return (f" (matching tags on {and_list(others)}; -b selects another branch)"
                 if others else "")
-
-    def tag_info(self, tag, line, newer=True):
-        """(newer tags, problem) for files pinned to tag, with newer tags
-        looked for on branch line (their source's); problem: why they can't
-        be looked for there. newer=False: only check the branch."""
-        problem = line and self.line_problem(tag, line)
-        if problem or not newer:
-            return [], problem
-        return self.newer_tags(tag, line), None
-
-    def newer_tags(self, tag, branch):
-        """Tags newer than tag on branch, by their position in the commit
-        graph - tag names are opaque, and tags have no reliable date: the
-        newest one is on the first tagged commit from the branch head back
-        along its first-parent line (a tag on a merged side branch doesn't
-        count).
-        Returns [(tags of that commit, [branch])], empty if there are none."""
-        key = ("newer", tag, branch)
-        if key in self._memo:
-            return self._memo[key]
-        base = self.resolve(f"refs/tags/{tag}")
-        refs = {}
-        if base and branch:
-            ref = self.branch_refs().get(branch)
-            refs = {branch: ref} if ref and self.is_ancestor(base, ref) else {}
-        tags, found = self.tags_by_commit(), {}
-        for name, ref in sorted(refs.items()):
-            # the line down to tag; containing tag is monotonic along it, so
-            # the first tagged commit decides
-            for c in out(self.git(["rev-list", "--first-parent", ref, f"^{base}"])).split():
-                if c in tags:
-                    if self.is_ancestor(base, c):
-                        found.setdefault(tuple(sorted(tags[c])), []).append(name)
-                    break
-        self._memo[key] = sorted(found.items())
-        return self._memo[key]
 
     def last_change(self, rev, path):
         """Newest commit up to rev that changed path: the commit the file's
@@ -1433,8 +1400,6 @@ class Context:
         no_fetch = getattr(args, "no_fetch", False)
         self.remote = getattr(args, "remote", False)     # mappings ignored this once
         self.fetch, self.lazy = not (no_fetch or offline), offline and not no_fetch
-        # fetch even for a tag already cached, to learn about newer tags
-        self.want_tags = getattr(args, "verbose", False) or args.cmd == "pull"
         self._sources = {}
         self._ready = set()
         self._fetch_failed = set()
@@ -1446,7 +1411,7 @@ class Context:
         in .git-filesync (used as label). For a tag, line is the branch of
         the source: a pattern is resolved to the newest matching tag on it.
         A branch that doesn't exist is an error (a tag not on it isn't: see
-        tag_info)."""
+        line_problem)."""
         url = self.url(url)
         key = (norm_url(url), ref, line if ref[0] == "tag" else None)
         if key not in self._sources:
@@ -1581,8 +1546,8 @@ class Context:
 
     def _cache(self, url, tag=None, need=None):
         """The cache clone of url, fetched once per run - not for a tag
-        already there (tags are taken as immutable), unless newer tags are
-        of interest (want_tags); with lazy, only if it lacks the ref need."""
+        already there (tags are taken as immutable); with lazy, only if it
+        lacks the ref need."""
         url = self.url(url)
         d = self.cache_dir(url)
         if d in self._ready:
@@ -1609,7 +1574,7 @@ class Context:
             finally:
                 if tmp.exists():
                     shutil.rmtree(tmp, ignore_errors=True)
-        elif tag and not self.want_tags and git(["-C", d, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
+        elif tag and git(["-C", d, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}"],
                          env=env, check=False).returncode == 0:
             touch_used(d)
             return d       # not marked ready: a branch of the same URL still fetches
@@ -2242,12 +2207,11 @@ def entry_ref(source, entry):
 
 
 def warn_tag_line(src, tag, branch):
-    """add/set --tag: a warning if the tag isn't on the branch, where newer
-    tags are looked for (a pattern is matched on it anyway)."""
-    if not src.tag_names:
-        _, problem = src.tag_info(tag, branch, newer=False)
-        if problem:
-            warn(f"{problem}; newer tags can't be found there")
+    """add/set --tag: a warning if the tag isn't on the source's branch (a
+    pattern is matched on it anyway)."""
+    problem = not src.tag_names and branch and src.line_problem(tag, branch)
+    if problem:
+        warn(problem)
 
 
 def ref_missing(ref, src):
@@ -2267,14 +2231,6 @@ def ref_text(ref, line=None, names=None):
 def and_list(items):
     items = list(items)
     return ", ".join(items[:-1]) + " and " + items[-1] if len(items) > 1 else "".join(items)
-
-
-def newest_text(newest, line=None):
-    """'v1.4' / 'v1.4 on main' / 'v1.2.1 on maint; v1.4 on main' - newer tags
-    of a pinned source (see Source.newer_tags); tags on the same commit are
-    joined by ' = '. With a line the branch goes without saying."""
-    return "; ".join(" = ".join(tags) + ("" if line else f" on {and_list(branches)}")
-                     for tags, branches in newest)
 
 
 def path_problem(rel):
@@ -3062,7 +3018,6 @@ class FileState:
     staged: bool = False      # the index differs from HEAD: uncommitted changes too
     diverged: bool = False
     moved: Optional[tuple] = None   # ('renamed' | 'deleted', path, commit)
-    newest: Optional[list] = None   # newer tags of a pinned source
     committed: Optional[str] = None  # see evaluate()
     worktree: str = "clean"
     local: str = "clean"
@@ -3461,10 +3416,10 @@ def evaluate(ctx, repo, link):
     except FsError as e:
         st.error = str(e)
         return st
-    if ref[0] == "tag" and not src.tag_names:      # a pattern: no hints at other tags
-        st.newest, problem = src.tag_info(ref[1], link.line, ctx.want_tags)
+    if ref[0] == "tag" and not src.tag_names and link.line:   # pinned: on the branch?
+        problem = src.line_problem(ref[1], link.line)
         if problem:
-            st.warnings.append(f"{problem} (where newer tags are looked for)")
+            st.warnings.append(problem)
     st.has_old = bool(st.old) and src.resolve(st.old) == st.old
     st.new_blob = src.blob_at(tip, path)
     if not st.new_blob:
@@ -3696,10 +3651,10 @@ def evaluate_dir(ctx, repo, dlink):
     except FsError as e:
         st.error = str(e)
         return st
-    if ref[0] == "tag" and not src.tag_names:      # a pattern: no hints at other tags
-        st.newest, problem = src.tag_info(ref[1], dlink.line, ctx.want_tags)
+    if ref[0] == "tag" and not src.tag_names and dlink.line:   # pinned: on the branch?
+        problem = src.line_problem(ref[1], dlink.line)
         if problem:
-            st.warnings.append(f"{problem} (where newer tags are looked for)")
+            st.warnings.append(problem)
     st.has_old = bool(st.old) and src.resolve(st.old) == st.old
     base = {} if st.unsynced else dir_base(src, dlink)
     if base is None:
@@ -3888,13 +3843,12 @@ def link_text(st):
     """Where a linked file comes from, for status -v and pull -v."""
     via = f" via {st.src.label}" if st.src and st.src.local else ""
     adaptable = ", adaptable" if st.adaptable else ""
-    newest = f", newest {newest_text(st.newest, st.link.line)}" if st.newest else ""
     names = st.src.tag_names if st.src else None
     path, files = st.link.path, ""
     if st.link.is_dir:
         path, files = up_join(path, ""), ("" if st.unsynced else f", {plural(st.n, 'file')}")
     return (f"from {st.link.name}:{path or '/'} "
-            f"({ref_text(st.link.ref, st.link.line, names)}{newest}{files}{adaptable}){via}")
+            f"({ref_text(st.link.ref, st.link.line, names)}{files}{adaptable}){via}")
 
 
 def status_hints(repo):
@@ -4886,14 +4840,6 @@ def pull_message(parts, names, rels):
         "\n".join(m[len(MSG_PREFIX):] if m.startswith(MSG_PREFIX) else m for m in parts)
 
 
-def newest_hint(rels, tag, line, newest):
-    """Hint after pull at newer tags for the files pinned to tag."""
-    files = rels[0] if len(rels) == 1 else plural(len(rels), "file")
-    return (f"hint: {files} pinned to tag {tag}; the newest tag on branch {line} is "
-            f"{newest_text(newest, line)} (use 'git filesync set --tag "
-            f"{newest[0][0][0]} <file>...' and pull to switch)")
-
-
 def write_synced(repo, contents, conflicted=(), stage=True):
     """Write the synced or linked files ({rel: content in this repository's
     stored form}) to the working tree and stage them (unless not stage:
@@ -4967,7 +4913,7 @@ def cmd_pull(ctx, repo, args):
     rc, done, moved = EXIT_OK, 0, False
     once = args.commit or args.branch or args.tag   # another revision, branch or tag, once
     prefetch(ctx, repo, links, new_links=not once)
-    newest, synced = {}, []             # synced: (rel, source, message, [conflicted])
+    synced = []                         # (rel, source, message, [conflicted])
     left_out = False                    # pull --all: not synced, but to be seen to
     contents = {}                       # rel -> synced content (normalized form)
     deletes = []                        # files deleted with a [dir] entry's sync
@@ -5009,9 +4955,6 @@ def cmd_pull(ctx, repo, args):
             report_error(st)
             rc = EXIT_ERROR
             continue
-        if st.newest and not once:
-            newest.setdefault((link.name, link.tag), (link.tag, link.line, st.newest, []))[3] \
-                .append(link.rel)
         # missing, modified but not adaptable, or not a plain update along
         # the history (older, diverged, the previous sync point unknown):
         # only by name (or once to a given revision)
@@ -5076,8 +5019,6 @@ def cmd_pull(ctx, repo, args):
               f"<file>...' goes back; to stay on {once_text(args)}, use {how}")
     if args.all and not done and not left_out and rc == EXIT_OK:
         print(paint("everything up to date", "green"))
-    for _, (tag, line, new, rels) in sorted(newest.items()):
-        print(newest_hint(rels, tag, line, new))
     return rc
 
 
@@ -6695,45 +6636,107 @@ def cmd_versions(ctx, repo, args):
 def show_versions(repo, src, lk, args):
     """The versions of entry lk (see cmd_versions), at most --max-count."""
     path, (kind, name) = lk.path or ".", lk.ref
-    tags = {}                                    # {commit: tag names shown}
     if kind == "tag" and src.tag_names:          # a pattern: along the branch, as pull
-        by_commit = src.tags_by_commit()
-        for c in out(src.git(["rev-list", "--first-parent", src.branch_refs()[lk.line]])).split():
-            names = sorted(t for t in by_commit.get(c, []) if fnmatch.fnmatchcase(t, name))
-            if names:
-                tags[c] = names
+        tags = tags_along(src, src.branch_refs()[lk.line], name)
         commits = list(tags)
     elif kind == "tag":
         commits = [src.tip()]
-        tags[commits[0]] = [name]
+        tags = {commits[0]: [name]}
     else:
-        commits = out(src.git(["rev-list", src.tip(), "--", lit(path)])).split()
-    selected = commits[0] if kind == "tag" else src.last_change(src.tip(), path)
-    listed = commits if args.all else commits[:args.max_count]
+        # the commits that change the entry (as status counts them) and the
+        # tags along the branch, in graph order from its head back
+        tip = src.tip()
+        changed = set(out(src.git(["rev-list", tip, "--", lit(path)])).split())
+        tagged = tags_along(src, tip)
+        commits = [c for c in out(src.git(["rev-list", "--topo-order", tip])).split()
+                   if c in changed or c in tagged]
+        by_commit = src.tags_by_commit()
+        tags = {c: sorted(by_commit[c]) for c in commits if c in by_commit}
     if not commits:
         print(f"no commits on {name} change {path}")
         return
+    selected = commits[0] if kind == "tag" else src.last_change(src.tip(), path)
+    who = shown_entry(repo, lk)
+
+    def marks(c):
+        # a tag: the synced version if the file (directory) there is it
+        synced = lk.commit and (src.last_change(c, path) if kind == "tag" else c) == lk.commit
+        return ([f"selected by {who}"] if c == selected else []) + \
+            ([f"synced by {who}"] if synced else [])
+    print_versions(src, commits, tags, marks, args)
+
+
+def tags_along(src, ref, pattern="*"):
+    """{commit: names of its tags matching pattern} along ref's first-parent
+    line, newest first - the order of tags (see Source.newest_matching)."""
+    by_commit, result = src.tags_by_commit(), {}
+    for c in out(src.git(["rev-list", "--first-parent", ref])).split():
+        names = sorted(t for t in by_commit.get(c, []) if fnmatch.fnmatchcase(t, pattern))
+        if names:
+            result[c] = names
+    return result
+
+
+def print_versions(src, commits, tags, marks, args):
+    """One line per version, newest first, at most --max-count: its tags
+    (tags: {commit: names}) or abbreviated id, date, subject, marks(commit);
+    with -v the messages."""
+    listed = commits if args.all else commits[:args.max_count]
     info = commit_info(src, listed)
     notes = tag_messages(src, [t for c in listed for t in tags.get(c, [])]) if args.verbose else {}
-    if not tags:
-        src.shorts(listed)
-    labels = {c: " = ".join(tags[c]) if tags else src.short(c) for c in listed}
+    src.shorts([c for c in listed if c not in tags])
+    labels = {c: " = ".join(tags[c]) if c in tags else src.short(c) for c in listed}
     width = max([len(x) for x in labels.values()] or [0])
-    who = shown_entry(repo, lk)
     for c in listed:
         date, subject, body = info.get(c, ("", "", ""))
-        # a tag: the synced version if the file (directory) there is it
-        synced = lk.commit and (src.last_change(c, path) if tags else c) == lk.commit
-        marks = ([f"selected by {who}"] if c == selected else []) + \
-            ([f"synced by {who}"] if synced else [])
+        mark = marks(c)
         line = f"{paint(labels[c].ljust(width), 'yellow')}  {date or '-':<10}  {subject}"
-        print(line.rstrip() + (f"  {paint('(' + ', '.join(marks) + ')', 'cyan')}" if marks else ""))
+        print(line.rstrip() + (f"  {paint('(' + ', '.join(mark) + ')', 'cyan')}" if mark else ""))
         if args.verbose:
             text = [notes[t] for t in tags.get(c, []) if notes.get(t)] + [body]
             for x in "\n\n".join(t.strip("\n") for t in text if t.strip()).splitlines():
                 print(f"    {x}".rstrip())
     if len(commits) > len(listed):
         print(paint(f"({len(commits) - len(listed)} more: --all lists them)", "cyan"))
+
+
+def cmd_source_versions(ctx, repo, args):
+    """source versions URL|SOURCE: the tags along the branch of a source (or
+    of a URL: its default branch), newest first, those matching --tag;
+    marked: the entries pinned to one ("selected by") - a help for --tag,
+    also outside a repository."""
+    reg = Registry(repo) if repo else None
+    if reg and args.url in reg.sources:
+        s, name = reg.sources[args.url], args.url
+        url, branch = s.get("url", ""), s.get("branch")
+        if not url:
+            raise FsError(f'[source "{name}"] in {REGISTRY} has no url')
+    else:
+        require_url(repo, args.url)
+        url, branch, name = args.url, None, None
+    branch = args.branch or branch or ctx.default_branch(url)
+    src = ctx.source(url, ("branch", branch), name)
+    tags = tags_along(src, src.tip(), args.tag or "*")
+    selected = {}
+    for lk in reg.links() if reg else []:
+        if lk.ref and lk.ref[0] == "tag" and norm_url(ctx.url(lk.url)) == norm_url(ctx.url(url)):
+            try:
+                c = ctx.source(lk.url, lk.ref, lk.name, lk.line).tip()
+                selected.setdefault(c, []).append(shown_entry(repo, lk))
+            except FsError as e:
+                warn(f"{shown_entry(repo, lk)}: {e}")
+    print(f"{paint(name or url, 'bold')}: tags{f' matching {args.tag}' if args.tag else ''} "
+          f"on {branch}" + (f" ({src.label})" if src.local else ""))
+    if not tags:
+        print(f"no tags{f' matching {args.tag}' if args.tag else ''} on {branch}")
+        return EXIT_OK
+
+    def marks(c):
+        who = selected.get(c, [])
+        more = [f"{len(who) - 3} more"] if len(who) > 3 else []
+        return [f"selected by {and_list(who[:3] + more)}"] if who else []
+    print_versions(src, list(tags), tags, marks, args)
+    return EXIT_OK
 
 
 def commit_info(src, commits):
@@ -7268,6 +7271,15 @@ def run(argv=None):
                         help="same as --color=never")
     common = argparse.ArgumentParser(add_help=False, parents=[colorp])
 
+    def versions_options(parser):         # versions, source versions
+        parser.add_argument("-v", "--verbose", action="store_true",
+                            help="also each whole commit message (and the message of an "
+                                 "annotated tag)")
+        g = parser.add_mutually_exclusive_group()
+        g.add_argument("--max-count", type=count, default=10, metavar="N",
+                       help="the newest N versions (default: 10; 0: none)")
+        g.add_argument("--all", action="store_true", help="all versions")
+
     def registry_worktree(parser):        # set, edit, source rename/set
         parser.add_argument("-W", "--worktree", action="store_true",
                             help=f"change {REGISTRY} in the working tree only, nothing staged")
@@ -7423,12 +7435,7 @@ def run(argv=None):
     p = add_command(sub, "versions", parents=[common],
                     help="list the upstream versions linked files can take, newest first")
     p.add_argument("paths", nargs="*", metavar="PATH", help="linked files or directories (default: all)")
-    p.add_argument("-v", "--verbose", action="store_true",
-                   help="also each whole commit message (and the message of an annotated tag)")
-    g = p.add_mutually_exclusive_group()
-    g.add_argument("--max-count", type=count, default=10, metavar="N",
-                   help="the newest N versions (default: 10)")
-    g.add_argument("--all", action="store_true", help="all versions")
+    versions_options(p)
 
     p = add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then "
                                                       "check it and stage what changed")
@@ -7477,12 +7484,20 @@ def run(argv=None):
                     help="change the URL or branch of a source (without options: show them)")
     a.add_argument("name", nargs="?", metavar="NAME", help="key of the [source]")
     a.add_argument("--url", help="another URL, e.g. after upstream moved")
-    a.add_argument("-b", "--branch", help="follow BRANCH - for all files of the source; pinned "
-                                          "ones look for newer tags (or those of a pattern) on it")
+    a.add_argument("-b", "--branch", help="follow BRANCH - for all files of the source; the tags "
+                                          "of pinned ones must be on it")
     a.add_argument("--list", action="store_true",
                    help="show the command for each source, one per line")
     a.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
     registry_worktree(a)
+    a = add_command(actions, "versions", parents=[common],
+                    help="list the tags along the branch of a source, newest first (also "
+                         "outside a repository, with a URL)")
+    a.add_argument("url", metavar="URL|SOURCE", help=f"name of a [source] in {REGISTRY}, or URL")
+    a.add_argument("--tag", metavar="PATTERN", help="only the tags matching PATTERN (* ? [...])")
+    a.add_argument("-b", "--branch", help="along BRANCH instead of the source's (a URL: its "
+                                          "default branch)")
+    versions_options(a)
     a = add_command(actions, "map", parents=[colorp],
                     help="use a local checkout for an upstream URL (in this repository's "
                          "config; --global: in all repositories)")
@@ -7560,6 +7575,12 @@ def run(argv=None):
         setup_colors(color_option(argv), repo.top if repo else None)
         if args.cmd == "source" and args.action == "map":     # also outside a repository
             return cmd_map(args, repo)
+        if args.cmd == "source" and args.action == "versions":    # also outside one
+            ctx = Context(args, repo)
+            if repo:
+                repo.ctx = ctx
+            PipeGuard.stop = True
+            return cmd_source_versions(ctx, repo, args)
         if args.cmd == "cache":               # also outside a repository
             return cmd_cache(args)
         if repo is None:

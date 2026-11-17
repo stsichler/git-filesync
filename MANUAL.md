@@ -16,7 +16,7 @@ motivation and installation see the [README](README.md).
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool) · [`restore`](#restore)
   - [`add`](#add) · [`rm`](#rm) · [`unlink`](#unlink) · [`mv`](#mv)
 - [Advanced commands](#advanced-commands)
-  - [`set`](#set) · [`versions`](#versions) · [`edit`](#edit) · [`source`](#source) · [`source map`](#source-map) · [`cache`](#cache)
+  - [`set`](#set) · [`versions`](#versions) · [`edit`](#edit) · [`source`](#source) · [`source versions`](#source-versions) · [`source map`](#source-map) · [`cache`](#cache)
   - [`hooks`](#hooks)
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted upstream](#files-renamed-or-deleted-upstream)
@@ -231,6 +231,7 @@ Basic commands – what you need day to day:
 | [`versions [PATH…]`](#versions) | the upstream versions linked files can take |
 | [`edit`](#edit) | edit `.git-filesync` in the editor |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL or branch |
+| [`source versions URL\|SOURCE`](#source-versions) | the tags along the branch of a source |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
 | [`cache [ACTION]`](#cache) | the cache of upstream clones: show, list, prune, clear, print its directory |
 | [`hooks [ACTION]`](#hooks) | the hooks: show, install, remove; reminders, push check |
@@ -284,7 +285,7 @@ objects after a while (normally two weeks).
 
 | Option | Commands | Effect |
 |---|---|---|
-| `--no-fetch` | `status`, `pull`, `diff`/`difftool`, `restore`, `add`, `set`, `versions`, `source set` | don't fetch, use the cached state (offline); an upstream not in the [cache](#cache) yet is cloned anyway. `restore`, `diff` of local changes and `set` without `--source`, `-b`, `--tag`, `-p` fetch only if the cache lacks the branch, even without it |
+| `--no-fetch` | `status`, `pull`, `diff`/`difftool`, `restore`, `add`, `set`, `versions`, `source set`, `source versions` | don't fetch, use the cached state (offline); an upstream not in the [cache](#cache) yet is cloned anyway. `restore`, `diff` of local changes and `set` without `--source`, `-b`, `--tag`, `-p` fetch only if the cache lacks the branch, even without it |
 | `--remote` | as `--no-fetch` | ignore [mappings](#source-map) this once and use the upstream URL; the mapping stays. With `--no-fetch`: the cached state |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
@@ -300,7 +301,7 @@ Shows the state of all (or the given) linked files.
 | Option | Effect |
 |---|---|
 | `-s`, `--short` | short format, three columns |
-| `-v`, `--verbose` | also list every linked file with its source; for a [pinned](#pinning-to-a-tag) one the [newer tags](#newer-tags) too |
+| `-v`, `--verbose` | also list every linked file with its source |
 | `--exit-code` | exit with 1 if something is to sync, a linked file is missing, or a file that isn't adaptable is modified |
 
 Each file is looked at in three independent respects:
@@ -446,8 +447,6 @@ other files are still synced. In scripts and CI: `git filesync pull --all
   deleted upstream](#files-renamed-or-deleted-upstream).
 - **Linked directories:** `pull` syncs all their files or none, see
   [Linked directories](#linked-directories).
-- **Pinned files:** `pull` ends with a hint if there are [newer
-  tags](#newer-tags) on the source's branch.
 - **Pulling again before the commit** works, e.g. to another version: what
   a pull wrote counts as synced, not as a local change, and the proposed
   message goes from what is committed – also for merged adaptations.
@@ -633,7 +632,7 @@ directory](#linking-a-directory)).
 
 | Option | Effect |
 |---|---|
-| `-b`, `--branch BRANCH` | the upstream branch; for a pinned file where [newer tags](#newer-tags) are looked for |
+| `-b`, `--branch BRANCH` | the upstream branch; for a pinned file the one its tag is on |
 | `--tag TAG` | [pin](#pinning-to-a-tag) the file to a tag, or a [pattern](#tag-patterns) |
 | `-p`, `--path PATH` | upstream path; default: the same as FILE or DIR (`/`: the upstream root; `\` counts as `/`) |
 | `--include PATTERN` | directory: only files matching PATTERN; repeatable |
@@ -847,11 +846,16 @@ git filesync versions [PATH…] [-v] [--max-count N | --all] [--no-fetch] [--rem
 Lists for each entry (all without `PATH`) the upstream versions it can
 take, newest first – a help for choosing `--tag` or `--commit`:
 
-- **Branch:** the commits on it that changed the upstream path (for a
-  `[dir]`: the directory), as `pull` lists them in its proposed commit message.
+- **Branch:** the commits that changed the upstream path (for a `[dir]`:
+  the directory), as `status` counts them, and the tags along the branch.
 - **Tag pattern:** the matching tags along the branch, as `pull` chooses
   among them – also those that leave the file unchanged.
-- **Pinned tag:** only that one.
+- **Pinned tag:** only that one; [`source versions`](#source-versions)
+  lists the others.
+
+Newest first means by the commit graph, from the branch head back (see
+[Which tag is newest](#which-tag-is-newest)); older versions are listed
+too, up to `--max-count`.
 
 Marked are the version `pull` would take (`selected by`) and the one
 synced (`synced by`; for tags each one where the file is that version).
@@ -919,7 +923,7 @@ Lists and changes the `[source]` sections, like `git remote`. Only
 | `source` | list the source names (`-v`: with URL, branch and number of entries) |
 | `source rename OLD NEW` | rename a source and every reference to it |
 | `source set NAME --url URL` | change the URL, e.g. after upstream moved; the synced versions are looked up there as for [`set --source`](#set) |
-| `source set NAME -b BRANCH` | follow BRANCH, for all files of the source; for [pinned](#pinning-to-a-tag) ones where newer tags are looked for |
+| `source set NAME -b BRANCH` | follow BRANCH, for all files of the source; [pinned](#pinning-to-a-tag) ones: their tags must be on it |
 | `source set NAME` | show the source as the command that sets it, like [`set`](#set) (`--list`: all sources) |
 
 ```
@@ -931,6 +935,33 @@ owner/lib-dev	https://github.com/owner/lib.git (dev, 1 file)
 `source set` refuses a branch that doesn't exist upstream, and
 a change that would make two sources identical – move the files with
 [`set`](#set) instead.
+
+### `source versions`
+
+```
+git filesync source versions URL|SOURCE [--tag PATTERN] [-b BRANCH] [-v] [--max-count N | --all]
+                             [--no-fetch] [--remote] [--color[=WHEN] | --no-color]
+```
+
+Lists the tags along the branch of a source (of a URL: its default
+branch), newest first as for [tag patterns](#which-tag-is-newest), marked
+`selected by` with the pinned entries that take them – a help for
+choosing `--tag`, without pinning a file first. With a URL it also works
+outside a repository.
+
+| Option | Effect |
+|---|---|
+| `--tag PATTERN` | only the tags matching PATTERN (`*`, `?`, `[…]`) |
+| `-b`, `--branch BRANCH` | along BRANCH instead of the source's |
+| `-v`, `--max-count N`, `--all` | as for [`versions`](#versions) |
+
+```console
+$ git filesync source versions owner/lib --tag 'v1.*' --max-count 2
+owner/lib: tags matching v1.* on main
+v1.4  2026-10-11  Add retry option
+v1.3  2026-09-02  Fix timeout  (selected by cfg/x.yml)
+(2 more: --all lists them)
+```
 
 ### `source map`
 
@@ -1106,15 +1137,16 @@ git filesync set cfg/ --tag v1.2.0          # files already linked
 ```
 
 The `[file]` entry then has `tag = v1.2.0`; the source stays, shared with
-files following its branch, which is where [newer tags](#newer-tags) are
-looked for. `status` compares against the version at the tag, and `pull`
-syncs to it.
+files following its branch – the tag must be on it, else `status` warns.
+`status` compares against the version at the tag, and `pull` syncs to it.
+Newer tags are not pointed out: only you know whether they matter for the
+file. [`source versions`](#source-versions) lists them (`--tag 'v1.*'`), or pin to
+a [pattern](#tag-patterns).
 
 Tags are taken as immutable, as Git does: once a tag is in the cache,
 `status` and the hooks fetch nothing for it (a tag moved on the server is
 noticed only with the next fetch for another reason). With a [mapped
-checkout](#source-map), the tag there is used. `pull` and `status -v` fetch
-the tags (unless `--no-fetch`) to name newer ones.
+checkout](#source-map), the tag there is used.
 
 To move on to a newer release, change the tag, then sync:
 
@@ -1136,26 +1168,23 @@ moves on to new releases by itself:
 git filesync add https://github.com/owner/lib.git cfg/x.yml --tag 'v1.*'
 ```
 
-- "Newest" is meant as for [newer tags](#newer-tags), by the commit graph.
+- "Newest" is meant by the commit graph, see [Which tag is newest](#which-tag-is-newest).
 - `status` fetches the tags (unless `--no-fetch`) and shows a new matching
   tag as `pending`; `status -v` shows which tag the pattern matches now
   (`tag v1.* = v1.4 on main`). The commit message names the tag.
 - Tags that don't match are ignored; no match on the branch is an error.
 
-#### Newer tags
+#### Which tag is newest
 
 Tag names are opaque (`v1.10` vs. `v1.9`, `tool-20261016`), and tags carry
-no reliable date. So "newer" is defined by the commit graph: the newest tag
-is on the first tagged commit from the branch head back along its
-first-parent line – tags on merged side branches don't count:
+no reliable date. So "newer" is defined by the commit graph: from the
+branch head back along its first-parent line, the first tagged commit has
+the newest tag – tags on merged side branches don't count. This orders
+[tag patterns](#tag-patterns), [`versions`](#versions) and [`source
+versions`](#source-versions).
 
-```
-hint: 3 files pinned to tag v1.2.0; the newest tag on branch main is v1.4.0 (use 'git filesync set --tag v1.4.0 <file>...' and pull to switch)
-```
-
-If the pinned tag isn't on the branch, `status` warns; to follow a
-maintenance line, switch the files to it: `set FILE… -b maint --tag
-v1.2.1`. Pre-releases count like any tag. With a [mapped
+To follow a maintenance line, switch the files to it: `set FILE… -b maint
+--tag 'v1.2.*'`. Pre-releases count like any tag. With a [mapped
 checkout](#source-map), its local branches and tags count, unpushed ones
 included.
 
