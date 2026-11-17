@@ -54,6 +54,7 @@
 #   26. Current directory reached through a link: junction, subst drive, symlink
 #   27. [dir] entries: a directory synced as a whole, files of its own
 #   28. pull --overwrite of uncommitted changes; pull -W; registry changes not staged
+#   29. Relative URLs: resolved like in .gitmodules
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -3477,6 +3478,41 @@ quiet git filesync pull z
 cache28z=$(dirname "$(grep -l "m28z[.]git" "$FILESYNC_CACHE"/*/config)")
 check "a lower layer's source: nothing fetched" "$(GIT_NO_LAZY_FETCH=1 git -C "$cache28z" \
   -c protocol.allow=never cat-file -e "$(git -C ../m28z rev-parse HEAD:z)" 2>/dev/null || echo missing)" "missing"
+
+# =============================================================================
+section "29. Relative URLs: resolved like in .gitmodules"
+# =============================================================================
+
+# without a remote: relative to the repository's root (not the current
+# directory); repositories with the same relative URL share no cache clone
+cd "$T"
+for n in a b; do
+  mkdir r29$n && git init -q r29$n/up && (cd r29$n/up && echo "up $n" > f && git add f && git commit -qm "c $n")
+  git init -q r29$n/down
+done
+cd r29a/down && mkdir sub && cd sub && addc ../up f -p f
+cd "$T/r29b/down" && addc ../up f
+check "relative URL without remote: per repository, from a subdirectory too" \
+  "$(cat "$T/r29a/down/sub/f" f)" "up a
+up b"
+check "relative URL: kept in the registry, source named after it" \
+  "$(git config -f .git-filesync source.up.url)" "../up"
+# with a remote: relative to the remote's URL (the current branch's, else origin)
+cd "$T/r29a" && git clone -q --bare up up29.git && git -C up29.git config uploadpack.allowFilter true
+(cd up && echo "server" > f && git commit -qam server && git push -q ../up29.git HEAD:main)
+git init -q d29 && cd d29
+git remote add origin "$TURL/r29a/app.git"
+addc ../up29.git f
+check "relative URL with origin: next to the remote's URL" "$(cat f)" "server"
+git remote add other "$TURL/nowhere29/app.git" && git config branch.main.remote other
+check "relative URL: the remote of the current branch" \
+  "$(git filesync pull --all 2>&1 | grep -c "^Cloning .*/nowhere29/up29.git ")" "1"
+git config --unset branch.main.remote
+check "source map: a relative URL is mapped resolved" \
+  "$(git filesync source map ../up29.git "$T/r29a/up") $(git config "filesync.$TURL/r29a/up29.git.localpath")" \
+  "[local] $TURL/r29a/up29.git -> $T/r29a/up $T/r29a/up"
+check "source map: a source with a relative URL" \
+  "$(git filesync source map up29 | grep -c "^\[local\] $TURL/r29a/up29.git -> ")" "1"
 
 # =============================================================================
 section "Upstream repositories untouched"

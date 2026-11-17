@@ -350,7 +350,7 @@ from dataclasses import dataclass, field, replace as dc_replace
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.24.2"
+__version__ = "0.24.3"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -581,9 +581,48 @@ def norm_url(url):
 
 
 def repo_label(url):
-    """'https://github.com/owner/repo.git' -> 'owner/repo'."""
-    m = re.search(r"([^/:]+/[^/:]+?)(?:\.git)?/?$", url.strip())
-    return m.group(1) if m else url
+    """'https://github.com/owner/repo.git' -> 'owner/repo', '../repo' -> 'repo'."""
+    u = re.sub(r"^(\.\.?/)+", "", url.strip())
+    m = re.search(r"((?:[^/:]+/)?[^/:]+?)(?:\.git)?/?$", u)
+    return m.group(1) if m else u
+
+
+def is_relative_url(url):
+    return url.startswith(("./", "../"))
+
+
+_remote_urls = {}
+
+
+def resolve_url(url, top):
+    """A relative URL (./ or ../) as Git takes it in .gitmodules: relative to
+    the URL of the default remote of the repository at top (the remote of
+    the current branch's upstream, else origin), or to top itself if it has
+    none. Any other URL unchanged."""
+    if not is_relative_url(url):
+        return url
+    if top is None:
+        raise FsError(f"relative URL '{url}' needs a repository to resolve against")
+    if top not in _remote_urls:
+        branch = out(git(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=top, check=False))
+        remote = branch and out(git(["config", f"branch.{branch}.remote"], cwd=top,
+                                    check=False)) or "origin"
+        base = out(git(["config", f"remote.{remote}.url"], cwd=top, check=False))
+        if not base or not looks_like_url(base) and not os.path.isabs(base):
+            base = Path(os.path.abspath(Path(top) / base)).as_posix()
+        _remote_urls[top] = base.replace("\\", "/") if os.name == "nt" else base
+    base, rest, colon = _remote_urls[top].rstrip("/"), url, False
+    while rest.startswith(("./", "../")):
+        if rest.startswith("../"):    # one component off the base, as git does
+            i = base.rfind("/")
+            if i < 0:
+                i = base.rfind(":")
+                if i < 0:
+                    raise FsError(f"cannot resolve relative URL '{url}' against '{_remote_urls[top]}'")
+                colon = True
+            base = base[:i]
+        rest = rest[3:] if rest.startswith("../") else rest[2:]
+    return (base + (":" if colon else "/") + rest).rstrip("/")
 
 
 def cache_root():
@@ -1390,6 +1429,7 @@ class Context:
         the source: a pattern is resolved to the newest matching tag on it.
         A branch that doesn't exist is an error (a tag not on it isn't: see
         tag_info)."""
+        url = self.url(url)
         key = (norm_url(url), ref, line if ref[0] == "tag" else None)
         if key not in self._sources:
             try:
@@ -1404,8 +1444,13 @@ class Context:
             raise s
         return s
 
+    def url(self, url):
+        """url as git takes it: a relative one resolved (see resolve_url)."""
+        return resolve_url(url, self.repo_top)
+
     def local_path(self, url):
         """Mapped local checkout for url (validated), or None."""
+        url = self.url(url)
         if self.remote:
             return None
         if self._mappings is None:
@@ -1426,6 +1471,7 @@ class Context:
     def default_branch(self, url):
         """Default branch upstream: from a mapped checkout or the cache
         when possible (works offline), otherwise asked from the server."""
+        url = self.url(url)
         local = self.local_path(url)
         if local:
             def symref(ref):
@@ -1494,6 +1540,7 @@ class Context:
         checkout or the cache clone as it is - never fetched or cloned (a
         URL changed, not committed yet: the old server may be gone); None if
         there is neither. Its blobs are looked up by id, the ref is not."""
+        url = self.url(url)
         key = (norm_url(url), ref)
         found = [s for k, s in self._sources.items() if k[:2] == key and not isinstance(s, FsError)]
         if found:
@@ -1518,6 +1565,7 @@ class Context:
         """The cache clone of url, fetched once per run - not for a tag
         already there (tags are taken as immutable), unless newer tags are
         of interest (want_tags); with lazy, only if it lacks the ref need."""
+        url = self.url(url)
         d = self.cache_dir(url)
         if d in self._ready:
             return d
@@ -1565,6 +1613,7 @@ class Context:
     def on_server(self, url, commit):
         """Is commit on url's server - reachable from a branch or tag there,
         whatever is mapped? Fetches the cache clone; None if that fails."""
+        url = self.url(url)
         try:
             d = self._cache(url)
         except FsError:
@@ -6587,24 +6636,26 @@ def print_mappings(maps, url=None):
 
 
 def looks_like_url(s):
-    """'scheme://...' or scp-like 'host:path' (also 'C:/...') - never taken
-    as the name of a [source]."""
-    return "://" in s or bool(re.match(r"[^/]+:", s))
+    """'scheme://...', scp-like 'host:path' (also 'C:/...') or relative
+    ('./', '../') - never taken as the name of a [source]."""
+    return "://" in s or is_relative_url(s) or bool(re.match(r"[^/]+:", s))
 
 
 def map_url(repo, arg, setting):
     """The URL map works on: arg, or the url of the [source] named arg in this
     repository's .git-filesync (a URL-like arg is always a URL). When
     setting a mapping, an arg that is neither (nor an existing path, which
-    git takes as a URL too) is refused - most likely a mistyped name."""
+    git takes as a URL too) is refused - most likely a mistyped name. A
+    relative URL is resolved (see resolve_url): mappings are for absolute
+    URLs."""
     if not arg or looks_like_url(arg):
-        return arg
+        return arg and resolve_url(arg, repo and repo.top)
     if repo:
         source = Registry(repo).sources.get(arg)
         if source is not None:
             if not source.get("url"):
                 raise FsError(f"[source \"{arg}\"] in {REGISTRY} has no url")
-            return source["url"]
+            return resolve_url(source["url"], repo.top)
     if setting:
         require_url(repo, arg)
     return arg

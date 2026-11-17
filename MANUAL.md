@@ -75,7 +75,9 @@ committed like any other file, in git-config format:
   like a remote with its branch. `add` and `set` create sources as needed
   and name them after the URL (`owner/repo`, with a number appended if the
   name is taken: `owner/repo-2`); a source without files is removed. To
-  rename one, use [`source rename`](#source).
+  rename one, use [`source rename`](#source). A relative `url` (`../lib.git`)
+  counts from the URL of this repository's remote, as in `.gitmodules`
+  (without a remote: from its root directory).
 - A `[file]` is keyed by the path in the downstream repository. A `tag` in
   it [pins](#pinning-to-a-tag) the file to an upstream tag (or the newest
   tag matching a pattern).
@@ -918,8 +920,8 @@ git filesync source map                          # list (scope, overridden ones 
 git filesync source map owner/lib --unset
 ```
 
-Something that looks like a URL (`scheme://…`, `host:path`) is always taken
-as one; an argument that is neither a URL, nor a source, nor an existing
+Something that looks like a URL (`scheme://…`, `host:path`, `./…`, `../…`)
+is always taken as one; a relative URL is mapped resolved, as it is used; an argument that is neither a URL, nor a source, nor an existing
 path is refused. A repository's own mapping beats a global one, so
 repositories can point to different checkouts of the same upstream.
 DIR is kept as given, only made absolute: a junction, symlink or drive
