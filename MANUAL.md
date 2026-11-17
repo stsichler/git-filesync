@@ -77,7 +77,8 @@ committed like any other file, in git-config format:
   name is taken: `owner/repo-2`); a source without files is removed. To
   rename one, use [`source rename`](#source). A relative `url` (`../lib.git`)
   counts from the URL of this repository's remote, as in `.gitmodules`
-  (without a remote: from its root directory).
+  (without a remote: from its root directory). URLs are written with `/`,
+  also a path given with `\`.
 - A `[file]` is keyed by the path in the downstream repository. A `tag` in
   it [pins](#pinning-to-a-tag) the file to an upstream tag (or the newest
   tag matching a pattern).

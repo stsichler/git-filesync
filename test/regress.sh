@@ -3511,6 +3511,13 @@ git config --unset branch.main.remote
 check "source map: a relative URL is mapped resolved" \
   "$(git filesync source map ../up29.git "$T/r29a/up") $(git config "filesync.$TURL/r29a/up29.git.localpath")" \
   "[local] $TURL/r29a/up29.git -> $T/r29a/up $T/r29a/up"
+# URLs in the registry never have backslashes (a path given the Windows way)
+cd "$T/r29b" && git init -q d29b && cd d29b
+quiet fsd add '..\up' f
+check "add: backslashes of a URL written as /" "$(git config -f .git-filesync source.up.url) $(cat f)" "../up up b"
+quiet git commit -qm x && quiet fsd source set up --url '..\..\r29b\up'
+check "source set --url: backslashes written as /" "$(git config -f .git-filesync source.up.url)" "../../r29b/up"
+cd "$T/r29a/d29"
 check "source map: a source with a relative URL" \
   "$(git filesync source map up29 | grep -c "^\[local\] $TURL/r29a/up29.git -> ")" "1"
 

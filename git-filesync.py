@@ -587,6 +587,13 @@ def repo_label(url):
     return m.group(1) if m else u
 
 
+def registry_url(url):
+    """A URL as written to .git-filesync: '/' for '\\' (a local path given
+    the Windows way), so it reads the same on every platform; only
+    mappings keep platform paths."""
+    return url.replace("\\", "/")
+
+
 def is_relative_url(url):
     return url.startswith(("./", "../"))
 
@@ -610,7 +617,7 @@ def resolve_url(url, top):
         base = out(git(["config", f"remote.{remote}.url"], cwd=top, check=False))
         if not base or not looks_like_url(base) and not os.path.isabs(base):
             base = Path(os.path.abspath(Path(top) / base)).as_posix()
-        _remote_urls[top] = base.replace("\\", "/") if os.name == "nt" else base
+        _remote_urls[top] = base.replace("\\", "/")      # as git cuts it on Windows
     base, rest, colon = _remote_urls[top].rstrip("/"), url, False
     while rest.startswith(("./", "../")):
         if rest.startswith("../"):    # one component off the base, as git does
@@ -5329,8 +5336,9 @@ def add_ref(ctx, reg, args, hint=None):
                              f"source's branch with 'git filesync source set "
                              f"{args.source} -b {args.branch}'"))
         return s.get("url", ""), s["branch"], args.source
-    require_url(reg.repo, args.source)
-    return args.source, args.branch or ctx.default_branch(args.source), None
+    url = registry_url(args.source)
+    require_url(reg.repo, url)
+    return url, args.branch or ctx.default_branch(url), None
 
 
 def find_base(repo, src, rev, rel, path, target, overwrite=False):
@@ -6596,7 +6604,7 @@ def cmd_source(ctx, repo, args):
         print(f"{paint(f'renamed {args.name} -> {args.value}', 'green')}; "
               + pending_note(repo, False, reg.finish(stage=not args.worktree)))
         return EXIT_OK
-    url, branch = args.url or s.get("url", ""), args.branch or s.get("branch")
+    url, branch = registry_url(args.url or s.get("url", "")), args.branch or s.get("branch")
     keys = [(k, v) for k, v in (("url", url), ("branch", branch)) if v != s.get(k)]
     if not keys:
         print("nothing to change")
