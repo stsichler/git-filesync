@@ -972,6 +972,13 @@ check "color.filesync=never beats color.ui" \
   "$(git -c color.ui=always -c color.filesync=never filesync status | grep -c "$ESC")" "0"
 check "NO_COLOR" "$(NO_COLOR=1 git -c color.ui=always filesync status | grep -c "$ESC")" "0"
 check "colored error on stderr" "$(git filesync pull nothere --color=always 2>&1 | grep -c "${ESC}\[1;31merror:")" "1"
+check "--color before the action: kept" \
+  "$(git filesync hooks --color=always uninstall | grep -c "$ESC")" "2"
+# argparse colors the help from Python 3.14 on - then as --color says, also piped
+if "$PYTHON" -c 'import argparse, inspect, sys; sys.exit("color" not in inspect.signature(argparse.ArgumentParser).parameters)'; then
+  check "-h --color=always: colored, also piped" "$(git filesync status -h --color=always | grep -c "$ESC" | grep -vc '^0$')" "1"
+  check "-h piped: no colors" "$(git filesync status -h | grep -c "$ESC")" "0"
+fi
 
 
 # =============================================================================

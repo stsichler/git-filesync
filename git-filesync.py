@@ -7326,7 +7326,7 @@ def run(argv=None):
     a = add_command(actions, "rename", parents=[colorp],
                     help="rename a source and all references to it")
     a.add_argument("name", metavar="OLD", help="key of the [source]")
-    a.add_argument("value", metavar="NEW")
+    a.add_argument("value", metavar="NEW", help="its new key")
     a.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
     registry_worktree(a)
     # checks the branch upstream
@@ -7341,8 +7341,8 @@ def run(argv=None):
     a.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
     registry_worktree(a)
     a = add_command(actions, "map", parents=[colorp],
-                    help="use a local checkout for an upstream URL (this repo's config; "
-                         "--global for all repos)")
+                    help="use a local checkout for an upstream URL (in this repository's "
+                         "config; --global: in all repositories)")
     a.add_argument("url", nargs="?", metavar="URL|SOURCE",
                    help="upstream URL, or the name of a [source] for its URL "
                         "(without DIR: list its mappings)")
@@ -7391,7 +7391,18 @@ def run(argv=None):
     if argv and argv[0] in ("diff", "difftool") and "--" in argv:
         i = argv.index("--")
         argv, extra = argv[:i], argv[i + 1:]
-    args = ap.parse_args(argv)
+    # argparse (3.14+) colors only on a terminal: decided here instead, like
+    # for all other output (--color=always also in a pipe)
+    saved = os.environ.get("PYTHON_COLORS")
+    if color:
+        os.environ["PYTHON_COLORS"] = "1" if color["color"] else "0"
+    try:
+        args = ap.parse_args(argv)
+    finally:
+        if color:
+            os.environ.pop("PYTHON_COLORS", None)
+            if saved is not None:
+                os.environ["PYTHON_COLORS"] = saved
     if not args.cmd:
         args = ap.parse_args(["status"])
     args.extra = extra
@@ -7401,7 +7412,9 @@ def run(argv=None):
             repo = Repo()
         except FsError:
             repo = None
-        setup_colors(args.color, repo.top if repo else None)
+        # from argv, not args.color: an action's default would override a
+        # --color given before it (source --color=always map)
+        setup_colors(color_option(argv), repo.top if repo else None)
         if args.cmd == "source" and args.action == "map":     # also outside a repository
             return cmd_map(args, repo)
         if args.cmd == "cache":               # also outside a repository
