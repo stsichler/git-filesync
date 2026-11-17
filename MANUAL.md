@@ -16,7 +16,7 @@ motivation and installation see the [README](README.md).
   - [`status`](#status) · [`pull`](#pull) · [`diff`](#diff) · [`difftool`](#difftool) · [`restore`](#restore)
   - [`add`](#add) · [`rm`](#rm) · [`unlink`](#unlink) · [`mv`](#mv)
 - [Advanced commands](#advanced-commands)
-  - [`set`](#set) · [`edit`](#edit) · [`source`](#source) · [`source map`](#source-map) · [`cache`](#cache)
+  - [`set`](#set) · [`versions`](#versions) · [`edit`](#edit) · [`source`](#source) · [`source map`](#source-map) · [`cache`](#cache)
   - [`hooks`](#hooks)
 - [Further topics](#further-topics)
   - [Pinning to a tag](#pinning-to-a-tag) · [Proposed commit messages](#proposed-commit-messages) · [Files renamed or deleted upstream](#files-renamed-or-deleted-upstream)
@@ -228,6 +228,7 @@ Basic commands – what you need day to day:
 | Command | Purpose |
 |---|---|
 | [`set PATH… [OPTIONS]`](#set) | change (or show) the link of linked files: source, tag, upstream path, adaptable, patterns |
+| [`versions [PATH…]`](#versions) | the upstream versions linked files can take |
 | [`edit`](#edit) | edit `.git-filesync` in the editor |
 | [`source [ACTION …]`](#source) | list sources, rename them, change URL or branch |
 | [`source map [URL\|SOURCE [DIR]]`](#source-map) | use a local checkout of upstream |
@@ -283,7 +284,7 @@ objects after a while (normally two weeks).
 
 | Option | Commands | Effect |
 |---|---|---|
-| `--no-fetch` | `status`, `pull`, `diff`/`difftool`, `restore`, `add`, `set`, `source set` | don't fetch, use the cached state (offline); an upstream not in the [cache](#cache) yet is cloned anyway. `restore`, `diff` of local changes and `set` without `--source`, `-b`, `--tag`, `-p` fetch only if the cache lacks the branch, even without it |
+| `--no-fetch` | `status`, `pull`, `diff`/`difftool`, `restore`, `add`, `set`, `versions`, `source set` | don't fetch, use the cached state (offline); an upstream not in the [cache](#cache) yet is cloned anyway. `restore`, `diff` of local changes and `set` without `--source`, `-b`, `--tag`, `-p` fetch only if the cache lacks the branch, even without it |
 | `--remote` | as `--no-fetch` | ignore [mappings](#source-map) this once and use the upstream URL; the mapping stays. With `--no-fetch`: the cached state |
 | `--color[=always\|never\|auto]`, `--no-color` | all | override `color.filesync` / `color.ui` (see [Colors](#colors)) |
 
@@ -835,6 +836,40 @@ git filesync set src/foo.c -p lib/foo_v2.c
 git filesync set cfg/ -b maint --tag 'v1.2.*'    # the newest v1.2.* on maint
 git filesync set cfg/ --no-tag                   # follow the branch again
 ```
+
+### `versions`
+
+```
+git filesync versions [PATH…] [-v] [--max-count N | --all] [--no-fetch] [--remote]
+                      [--color[=WHEN] | --no-color]
+```
+
+Lists for each entry (all without `PATH`) the upstream versions it can
+take, newest first – a help for choosing `--tag` or `--commit`:
+
+- **Branch:** the commits on it that changed the upstream path (for a
+  `[dir]`: the directory), as `pull` lists them in its proposed commit message.
+- **Tag pattern:** the matching tags along the branch, as `pull` chooses
+  among them – also those that leave the file unchanged.
+- **Pinned tag:** only that one.
+
+Marked are the version `pull` would take (`selected by`) and the one
+synced (`synced by`; for tags each one where the file is that version).
+
+```console
+$ git filesync versions cfg/x.yml --max-count 3
+cfg/x.yml: newest tag matching v1.* on main of owner/lib
+v1.4           2026-10-11  Add retry option  (selected by cfg/x.yml)
+v1.3 = v1.3.0  2026-09-02  Fix timeout  (synced by cfg/x.yml)
+v1.2           2026-08-20  New format
+(4 more: --all lists them)
+```
+
+| Option | Effect |
+|---|---|
+| `-v`, `--verbose` | also each whole commit message, and the message of an annotated tag |
+| `--max-count N` | the newest N versions (default: 10; 0: none, as in `git log`) |
+| `--all` | all versions |
 
 ### `edit`
 

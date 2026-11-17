@@ -55,6 +55,7 @@
 #   27. [dir] entries: a directory synced as a whole, files of its own
 #   28. pull --overwrite of uncommitted changes; pull -W; registry changes not staged
 #   29. Relative URLs: resolved like in .gitmodules
+#   30. versions: the upstream versions an entry can take
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -3528,6 +3529,72 @@ check "source set --url: backslashes written as /" "$(git config -f .git-filesyn
 cd "$T/r29a/d29"
 check "source map: a source with a relative URL" \
   "$(git filesync source map up29 | grep -c "^\[local\] $TURL/r29a/up29.git -> ")" "1"
+
+# =============================================================================
+section "30. versions: the upstream versions an entry can take"
+# =============================================================================
+
+cd "$T" && git init -q m30 && cd m30 && mkdir d
+for i in 1 2 3 4; do
+  echo $i > f && echo $i > d/x && git add -A && git commit -qm "change $i" -m "body of $i" && git tag v$i
+done
+git tag -a v4a -m "Release 4" -m "notes for 4"
+echo 5 > other && git add other && git commit -qm unrelated
+git checkout -q -b side v2 && git commit -q --allow-empty -m side && git tag v9 && git checkout -q main
+cd "$T" && git init -q s30 && cd s30
+quiet git filesync add ../m30 f
+quiet git filesync add ../m30 g -p f --tag 'v*'
+quiet git filesync add ../m30 h -p f --tag v2
+quiet git filesync add ../m30 d
+git commit -qm links
+(cd ../m30 && echo 6 > f && git commit -qam "change 6" && git tag v6)
+OUT=$(git filesync versions f)
+check "versions: commits changing the path, pull's marked" \
+  "$(echo "$OUT" | sed -E 's/^[0-9a-f]+ +[0-9-]+ +//')" "f: branch main of m30
+change 6  (selected by f)
+change 4  (synced by f)
+change 3
+change 2
+change 1"
+OUT=$(git filesync versions g)
+check "versions: a pattern's tags along the branch, also unchanged ones" \
+  "$(echo "$OUT" | sed -E 's/  +[0-9-]{10}  +/ | /')" "g: newest tag matching v* on main of m30
+v6 | change 6  (selected by g)
+v4 = v4a | change 4  (synced by g)
+v3 | change 3
+v2 | change 2
+v1 | change 1"
+check "versions: a pinned tag only" \
+  "$(git filesync versions h | sed -E 's/  +[0-9-]{10}  +/ | /')" "h: tag v2 of m30
+v2 | change 2  (selected by h, synced by h)"
+check "versions: a file of a [dir] lists the entry" \
+  "$(git filesync versions d/x | sed -n '1p;2s/^[0-9a-f]* *[0-9-]* *//p')" "d/: branch main of m30
+change 4  (selected by d/, synced by d/)"
+OUT=$(git filesync versions g -v --max-count 2)
+check "versions -v --max-count: messages, how many more" \
+  "$(echo "$OUT" | sed -E 's/  +[0-9-]{10}  +/ | /' | sed -n '3,$p')" "v4 = v4a | change 4  (synced by g)
+    Release 4
+
+    notes for 4
+
+    body of 4
+(3 more: --all lists them)"
+check "versions --all: all" "$(git filesync versions g --max-count 2 --all 2>&1 | grep -c 'not allowed')" "1"
+check "versions --max-count 0: none, as git log -n 0" \
+  "$(git filesync versions g --max-count 0 | sed 1d)" "(5 more: --all lists them)"
+check "versions --max-count -1: refused" "$(rc git filesync versions g --max-count -1)" "2"
+# an entry that can't be listed: an error, the others are listed
+git config -f .git-filesync file.n.source m30 && git config -f .git-filesync file.n.path nothere
+git config -f .git-filesync file.z.source gone && git config -f .git-filesync file.z.path f
+check "versions: no commits change the path" "$(git filesync versions n)" "n: branch main of m30
+no commits on main change nothere"
+OUT=$(git filesync versions 2>&1); RC=$?
+check "versions: an entry without source is an error, the rest is listed" \
+  "$RC $(echo "$OUT" | grep -c '^error: z: incomplete entry') $(echo "$OUT" | grep -c ': branch main of m30$')" "2 1 3"
+git checkout -q .git-filesync
+git filesync source map ../m30 "$T/m30" >/dev/null
+check "versions: from a mapped checkout" \
+  "$(git filesync versions h | head -1)" "h: tag v2 of m30 (local checkout $T/m30)"
 
 # =============================================================================
 section "Upstream repositories untouched"

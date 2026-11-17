@@ -169,6 +169,7 @@ Advanced commands:
 | Command | Purpose |
 |---|---|
 | `set PATH… [OPTIONS]` | change (or show) source, tag, upstream path, adaptable or patterns of linked files |
+| `versions [PATH…]` | the upstream versions linked files can take: commits or tags |
 | `edit` | edit `.git-filesync` in the editor; checked and staged afterwards |
 | `source [ACTION …]` | list sources; rename, change URL or branch |
 | `source map [URL\|SOURCE [DIR]]` | use a local checkout of the upstream repository instead of fetching |

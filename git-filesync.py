@@ -244,6 +244,17 @@ Advanced commands:
                                 e.g. a fork)
         -n, --dry-run           only show what would change
 
+    versions [PATH...]          per entry the upstream versions it can take,
+                                newest first: the commits of its branch
+                                that changed its path, the tags matching
+                                its pattern along the branch, its pinned
+                                tag; marked: selected (what pull takes),
+                                synced
+        -v, --verbose           also each whole commit message (and the
+                                message of an annotated tag)
+        --max-count N           the newest N (default: 10; 0: none)
+        --all                   all of them
+
     edit                        open .git-filesync in the editor (like `git
                                 config --edit`); afterwards it is checked
                                 and what changed staged (a merge conflict
@@ -350,7 +361,7 @@ from dataclasses import dataclass, field, replace as dc_replace
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.24.3"
+__version__ = "0.25.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -6643,6 +6654,117 @@ def print_mappings(maps, url=None):
         print("no mappings" + (f" for {url}" if url else ""))
 
 
+def selection_text(link):
+    """'branch main' / 'tag v1.2' / 'newest tag matching v1.* on main' -
+    what an entry follows, for versions."""
+    kind, name = link.ref
+    if kind == "branch":
+        return f"branch {name}"
+    return f"newest tag matching {name} on {link.line}" if is_tag_pattern(name) else f"tag {name}"
+
+
+def cmd_versions(ctx, repo, args):
+    """versions [PATH...]: per entry the upstream versions it can take,
+    newest first - a pattern's matching tags on the branch, a pinned tag,
+    else the commits of the branch that changed its path (as pull's
+    proposed commit message lists them) - marked: the one pull selects,
+    the synced one."""
+    reg = Registry(repo)
+    links = select_links(repo, reg, args.paths)
+    if not links:
+        print(f"no linked files ({REGISTRY} not found or empty)")
+        return EXIT_OK
+    rc = EXIT_OK
+    for i, lk in enumerate(links):
+        if i:
+            print()
+        try:
+            problem = source_problem(lk)
+            if problem:
+                raise FsError(problem)
+            src = ctx.source(lk.url, lk.ref, lk.name, lk.line)
+            print(f"{paint(shown_entry(repo, lk), 'bold')}: {selection_text(lk)} of {lk.name}"
+                  + (f" ({src.label})" if src.local else ""))
+            show_versions(repo, src, lk, args)
+        except FsError as e:
+            error(f"{shown_entry(repo, lk)}: {e}")
+            rc = EXIT_ERROR
+    return rc
+
+
+def show_versions(repo, src, lk, args):
+    """The versions of entry lk (see cmd_versions), at most --max-count."""
+    path, (kind, name) = lk.path or ".", lk.ref
+    tags = {}                                    # {commit: tag names shown}
+    if kind == "tag" and src.tag_names:          # a pattern: along the branch, as pull
+        by_commit = src.tags_by_commit()
+        for c in out(src.git(["rev-list", "--first-parent", src.branch_refs()[lk.line]])).split():
+            names = sorted(t for t in by_commit.get(c, []) if fnmatch.fnmatchcase(t, name))
+            if names:
+                tags[c] = names
+        commits = list(tags)
+    elif kind == "tag":
+        commits = [src.tip()]
+        tags[commits[0]] = [name]
+    else:
+        commits = out(src.git(["rev-list", src.tip(), "--", lit(path)])).split()
+    selected = commits[0] if kind == "tag" else src.last_change(src.tip(), path)
+    listed = commits if args.all else commits[:args.max_count]
+    if not commits:
+        print(f"no commits on {name} change {path}")
+        return
+    info = commit_info(src, listed)
+    notes = tag_messages(src, [t for c in listed for t in tags.get(c, [])]) if args.verbose else {}
+    if not tags:
+        src.shorts(listed)
+    labels = {c: " = ".join(tags[c]) if tags else src.short(c) for c in listed}
+    width = max([len(x) for x in labels.values()] or [0])
+    who = shown_entry(repo, lk)
+    for c in listed:
+        date, subject, body = info.get(c, ("", "", ""))
+        # a tag: the synced version if the file (directory) there is it
+        synced = lk.commit and (src.last_change(c, path) if tags else c) == lk.commit
+        marks = ([f"selected by {who}"] if c == selected else []) + \
+            ([f"synced by {who}"] if synced else [])
+        line = f"{paint(labels[c].ljust(width), 'yellow')}  {date or '-':<10}  {subject}"
+        print(line.rstrip() + (f"  {paint('(' + ', '.join(marks) + ')', 'cyan')}" if marks else ""))
+        if args.verbose:
+            text = [notes[t] for t in tags.get(c, []) if notes.get(t)] + [body]
+            for x in "\n\n".join(t.strip("\n") for t in text if t.strip()).splitlines():
+                print(f"    {x}".rstrip())
+    if len(commits) > len(listed):
+        print(paint(f"({len(commits) - len(listed)} more: --all lists them)", "cyan"))
+
+
+def commit_info(src, commits):
+    """{commit: (date, subject, body)} with one `git show`."""
+    if not commits:
+        return {}
+    p = src.git(["show", "-s", "-z", "--no-show-signature", "--format=%H%x1f%cs%x1f%s%x1f%b"]
+                + commits, check=False)
+    result = {}
+    for rec in p.stdout.decode("utf-8", "replace").split("\0"):
+        parts = rec.split("\x1f")
+        if len(parts) == 4:
+            result[parts[0].strip()] = tuple(parts[1:])
+    return result
+
+
+def tag_messages(src, names):
+    """{tag: its message} of these tags that are annotated, with one
+    for-each-ref."""
+    if not names:
+        return {}
+    p = src.git(["for-each-ref", "--format=%(refname:strip=2)%1f%(objecttype)%1f%(contents)%1e"]
+                + [f"refs/tags/{t}" for t in names], check=False)
+    result = {}
+    for rec in out(p).split("\x1e"):
+        parts = rec.strip("\n").split("\x1f")
+        if len(parts) == 3 and parts[1] == "tag":
+            result[parts[0]] = parts[2]
+    return result
+
+
 def looks_like_url(s):
     """'scheme://...', scp-like 'host:path' (also 'C:/...') or relative
     ('./', '../') - never taken as the name of a [source]."""
@@ -7034,6 +7156,17 @@ def cmd_uninstall_hooks(repo, args):
 
 # --------------------------------------------------------------------------
 
+def count(text):
+    """argparse type: a whole number from 0 on (--max-count 0: none, as git)."""
+    try:
+        n = int(text)
+    except ValueError:
+        n = -1
+    if n < 0:
+        raise argparse.ArgumentTypeError(f"not a number from 0 on: '{text}'")
+    return n
+
+
 def add_command(sub, name, **kw):
     """A (sub)command whose -h repeats its summary from the command list
     (unless it has a description of its own)."""
@@ -7287,6 +7420,16 @@ def run(argv=None):
     p.add_argument("-n", "--dry-run", action="store_true", help="only show what would change")
     registry_worktree(p)
 
+    p = add_command(sub, "versions", parents=[common],
+                    help="list the upstream versions linked files can take, newest first")
+    p.add_argument("paths", nargs="*", metavar="PATH", help="linked files or directories (default: all)")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="also each whole commit message (and the message of an annotated tag)")
+    g = p.add_mutually_exclusive_group()
+    g.add_argument("--max-count", type=count, default=10, metavar="N",
+                   help="the newest N versions (default: 10)")
+    g.add_argument("--all", action="store_true", help="all versions")
+
     p = add_command(sub, "edit", parents=[colorp], help=f"open {REGISTRY} in the editor, then "
                                                       "check it and stage what changed")
     registry_worktree(p)
@@ -7427,7 +7570,7 @@ def run(argv=None):
         if args.cmd == "hook":
             args.no_fetch = args.name == "post-merge"    # pre-push: online anyway
         ctx = repo.ctx = Context(args, repo)
-        reading = args.cmd in ("status", "diff", "difftool", "hook") or \
+        reading = args.cmd in ("status", "diff", "difftool", "hook", "versions") or \
             args.cmd == "source" and not args.action
         if not reading and args.cmd != "edit":    # edit repairs it; others would stop
             repo.registry("index")                # halfway (see Registry.stage)
@@ -7436,7 +7579,7 @@ def run(argv=None):
             return {"status": cmd_status, "pull": cmd_pull, "add": cmd_add, "set": cmd_set,
                     "edit": cmd_edit, "restore": cmd_restore, "rm": cmd_rm,
                     "unlink": cmd_unlink, "mv": cmd_mv, "source": cmd_source,
-                    "diff": cmd_diff, "difftool": cmd_difftool,
+                    "diff": cmd_diff, "difftool": cmd_difftool, "versions": cmd_versions,
                     "hook": cmd_hook}[args.cmd](ctx, repo, args)
     except FsError as e:
         error(str(e))
