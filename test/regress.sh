@@ -3508,9 +3508,10 @@ git remote add other "$TURL/nowhere29/app.git" && git config branch.main.remote 
 check "relative URL: the remote of the current branch" \
   "$(git filesync pull --all 2>&1 | grep -c "^Cloning .*/nowhere29/up29.git ")" "1"
 git config --unset branch.main.remote
+# (the mapped directory as the platform writes it: C:\... on Windows)
 check "source map: a relative URL is mapped resolved" \
-  "$(git filesync source map ../up29.git "$T/r29a/up") $(git config "filesync.$TURL/r29a/up29.git.localpath")" \
-  "[local] $TURL/r29a/up29.git -> $T/r29a/up $T/r29a/up"
+  "$(git filesync source map ../up29.git "$T/r29a/up" | grep -c "^\[local\] $TURL/r29a/up29.git -> ") $(git config "filesync.$TURL/r29a/up29.git.localpath" | grep -c "r29a.up\$")" \
+  "1 1"
 # URLs in the registry never have backslashes (a path given the Windows way)
 cd "$T/r29b" && git init -q d29b && cd d29b
 quiet fsd add '..\up' f
