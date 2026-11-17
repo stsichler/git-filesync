@@ -3593,8 +3593,8 @@ check "versions: an entry without source is an error, the rest is listed" \
   "$RC $(echo "$OUT" | grep -c '^error: z: incomplete entry') $(echo "$OUT" | grep -c ': branch main of m30$')" "2 1 3"
 git checkout -q .git-filesync
 git filesync source map ../m30 "$T/m30" >/dev/null
-check "versions: from a mapped checkout" \
-  "$(git filesync versions h | head -1)" "h: tag v2 of m30 (local checkout $T/m30)"
+check "versions: from a mapped checkout (its path as the platform writes it)" \
+  "$(git filesync versions h | head -1 | grep -c '^h: tag v2 of m30 (local checkout .*m30)$')" "1"
 
 # =============================================================================
 section "Upstream repositories untouched"
