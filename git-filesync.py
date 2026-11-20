@@ -26,6 +26,7 @@ upstream repository:
         adaptable = true       ; optional: local adaptations allowed
         commit = <upstream commit of the last sync>
         blob = <blob id of the upstream file at that commit>
+        synced-tag = v1.2      ; the tag the last sync went through, if any
     [dir "third_party/lib"]    ; a directory: the files of an upstream one
         source = owner/lib
         path = lib             ; upstream directory (/: the root)
@@ -78,7 +79,9 @@ Basic commands:
                                 adaptable is modified
 
     pull PATH... | --all        sync to the upstream version of the files and
-                                stage them, like `git merge --squash`; the
+                                stage them, like `git merge --squash`; says
+                                per file from and to which version (its tag,
+                                else commit) and the commits between; the
                                 proposed message lists the upstream commits
                                 since the last sync per file; adaptations
                                 are merged (conflicts: resolve, then git
@@ -364,7 +367,7 @@ from dataclasses import dataclass, field, replace as dc_replace
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.25.0"
+__version__ = "0.26.0"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -1278,16 +1281,21 @@ class Source:
         return self._memo[key]
 
     def count(self, old, new, *paths):
-        key = ("count", old, new, paths)
-        if key not in self._memo:
-            self._memo[key] = int(out(self.git(["rev-list", "--count", f"{old}..{new}", "--"]
-                                               + [lit(p) for p in paths])))
-        return self._memo[key]
+        """The commits in old..new on paths (as git log counts them)."""
+        return len(self._log(f"{old}..{new}", paths))
 
     def log(self, rng, *paths):
-        return out(self.git(["log", "--reverse", "--no-show-signature", "--format=- %s (%h, %cs)",
-                             rng, "--"]
-                            + [lit(p) for p in paths]))
+        """'- subject (1a2b3c4, 2026-10-28)' per commit in rng on paths, oldest first."""
+        return "\n".join(self._log(rng, paths))
+
+    def _log(self, rng, paths):
+        """(one git call for count and log - pull counts, then its message lists)"""
+        key = ("log", rng, paths)
+        if key not in self._memo:
+            self._memo[key] = out(self.git(
+                ["log", "--reverse", "--no-show-signature", "--format=- %s (%h, %cs)", rng, "--"]
+                + [lit(p) for p in paths])).splitlines()
+        return self._memo[key]
 
     def follow(self, old, tip, path):
         """What became of path, which exists at old but not at tip:
@@ -3038,6 +3046,7 @@ class FileState:
     violation: bool = False   # modified, but not adaptable
     once: Optional[str] = None  # pull --commit/-b/--tag: what is synced to, once
     target: Optional[str] = None    # ... and its revision
+    once_tag: Optional[str] = None  # ... and the tag it goes through (see sync_tag)
     members: list = field(default_factory=list)   # a [dir]: FileStates of its files, at
                                                   # the base and new upstream (DirState)
     base_members = property(lambda self: [m for m in self.members if not m.unsynced])
@@ -3067,6 +3076,47 @@ def synced_label(st):
     """The synced version, as shown: its commit (abbreviated), or the blob
     if the commit isn't known upstream."""
     return st.src.short(st.old) if st.has_old else st.old_blob[:8]
+
+
+def sync_tag(src, ref):
+    """The tag a sync from src (of the entry's ref) goes through, written to
+    synced-tag: the pinned tag, or the newest one matching a pattern; None
+    for a branch."""
+    if ref[0] != "tag":
+        return None
+    return src.tag_names[0] if src.tag_names else ref[1]
+
+
+def new_tag(st):
+    """The tag pull syncs st through (see sync_tag): pull --tag's once."""
+    return st.once_tag if st.once else sync_tag(st.src, st.link.ref)
+
+
+def old_version(st):
+    """The synced version, as pull shows it: the tag it went through
+    (synced-tag) if that tag still gives the base, else its commit."""
+    tag = st.link.v.get("synced-tag")
+    if tag and st.has_old:
+        commit = st.src.resolve(f"refs/tags/{tag}")
+        if commit and st.src.last_change(commit, st.link.path or ".") == st.old:
+            return tag
+    return synced_label(st)
+
+
+def version_change(old, new):
+    """'v1 -> v2' - or one of them, if they are the same."""
+    return new if old == new else f"{old} -> {new}"
+
+
+def pull_change(st, new):
+    """'v1 -> v2, 3 commits' - what pull syncs st from and to (new: as
+    shown), with the upstream commits between, as status counts them
+    (none for a sync once to another revision, or a diverged history)."""
+    change = version_change(old_version(st), new)
+    if st.once or not st.has_old or st.diverged:
+        return change
+    n = commits_behind(st) if st.behind_args else commits_since(st)
+    return change + (f", {plural(n, 'commit')}{' back' if st.behind_args else ''}" if n else "")
 
 
 def commits_since(st):
@@ -4171,15 +4221,16 @@ def check_target_args(args):
 
 def target_rev(ctx, link, args):
     """--commit / -b / --tag (pull, diff --upstream): the upstream revision
-    to sync to once - that revision, the head of that branch, or the tag.
-    The link keeps its own branch or tag."""
+    to sync to once - that revision, the head of that branch, or the tag -
+    and the tag it goes through (see sync_tag). The link keeps its own
+    branch or tag."""
     if args.commit:
-        return args.commit        # resolved in the link's upstream (commit_target)
+        return args.commit, None  # resolved in the link's upstream (commit_target)
     ref = ("tag", args.tag) if args.tag else ("branch", args.branch)
     # a tag pattern: the newest matching tag on the source's branch
     line = link.source.get("branch") if args.tag and is_tag_pattern(args.tag) else None
     src = ctx.source(link.url, ref, link.name, line)
-    return src.tip()
+    return src.tip(), sync_tag(src, ref)
 
 
 def once_text(args):
@@ -4246,6 +4297,8 @@ def pull_one(repo, reg, st, args):
 
     content, merged, conflicts = sync_content(repo, st, new, new_blob, path,
                                               local_mod and st.adaptable and not discard)
+    tag = new_tag(st)
+    change = pull_change(st, tag or src.short(new))
 
     if args.dry_run:
         lost = args.overwrite and local_changes(st) and loses(repo, st, content, args)
@@ -4256,8 +4309,7 @@ def pull_one(repo, reg, st, args):
             ([paint(f"{conflicts} merge conflict(s)", "boldred") if conflicts else
               "adaptations merged cleanly"] if merged else [])
         verb = "restore" if new_blob == st.old_blob and (discard or dropped) else "sync"
-        print(f"{st.rel}: would {verb} to {link.name}@{src.short(new)}"
-              + (f" ({'; '.join(notes)})" if notes else ""))
+        print(f"{st.rel}: would {verb} ({'; '.join([change] + notes)})")
         if conflicts:
             rel = path_arg(repo, st.rel)
             print(f"hint: compare the adaptations ('git filesync diff {rel}') with the "
@@ -4269,12 +4321,14 @@ def pull_one(repo, reg, st, args):
         link.set("path", path)
     link.set("commit", new)
     link.set("blob", new_blob)
+    link.set("synced-tag", tag)
     if args.overwrite and local_changes(st):   # kept by the caller (see save_discarded)
         st.discards = ([st.rel], [st.rel])
     if conflicts:
-        print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')}")
+        print(f"{st.rel}: {paint(f'{conflicts} merge conflict(s)', 'boldred')} ({change})")
     else:
-        print(f"{st.rel}: {synced_text(args)}" + (" (adaptations merged)" if merged else ""))
+        print(f"{st.rel}: {synced_text(args)} ({change}"
+              + ("; adaptations merged" if merged else "") + ")")
     # the file itself is written (and staged) with the others: write_synced;
     # the message goes from what is committed (R3)
     return build_message(message_view(st), src, new, new_blob,
@@ -4442,10 +4496,10 @@ def first_sync(repo, st, args, new, path):
         warn(f"{st.rel}: {w}")
     note = "existing file replaced" if replace else "fetched" if content is not None else \
         "existing file, with local adaptations" if modified else "existing file"
+    tag = new_tag(st)
     if args.dry_run:
         once = f"; {st.once} once" if st.once else ""
-        print(f"{st.rel}: would sync to {link.name}@{src.short(commit)} "
-              f"(not synced yet; {note}{once})")
+        print(f"{st.rel}: would sync ({tag or src.short(commit)}; not synced yet; {note}{once})")
         return None
     if content is not None:
         content = repo.normalize(content, st.rel)
@@ -4453,7 +4507,8 @@ def first_sync(repo, st, args, new, path):
     st.discards = ([st.rel] if replace else [], [st.rel] if args.overwrite else [])
     link.set("commit", commit)
     link.set("blob", blob)
-    print(f"{st.rel}: {synced_text(args)} (first sync; {note})")
+    link.set("synced-tag", tag)
+    print(f"{st.rel}: {synced_text(args)} ({tag or src.short(commit)}; first sync; {note})")
     plan = [Planned(st.rel, path, commit, blob, content, modified, replace)]
     return build_add_message(plan, src, link.name, link.url, link.ref, path, False,
                              st.adaptable, commit), 0, content
@@ -4523,11 +4578,10 @@ def first_sync_dir(repo, st, args):
                       "them (the differences become local adaptations)")
     for w in st.warnings:
         warn(f"{st.rel}: {w}")
-    note = plan_note(plan)
+    note, tag = plan_note(plan), new_tag(st)
     if args.dry_run:
         once = f"; {st.once} once" if st.once else ""
-        print(f"{name}: would sync to {dlink.name}@{src.short(commit)} "
-              f"(not synced yet; {note}{once})")
+        print(f"{name}: would sync ({tag or src.short(commit)}; not synced yet; {note}{once})")
         return None
     # kept by the caller, for all files at once (see save_discarded)
     st.discards = ([p.rel for p in plan if p.replaced],
@@ -4535,7 +4589,8 @@ def first_sync_dir(repo, st, args):
     dlink.drop_synced()
     dlink.set("commit", commit)
     dlink.set("tree", tree)
-    print(f"{name}: {synced_text(args)} (first sync; {note})")
+    dlink.set("synced-tag", tag)
+    print(f"{name}: {synced_text(args)} ({tag or src.short(commit)}; first sync; {note})")
     msg = build_add_message(plan, src, dlink.name, dlink.url, dlink.ref, dlink.path, False,
                             st.adaptable, commit, entry=name)
     contents = {p.rel: None if p.content is None else repo.normalize(p.content, p.rel)
@@ -4718,14 +4773,16 @@ def pull_dir(repo, reg, st, args):
               for w in ("new", "deleted", "renamed", "changed")]
     summary = ", ".join(f"{n} {w}" for n, w in counts if n) or "no file changed"
     merged = [r for r, v in notes.items() if "merge" in v]
+    tag = new_tag(st)
+    change = pull_change(st, tag or src.short(st.new))
     if args.dry_run:
         lost = any(loses(repo, m, contents.get(m.rel), args)
                    for m in dirty)          # with --overwrite only (see above)
-        what = ([f"{st.once} once"] if st.once else []) + [summary] + \
+        what = [change] + ([f"{st.once} once"] if st.once else []) + [summary] + \
             (["discarding uncommitted changes"] if lost else []) + \
             ([paint(f"merge conflicts in {len(conflicted)}", "boldred") if conflicted else
               "adaptations merged cleanly"] if merged else [])
-        print(f"{name}: would sync to {dlink.name}@{src.short(st.new)} ({'; '.join(what)})")
+        print(f"{name}: would sync ({'; '.join(what)})")
         if conflicted:
             print(f"hint: compare the adaptations ('git filesync diff {arg}') with the "
                   f"upstream changes ('git filesync diff --upstream{target_opts(args)} {arg}')")
@@ -4740,12 +4797,13 @@ def pull_dir(repo, reg, st, args):
     # the directory at that commit (upstream may have changed only files
     # the patterns leave out since: the synced commit stays)
     dlink.set("tree", src.tree_at(st.new, dlink.path) or st.new_tree)
+    dlink.set("synced-tag", tag)
     if conflicted:
         status = paint("merge conflicts in " + few(
             repo, [m for m in st.members if m.rel in conflicted]), "boldred")
     else:
         status = synced_text(args)
-    print(f"{name}: {status} ({summary}"
+    print(f"{name}: {status} ({change}; {summary}"
           + (", adaptations merged" if merged and not conflicted else "") + ")")
     msg = None
     if not args.worktree:         # (no proposed message with -W)
@@ -4786,7 +4844,7 @@ def build_dir_message(st, src, notes):
     return "\n".join(lines) + "\n"
 
 
-SYNC_KEYS = ("commit", "blob", "tree", "synced-include", "synced-exclude")
+SYNC_KEYS = ("commit", "blob", "tree", "synced-tag", "synced-include", "synced-exclude")
 
 
 def sync_keys(values):
@@ -4971,11 +5029,11 @@ def cmd_pull(ctx, repo, args):
         done += 1
         if args.verbose:
             at = "not synced yet" if st.unsynced else \
-                f"synced at {synced_label(st)}"
+                f"synced at {old_version(st)}"
             print(paint(f"{st.rel}: {link_text(st)}, {at}", "dim"))
         try:
             if once:
-                st.target, st.once = target_rev(ctx, link, args), once_text(args)
+                (st.target, st.once_tag), st.once = target_rev(ctx, link, args), once_text(args)
             before = link.commit
             if link.is_dir:
                 result = pull_dir(repo, reg, st, args)
@@ -5051,7 +5109,7 @@ def diff_pairs(ctx, repo, args):
         else:
             try:
                 if args.upstream and once:
-                    retarget_dir(repo, st, target_rev(ctx, link, args))
+                    retarget_dir(repo, st, target_rev(ctx, link, args)[0])
             except FsError as e:
                 error(f"{st.rel}: {e}")
                 rc = EXIT_ERROR
@@ -5080,7 +5138,7 @@ def diff_pairs(ctx, repo, args):
             if once and not member:
                 try:
                     st.new, st.new_blob, st.new_path = commit_target(
-                        st, target_rev(ctx, link, args))
+                        st, target_rev(ctx, link, args)[0])
                 except FsError as e:
                     error(f"{st.rel}: {e}")
                     rc = EXIT_ERROR
@@ -5448,6 +5506,8 @@ def cmd_add(ctx, repo, args):
             link.set(k, v)
         if args.tag:
             link.set("tag", args.tag)
+        if not args.commit:
+            link.set("synced-tag", sync_tag(src, ref))
         if args.adaptable:
             link.set("adaptable", "true")
         contents[p.rel] = None if p.content is None else repo.normalize(p.content, p.rel)
@@ -5526,7 +5586,8 @@ def add_dir(repo, reg, args, src, where, ref, line, at, rel, path, target):
         reg.remove_file(rel, keep_source=named)
     values["source"] = name = named or reg.add_source(url, branch)
     entry = DirLink(reg, rel)
-    for k, v in list(values.items()) + [("commit", commit), ("tree", tree)]:
+    for k, v in list(values.items()) + [("commit", commit), ("tree", tree), (
+            "synced-tag", None if args.commit else sync_tag(src, ref))]:
         entry.set(k, v)
     write_synced(repo, {p.rel: None if p.content is None else repo.normalize(p.content, p.rel)
                         for p in plan}, stage=not args.worktree)
@@ -5650,6 +5711,7 @@ def restore_values(ctx, entry, lower):
         values["commit"] = translated(ctx.source(entry.url, entry.ref, entry.name, entry.line),
                                       entry, lower.commit, lower.blob,
                                       entry.path) or values["commit"]
+        values["synced-tag"] = None          # (the tags of another upstream)
     return values
 
 
@@ -6113,12 +6175,14 @@ def keep_base(src, link, source=None):
         moves = not ei.unsynced and (source is None or ei.name == source)
         commit = translated(src, link, ei.commit, ei.blob, ei.path) if moves else None
         reg.staged_own[("dir" if link.is_dir else "file", link.rel)] = \
-            {"commit": commit} if commit else {}
+            {"commit": commit, **({} if commit == ei.commit else {"synced-tag": None})} \
+            if commit else {}
     if link.unsynced:
         return
     commit = translated(src, link, link.commit, link.blob, link.path)
-    if commit and commit != link.commit:
+    if commit and commit != link.commit:     # in another upstream: its tags are others
         link.set("commit", commit)
+        link.set("synced-tag", None)
 
 
 def shows(args, given, changes, what, everything):
@@ -6291,6 +6355,7 @@ def set_path(ctx, repo, lk, path, would):
         lk.set("path", path or "/")
         lk.set("commit", None)
         lk.set("tree", None)
+        lk.set("synced-tag", None)
         lk.drop_synced()
         return True
     if lk.unsynced:               # no base yet: pull takes the path's version
@@ -6305,6 +6370,7 @@ def set_path(ctx, repo, lk, path, would):
     for k, v in (("path", path), ("commit", commit), ("blob", blob)):
         if v:
             lk.set(k, v)
+    lk.set("synced-tag", sync_tag(src, lk.ref) if commit else None)
     return True
 
 

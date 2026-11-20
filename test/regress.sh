@@ -56,6 +56,7 @@
 #   28. pull --overwrite of uncommitted changes; pull -W; registry changes not staged
 #   29. Relative URLs: resolved like in .gitmodules
 #   30. versions: the upstream versions an entry can take
+#   31. pull names the versions: synced-tag
 #
 # Adding a test: put it into the section it belongs to, or add a new
 # section at the end that starts with 'section' and 'cd "$T"'.
@@ -183,6 +184,7 @@ lines() { wc -l | tr -d ' '; }
 
 # oneline - join the lines of stdin with blanks ("a\nb\n" -> "a b ")
 oneline() { tr '\n' ' '; }
+hx() { sed -E 's/[0-9a-f]{7,40}/X/g'; }      # commit ids -> X
 
 # changes - only the changed lines of a diff on stdin, joined ("-b +B ")
 changes() { grep -E '^[-+][^-+]' | oneline; }
@@ -952,7 +954,7 @@ check "add --overwrite: message" \
 check "pull: no editor, exit 0" "$(GIT_EDITOR=false rc git filesync pull src/foo.c)" "0"
 git reset -q --hard "$BASE"
 check "pull: each file synced, then once staged (like add)" \
-  "$(git filesync pull src/foo.c | grep '^src/foo.c: ' | oneline)" "src/foo.c: synced src/foo.c: staged. Commit with: "
+  "$(git filesync pull src/foo.c | grep '^src/foo.c: ' | hx | oneline)" "src/foo.c: synced (X -> X, 2 commits) src/foo.c: staged. Commit with: "
 check "pull: staged" "$(git status --porcelain | oneline)" "M  .git-filesync M  src/foo.c "
 git reset -q --hard "$BASE"
 
@@ -1575,8 +1577,8 @@ section "16. Dry runs: pull --dry-run, add / unlink / mv -n"
 
 (cd ../co10 && sedi 's/^g$/G-up/' lib/final.c && git commit -qam "change G" && git push -q origin main)
 BEFORE=$(git rev-parse HEAD)
-check "pull --dry-run: reports" "$(git filesync pull --dry-run r.c)" \
-  "r.c: would sync to $SRC10@$(git -C ../co10 rev-parse --short HEAD) (adaptations merged cleanly)"
+check "pull --dry-run: reports" "$(git filesync pull --dry-run r.c | hx)" \
+  "r.c: would sync (X -> X, 1 commit; adaptations merged cleanly)"
 check "pull --dry-run: nothing changed" "$(git rev-parse HEAD) $(git status --porcelain)" "$BEFORE "
 sedi 's/^g$/g-local/' r.c
 git commit -qam "local g"
@@ -1787,7 +1789,7 @@ check "pull --tag: missing tag" "$(rc pullc --tag v9 a.c)" "2"
 check "missing tag: nothing changed" "$(git status --porcelain)" ""
 check "--commit and --tag exclude each other" "$(rc git filesync pull --commit v1.0 --tag v1.0 a.c)" "2"
 check "-b and --tag exclude each other" "$(rc git filesync pull -b main --tag v1.0 a.c)" "2"
-check "pull --dry-run --tag" "$(git filesync pull --dry-run --tag v1.0 a.c | grep -c '^a.c: would sync to .*(tag v1.0 once')" "1"
+check "pull --dry-run --tag" "$(git filesync pull --dry-run --tag v1.0 a.c | grep -c '^a.c: would sync (.* -> v1.0; tag v1.0 once')" "1"
 check "pull --dry-run --tag: nothing changed" "$(git status --porcelain)" ""
 
 # diff/difftool --upstream with --commit / -b / --tag: what that pull would
@@ -1840,7 +1842,7 @@ check "pattern: pull follows it" "$(oneline < a.c)" "1 2 3-up 4 5-rc "
 check "pattern: message names the tag" "$(git log -1 --format=%B | grep -c "^Upstream: $URL12 (v1.3:a.c)$")" "1"
 check "pattern: registry unchanged" "$(git status --porcelain) $(git config -f .git-filesync file.a.c.tag)" " v1.*"
 check "pull --tag with a pattern, once" \
-  "$(git filesync pull --dry-run --tag 'v1.0*' a.c | grep -c "would sync to $SRCP@$(git -C ../co12 rev-parse --short v1.0) (tag v1.0\* once")" "1"
+  "$(git filesync pull --dry-run --tag 'v1.0*' a.c | grep -c "would sync (.* -> v1\.0; tag v1\.0\* once")" "1"
 # with a mapped checkout: its tags, unpushed ones included
 (cd ../co12 && git tag v1.4 main)
 git filesync source map "$URL12" "$T/co12" >/dev/null
@@ -2349,7 +2351,7 @@ check "new link: diff --upstream shows the whole file" \
 check "new link: restore refuses" "$(git filesync restore sub/b.c 2>&1)" \
   "error: sub/b.c: not synced yet, nothing to restore - sync it with 'git filesync pull sub/b.c'"
 check "new link: pull -n" "$(git filesync pull -n sub/b.c)" \
-  "sub/b.c: would sync to $SRC24@$(git -C m24 rev-parse --short HEAD 2>/dev/null || git -C ../m24 rev-parse --short HEAD) (not synced yet; fetched)"
+  "sub/b.c: would sync ($(git -C m24 rev-parse --short HEAD 2>/dev/null || git -C ../m24 rev-parse --short HEAD); not synced yet; fetched)"
 check "new link: pull --all syncs, refuses the differing one(s)" \
   "$(rc git filesync pull --all)-$(cat sub/b.c)-$(git diff --cached --name-only | oneline)" "2-b-.git-filesync sub/b.c "
 check "new link: differing file refused like add" \
@@ -2366,7 +2368,7 @@ check "new links synced" "$(git filesync status -s | oneline)" "    c.c  (adapte
 check "new links synced: exit code" "$(rc git filesync status --exit-code)" "0"
 check "new link: pull -n --commit names it once" \
   "$(printf '[file "f.c"]\n\tsource = %s\n\tpath = lib/b.c\n' "$SRC24" >> .git-filesync
-     git filesync pull -n --commit "$(git -C ../m24 rev-parse HEAD)" f.c | grep -c '(not synced yet; fetched; commit [0-9a-f]* once)$')" "1"
+     git filesync pull -n --commit "$(git -C ../m24 rev-parse HEAD)" f.c | grep -c '; not synced yet; fetched; commit [0-9a-f]* once)$')" "1"
 git checkout -q -- .git-filesync
 # the first sync is add: uncommitted changes of the file are staged with it
 printf '[file "g.c"]\n\tsource = %s\n\tpath = lib/b.c\n\tadaptable\n' "$SRC24" >> .git-filesync
@@ -2378,7 +2380,7 @@ git reset -q --hard
 printf '[file "h.c"]\n\tsource = %s\n\tpath = lib/b.c\n' "$SRC24" >> .git-filesync
 echo b > h.c && git add .git-filesync
 check "new link: --overwrite of the same content replaces nothing" \
-  "$(git filesync pull --overwrite h.c 2>&1 | oneline)" "h.c: synced (first sync; existing file) h.c: staged. Commit with:     git commit (it offers the proposed commit message; a copy stays in .git/FILESYNC_MSG) "
+  "$(git filesync pull --overwrite h.c 2>&1 | hx | oneline)" "h.c: synced (X; first sync; existing file) h.c: staged. Commit with:     git commit (it offers the proposed commit message; a copy stays in .git/FILESYNC_MSG) "
 git reset -q --hard && rm -f h.c
 
 
@@ -2690,10 +2692,10 @@ check "pending: long" "$(git filesync status | grep pending: | sed 's/[[:space:]
   "vendor/  (1 commit; files: 1 new, 1 deleted, 1 changed)"
 check "diff --upstream: new, deleted and changed files" \
   "$(git filesync diff --upstream -- --name-status | oneline)" "D${TAB}vendor/README M${TAB}vendor/a.c A${TAB}vendor/sub/new.c "
-check "pull -n" "$(git filesync pull -n vendor | sed 's/@[0-9a-f]*/@X/')" \
-  "vendor/: would sync to nowhere/m27@X (1 new, 1 deleted, 1 changed)"
+check "pull -n" "$(git filesync pull -n vendor | hx)" \
+  "vendor/: would sync (X -> X, 1 commit; 1 new, 1 deleted, 1 changed)"
 OUT=$(git filesync pull vendor)
-check "pull: summary" "$(echo "$OUT" | head -1)" "vendor/: synced (1 new, 1 deleted, 1 changed)"
+check "pull: summary" "$(echo "$OUT" | head -1 | hx)" "vendor/: synced (X -> X, 1 commit; 1 new, 1 deleted, 1 changed)"
 check "pull: staged" "$(git diff --cached --name-status | oneline)" \
   "M${TAB}.git-filesync D${TAB}vendor/README M${TAB}vendor/a.c A${TAB}vendor/sub/new.c "
 check "pull: own files stay" "$(cat vendor/own.txt vendor/build/out.o | oneline)" "mine o "
@@ -2712,7 +2714,7 @@ check "not adaptable: pull refused" "$(git filesync pull vendor 2>&1 | grep -c '
 
 # adaptable: merged; a file adapted here and deleted upstream is refused
 quiet git filesync set --adaptable vendor && git commit -qm adaptable
-check "adaptable: pull merges" "$(pullc vendor | head -1)" "vendor/: synced (1 changed)"
+check "adaptable: pull merges" "$(pullc vendor | head -1 | hx)" "vendor/: synced (X -> X, 1 commit; 1 changed)"
 check "adaptable: adaptation kept" "$(tail -1 vendor/a.c)" "local"
 (cd ../m27 && git rm -q lib/a.c && git commit -qm "no a.c")
 check "adapted, deleted upstream: refused" \
@@ -2739,7 +2741,7 @@ quiet git filesync restore -SW vendor && git commit -qm restored
 check "restore DIR: back to the base, own files stay" "$(st)-$(cat vendor/own.txt)" "P-mine"
 rm vendor/sub/b.c                     # deleted, not staged
 (cd ../m27 && git rm -q lib/sub/b.c && git commit -qm "no b.c")
-check "missing, deleted upstream too: pull goes" "$(pullc vendor | head -1)" "vendor/: synced (1 deleted, 1 changed)"
+check "missing, deleted upstream too: pull goes" "$(pullc vendor | head -1 | hx)" "vendor/: synced (X -> X, 2 commits; 1 deleted, 1 changed)"
 check "missing, deleted upstream too: no longer the entry's" "$(st)" ""
 check "missing, deleted upstream too: the deletion committed" "$(git ls-files vendor/sub/b.c; git status --porcelain vendor/sub)" ""
 
@@ -2803,14 +2805,14 @@ git reset -q && git checkout -q .git-filesync
 git rm -q vendor/sub/c.c && git commit -qm "no c.c"
 quiet git filesync set --exclude t/ --exclude c.c vendor
 git commit -qm "exclude c.c"
-check "deselected and gone here: pull" "$(pullc vendor | head -1)" "vendor/: synced (1 deleted)"
+check "deselected and gone here: pull" "$(pullc vendor | head -1 | hx)" "vendor/: synced (X; 1 deleted)"
 check "deselected and gone here: synced-* gone, up to date" "$(grep -c synced- .git-filesync)-$(st)" "0-"
 quiet git filesync set --exclude t/ vendor && git commit -qm "c.c again"
 quiet pullc vendor
 check "selected again: back" "$(cat vendor/sub/c.c)" "c"
 quiet git filesync set --no-exclude vendor
 git commit -qm "with tests"
-check "pull: newly selected files fetched" "$(pullc vendor | head -1)" "vendor/: synced (1 new)"
+check "pull: newly selected files fetched" "$(pullc vendor | head -1 | hx)" "vendor/: synced (X; 1 new)"
 check "pull: the old patterns gone, the file there" \
   "$(git config -f .git-filesync dir.vendor.synced-exclude || echo none) $(head -1 vendor/t/x_test.c)" "none t"
 check "pull: message" "$(git log -1 --format=%B | grep -c '^- vendor/t/x_test.c (now selected by the patterns)$')" "1"
@@ -2831,7 +2833,7 @@ git commit -qm "no tests"
 check "pull: an adapted file no longer selected is refused" "$(git filesync pull vendor 2>&1 | \
   grep -c '^error: vendor/t/x_test.c: no longer selected by the patterns, but adapted here - use ')" "1"
 check "pull --force: kept as a file of this repository" \
-  "$(pullc --force vendor | head -1)-$(tail -1 vendor/t/x_test.c)-$(st)" "vendor/: synced (1 deleted)-mine-"
+  "$(pullc --force vendor | head -1 | hx)-$(tail -1 vendor/t/x_test.c)-$(st)" "vendor/: synced (X; 1 deleted)-mine-"
 check "pull --force: the old patterns gone" "$(git config -f .git-filesync dir.vendor.synced-exclude || echo none)" "none"
 check "set --list: all entries" "$(git filesync set --list | cut -d' ' -f4)" "vendor/"
 
@@ -2846,7 +2848,7 @@ addc file:///nowhere/m27q.git q -p lib --exclude 'a b' --exclude "it's" --exclud
 check "quoted patterns: add" "$(git ls-files q | oneline)" "q/keep "
 (cd ../m27q && for f in 'a b' "it's" '#x' keep; do echo 2 > "lib/$f"; done && git commit -qam two)
 check "quoted patterns: pull, as read from the registry" \
-  "$(pullc q | head -1) $(git ls-files q | oneline)$(cat q/keep)" "q/: synced (1 changed) q/keep 2"
+  "$(pullc q | head -1 | hx) $(git ls-files q | oneline)$(cat q/keep)" "q/: synced (X -> X, 1 commit; 1 changed) q/keep 2"
 cd "$T/s27"
 
 # mv: the whole directory, own files too; unlink and rm
@@ -2867,7 +2869,7 @@ printf '[source "m27"]\n\turl = %s\n\tbranch = main\n[dir "up"]\n\tsource = m27\
   $URL27 > .git-filesync
 git add .git-filesync && git commit -qm reg
 check "new [dir]: status" "$(st)" "N"
-check "new [dir]: pull --all" "$(git filesync pull --all | head -1)" "up/: synced (first sync; 1 file: 1 fetched)"
+check "new [dir]: pull --all" "$(git filesync pull --all | head -1 | hx)" "up/: synced (X; first sync; 1 file: 1 fetched)"
 check "new [dir]: the root" "$(git ls-files up | oneline)" "up/top.txt "
 git commit -q --no-edit
 # the upstream directory deleted: pull refuses, like for a file
@@ -2926,7 +2928,7 @@ OUT=$(git filesync pull -W f 2>&1); RC=$?
 check "pull -W: written, the entry too, nothing staged" \
   "$RC-$(cat f)-$(git status --porcelain | oneline)$(git config --blob :.git-filesync file.f.blob | cut -c1-7)" \
   "0-b- M .git-filesync  M f $(git -C ../m28 rev-parse --short=7 HEAD~1:f)"
-check "pull -W: output" "$OUT" "f: updated in the working tree only"
+check "pull -W: output" "$(echo "$OUT" | hx)" "f: updated in the working tree only (X -> X, 1 commit)"
 check "pull -W: not pending, not staged" "$(st f)" "  U"
 check "pull -W: status says so" \
   "$(git filesync status | grep -A3 '^Changes not staged for commit:' | grep -cE "^${TAB}updated:[[:space:]]+f  \([0-9a-f]+ -> [0-9a-f]+\)\$")" "1"
@@ -3074,7 +3076,7 @@ git checkout -q -- d/one
 git config -f .git-filesync file.h.source "$(git config -f .git-filesync file.f.source)"
 git config -f .git-filesync file.h.path f && cp f h
 check "pull -W, new link already upstream's: only the entry" \
-  "$(git filesync pull -W h 2>&1) $(git status --porcelain h)" "h: updated in the working tree only (first sync; existing file) ?? h"
+  "$(git filesync pull -W h 2>&1 | hx) $(git status --porcelain h)" "h: updated in the working tree only (X; first sync; existing file) ?? h"
 git checkout -q -- .git-filesync && rm -f h
 
 
@@ -3157,8 +3159,8 @@ git reset -q --hard && rm -f d/four
 (cd ../m28 && echo 5 > d/five && git add d/five && git commit -qm five)
 quiet git filesync pull d
 check "pull -W --commit back: the summary says what it did" \
-  "$(git filesync pull -W --commit "$(git -C ../m28 rev-parse HEAD~)" d 2>&1)" \
-  "d/: updated in the working tree only (1 deleted)"
+  "$(git filesync pull -W --commit "$(git -C ../m28 rev-parse HEAD~)" d 2>&1 | hx)" \
+  "d/: updated in the working tree only (X -> X; 1 deleted)"
 check "rm [dir]: the file only the staged entry has counts too" \
   "$(rc git filesync rm d) $(git filesync rm -n -f d)" "2 would remove d/ (4 files)"
 git reset -q --hard
@@ -3350,8 +3352,8 @@ git reset -q --hard && rm -f w2
 (cd ../m28 && echo 1h > d/one && echo 6 > d/six && git add d && git commit -qm "d six")
 quiet git filesync pull -W d
 check "pull [dir] after pull -W: the summary counts the files staged" \
-  "$(git filesync pull d 2>&1 | head -1) | $(git status --porcelain d | grep -c '^A ') $(git status --porcelain d | grep -c '^M ')" \
-  "d/: synced (3 new, 1 changed) | 3 1"
+  "$(git filesync pull d 2>&1 | head -1 | hx) | $(git status --porcelain d | grep -c '^A ') $(git status --porcelain d | grep -c '^M ')" \
+  "d/: synced (X; 3 new, 1 changed) | 3 1"
 git reset -q --hard && rm -f d/six
 # restore of some files of a [dir] synced otherwise below: refused
 (cd ../m28 && echo 7 > d/seven && git add d/seven && git commit -qm seven)
@@ -3620,6 +3622,45 @@ git checkout -q .git-filesync
 git filesync source map ../m30 "$T/m30" >/dev/null
 check "versions: from a mapped checkout (its path as the platform writes it)" \
   "$(git filesync versions h | head -1 | grep -c '^h: tag v2 of m30 (local checkout .*m30)$')" "1"
+
+# =============================================================================
+section "31. pull names the versions: synced-tag"
+# =============================================================================
+
+cd "$T" && git init -q m31 && cd m31
+echo 1 > f && git add f && git commit -qm "change 1"
+echo r > other && git add other && git commit -qm release && git tag v1
+cd "$T" && git init -q s31 && cd s31
+quiet git filesync add ../m31 f
+quiet git filesync add ../m31 g -p f --tag 'v*'
+quiet git filesync add ../m31 h -p f --tag v1
+git commit -qm links
+tags31() { for e in f g h; do printf '%s=%s ' $e "$(git config -f .git-filesync file.$e.synced-tag)"; done; }
+check "add: the tag synced through recorded" "$(tags31)" "f= g=v1 h=v1 "
+C1=$(git -C ../m31 rev-parse --short HEAD~)
+(cd ../m31 && echo 2 > f && git commit -qam "change 2" && echo 3 > f && git commit -qam "change 3" \
+  && git tag v2)
+C3=$(git -C ../m31 rev-parse --short HEAD)
+check "pull -n: from and to, with the commits between" "$(git filesync pull -n f g)" \
+  "f: would sync ($C1 -> $C3, 2 commits)
+g: would sync (v1 -> v2, 2 commits)"
+check "pull -v: synced at the tag" "$(git filesync pull -v g | head -2)" \
+  "g: from m31:f (tag v* = v2 on main), synced at v1
+g: synced (v1 -> v2, 2 commits)"
+quiet git filesync pull f && git commit -qm pulled
+check "pull: synced-tag follows; a branch entry has none" "$(tags31)" "f= g=v2 h=v1 "
+check "pull --tag once: the tag recorded" "$(git filesync pull f --tag v1 | head -1) | $(tags31)" \
+  "f: synced ($C3 -> v1) | f=v1 g=v2 h=v1 "
+check "... back to the branch: synced-tag goes" "$(git filesync pull f | head -1) | $(tags31)" \
+  "f: synced (v1 -> $C3, 2 commits) | f= g=v2 h=v1 "
+git reset -q --hard
+quiet git filesync set g --tag v1
+check "an older tag: the commits back" "$(git filesync pull g | head -1)" "g: synced (v2 -> v1, 2 commits back)"
+git reset -q --hard
+git config -f .git-filesync file.g.synced-tag v1 && git commit -qam "a wrong synced-tag"
+check "a synced-tag that doesn't give the base: its commit shown" \
+  "$(git filesync pull -v g | head -1)" "g: from m31:f (tag v* = v2 on main), synced at $C3"
+git reset -q --hard HEAD~
 
 # =============================================================================
 section "Upstream repositories untouched"

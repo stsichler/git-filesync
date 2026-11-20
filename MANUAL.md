@@ -63,6 +63,7 @@ committed like any other file, in git-config format:
 	tag = v1.2.0           # optional: pinned to a tag instead of following the branch
 	commit = …
 	blob = …
+	synced-tag = v1.2.0    # the tag the last sync went through
 [dir "third_party/lib"]
 	source = owner/lib
 	path = lib             # upstream directory ('/': the root)
@@ -89,7 +90,9 @@ committed like any other file, in git-config format:
 - `commit` and `blob` are maintained by the tool: `blob` is the synced
   version of the upstream file, `commit` the upstream commit that last
   changed it (not the branch tip at sync time). So commits that don't touch
-  the file don't matter, pushed or not.
+  the file don't matter, pushed or not. `synced-tag` (also maintained) is
+  the tag the last sync went through – pinned, matching a pattern, or
+  `pull --tag` –, which `pull` shows instead of the commit.
 - `pull --all` takes only **plain updates**: the recorded commit is in the
   history of the branch head or tag to sync to. A branch that went back
   (`older`), a diverged history (another branch, a rebased commit) or a
@@ -390,6 +393,14 @@ of the branch there). Something given that doesn't exist upstream is an
 error; settings that merely don't fit together, like a tag that isn't on
 the branch, give a warning.
 
+Per file it says from and to which version – the tag, else the commit –
+with the upstream commits between, as `status` counts them:
+
+```
+src/foo.c: synced (3f2a9c1 -> a1b2c3d, 2 commits)
+cfg/x.yml: synced (v1.2.0 -> v1.3.0, 4 commits)
+```
+
 The synced files and their entries are staged, like after `git merge
 --squash`; nothing is committed. `pull` proposes **one commit** for all of
 them – for several files with a section each and a subject like
@@ -436,8 +447,8 @@ other files are still synced. In scripts and CI: `git filesync pull --all
 | `--overwrite` | take the upstream version as it is, discarding adaptations and uncommitted changes ([kept](#discarded-content)), also if the file is up to date |
 | `-W`, `--worktree` | file and entry in the working tree only, nothing staged – see [Trying a newer version](#trying-a-newer-version) |
 | `--force` | [linked directory](#linked-directories): keep a file of this repository that `pull` would delete (adapted, deleted upstream) or replace (new upstream) |
-| `-n`, `--dry-run` | change nothing; report per file what would happen: the version, whether adaptations merge cleanly (or how many conflicts), a rename upstream, every refusal |
-| `-v`, `--verbose` | before each file, where it comes from and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` |
+| `-n`, `--dry-run` | change nothing; report per file what would happen: from and to which version, whether adaptations merge cleanly (or how many conflicts), a rename upstream, every refusal |
+| `-v`, `--verbose` | before each file, where it comes from and the version synced so far: `src/foo.c: from owner/lib:lib/foo.c (main), synced at 3f2a9c1` (or its tag) |
 
 - **Adaptations** are merged with the new upstream version (3-way merge,
   base: the last synced version). On conflicts the file gets the usual

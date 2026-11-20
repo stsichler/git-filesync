@@ -23,7 +23,7 @@ Upstream changes to sync:
 	pending:    src/foo.c  (2 commits)
 
 $ git filesync pull src/foo.c
-src/foo.c: synced
+src/foo.c: synced (3f2a9c1 -> a1b2c3d, 2 commits)
 src/foo.c: staged. Commit with:
     git commit
 (it offers the proposed commit message; a copy stays in .git/FILESYNC_MSG)
