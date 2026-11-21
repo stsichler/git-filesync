@@ -92,7 +92,8 @@ committed like any other file, in git-config format:
   changed it (not the branch tip at sync time). So commits that don't touch
   the file don't matter, pushed or not. `synced-tag` (also maintained) is
   the tag the last sync went through – pinned, matching a pattern, or
-  `pull --tag` –, which `pull` shows instead of the commit.
+  `pull --tag` –, which `pull` shows instead of the commit (as information,
+  also if the tag moved since).
 - `pull --all` takes only **plain updates**: the recorded commit is in the
   history of the branch head or tag to sync to. A branch that went back
   (`older`), a diverged history (another branch, a rebased commit) or a

@@ -3658,9 +3658,22 @@ quiet git filesync set g --tag v1
 check "an older tag: the commits back" "$(git filesync pull g | head -1)" "g: synced (v2 -> v1, 2 commits back)"
 git reset -q --hard
 git config -f .git-filesync file.g.synced-tag v1 && git commit -qam "a wrong synced-tag"
-check "a synced-tag that doesn't give the base: its commit shown" \
-  "$(git filesync pull -v g | head -1)" "g: from m31:f (tag v* = v2 on main), synced at $C3"
+check "a synced-tag that doesn't give the base (moved): still shown" \
+  "$(git filesync pull -v g | head -1)" "g: from m31:f (tag v* = v2 on main), synced at v1"
 git reset -q --hard HEAD~
+
+# log.follow (the user's config) changes no count: a.c deleted, then b.c
+# renamed to it - following would count b.c's commits too
+(cd ../m31 && echo a > a.c && seq 1 20 > b.c && git add . && git commit -qm "a and b")
+quiet git filesync add ../m31 a.c && git commit -qm "link a.c"
+(cd ../m31 && echo 21 >> b.c && git commit -qam b1 && echo 22 >> b.c && git commit -qam b2 \
+  && git rm -q a.c && git commit -qm "drop a" && git mv b.c a.c && git commit -qm "b becomes a")
+git config --global log.follow true
+check "log.follow: status counts as rev-list" "$(git filesync status a.c | grep -c '(2 commits)')" "1"
+check "log.follow: pull and its message too" \
+  "$(git filesync pull a.c | head -1 | hx) $(grep -c '^- ' .git/FILESYNC_MSG)" "a.c: synced (X -> X, 2 commits) 2"
+git config --global --unset log.follow
+git reset -q --hard
 
 # =============================================================================
 section "Upstream repositories untouched"

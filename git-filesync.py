@@ -367,7 +367,7 @@ from dataclasses import dataclass, field, replace as dc_replace
 from typing import Optional
 from pathlib import Path, PureWindowsPath
 
-__version__ = "0.26.0"
+__version__ = "0.26.1"
 REGISTRY = ".git-filesync"
 EXIT_OK, EXIT_PENDING, EXIT_ERROR = 0, 1, 2
 EXIT_PIPE = 141           # output pipe closed early (128 + SIGPIPE, like git)
@@ -1289,11 +1289,13 @@ class Source:
         return "\n".join(self._log(rng, paths))
 
     def _log(self, rng, paths):
-        """(one git call for count and log - pull counts, then its message lists)"""
+        """(one git call for count and log - pull counts, then its message
+        lists; never following renames, whatever log.follow says: as
+        rev-list and git's history simplification count)"""
         key = ("log", rng, paths)
         if key not in self._memo:
             self._memo[key] = out(self.git(
-                ["log", "--reverse", "--no-show-signature", "--format=- %s (%h, %cs)", rng, "--"]
+                ["-c", "log.follow=false", "log", "--reverse", "--no-show-signature", "--format=- %s (%h, %cs)", rng, "--"]
                 + [lit(p) for p in paths])).splitlines()
         return self._memo[key]
 
@@ -3094,13 +3096,9 @@ def new_tag(st):
 
 def old_version(st):
     """The synced version, as pull shows it: the tag it went through
-    (synced-tag) if that tag still gives the base, else its commit."""
-    tag = st.link.v.get("synced-tag")
-    if tag and st.has_old:
-        commit = st.src.resolve(f"refs/tags/{tag}")
-        if commit and st.src.last_change(commit, st.link.path or ".") == st.old:
-            return tag
-    return synced_label(st)
+    (synced-tag; for information only, also if the tag moved since), else
+    its commit."""
+    return st.link.v.get("synced-tag") or synced_label(st)
 
 
 def version_change(old, new):
@@ -4125,7 +4123,7 @@ def merge3(ours, base, theirs, labels):
 def upstream_line(src, url, ref, path):
     """'Upstream: URL (main:lib/foo.c)' in a proposed commit message; for a
     tag pattern the tag it matched."""
-    return f"Upstream: {url} ({src.tag_names[0] if src.tag_names else ref[1]}:{path})"
+    return f"Upstream: {url} ({sync_tag(src, ref) or ref[1]}:{path})"
 
 
 def build_message(st, src, new, new_blob, old_path, path, merged, conflicts, discarded=False):
